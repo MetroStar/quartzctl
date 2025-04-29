@@ -1,0 +1,16 @@
+{
+  "$schema": "https://raw.githubusercontent.com/jetify-com/devbox/0.10.7/.schema/devbox.schema.json",
+  "packages": [
+    "go-task@latest",
+    "gomarkdoc@latest",
+    "gosec@latest",
+    "goreleaser@latest",
+    "tparse@latest",
+    "golangci-lint@latest",
+    "errcheck@latest",
+    "gitleaks@latest",
+    "pre-commit@latest",
+    "go@1.24.1",
+    "upx@latest"
+  ]
+}

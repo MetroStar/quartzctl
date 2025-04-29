@@ -1,0 +1,5 @@
+vars:
+  my_name:
+    stage:
+      name: root
+      output: name

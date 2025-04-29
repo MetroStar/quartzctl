@@ -1,0 +1,13 @@
+name: mytest
+
+providers:
+  cloud: local
+
+dns:
+  zone: example.com
+
+test:
+  enabled: true
+
+stage_paths:
+- testdata/stages

@@ -1,0 +1,33 @@
+# Exclude build artifacts and binaries
+bin/
+*.exe
+*.test
+*.prof
+
+# Exclude vendored dependencies (if using go modules)
+vendor/
+
+# Exclude git metadata
+.git/
+
+# Exclude IDE and editor files
+.idea/
+.vscode/
+*.swp
+
+# Exclude temporary files
+tmp/
+
+# Exclude Docker-related files (optional, but good practice)
+Dockerfile
+.dockerignore
+
+coverage.txt
+.task/
+.envrc
+.devbox/
+devbox.*
+.github/
+.goreleaser.yaml
+Taskfile.yml
+*.md

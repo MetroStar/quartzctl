@@ -1,0 +1,75 @@
+version: '3'
+
+# waiting for a future release to enable taskfile defined
+# env vars to override the shell environment
+# TODO: remove all the inline CGO_ENABLED=0 statements when done
+# https://github.com/go-task/task/issues/1038
+# env:
+#   CGO_ENABLED: '0'
+
+vars:
+  # https://github.com/go-task/task/issues/892#issuecomment-1278217185
+  SHELL: '{{if eq .OS "Windows_NT"}}pwsh -c{{end}}'
+  BUILD_VERSION:
+    sh: git describe --always --long --dirty 2>/dev/null || echo "0.0.1"
+  BUILD_DATE:
+    sh: date +%s
+
+tasks:
+  build-all:
+    cmds:
+      - BUILD_VERSION={{ .BUILD_VERSION }} BUILD_DATE={{ .BUILD_DATE }} goreleaser build --clean --auto-snapshot
+
+  build:
+    cmds:
+      - mkdir -p ./bin
+      - BUILD_VERSION={{ .BUILD_VERSION }} BUILD_DATE={{ .BUILD_DATE }} goreleaser build --clean --snapshot --single-target --output ./bin/quartz
+      - ./bin/quartz --version
+
+  compress:
+    deps: [build]
+    cmds:
+      - upx --best --lzma ./bin/quartz
+
+  release:
+    cmds:
+      - BUILD_VERSION={{ .BUILD_VERSION }} BUILD_DATE={{ .BUILD_DATE }} goreleaser release --clean
+
+  install:
+    deps: [build]
+    cmds:
+      - '{{.SHELL}} cp ./bin/quartz* ~/go/bin'
+
+  test:
+    sources:
+      - '**/*.go'
+      - 'go.mod'
+      - 'go.sum'
+    cmds:
+      - CGO_ENABLED=0 go test -json -cover ./... {{ if .RUN }}-run {{ .RUN }}{{ end }} | tparse -all
+
+  lint:
+    cmds:
+      - golangci-lint run -v
+
+  docs:
+    cmds:
+      - gomarkdoc -o README.md -e ./...
+
+  tar:
+    deps: [build-all]
+    dir: dist
+    cmds:
+      - rm -f ../quartz.tar.gz || true
+      - rm -rf pkg || true
+      - for:
+          matrix:
+            OS: ["linux", "darwin"]
+            ARCH: ["amd64", "arm64"]
+        cmd: mkdir -p pkg/{{.ITEM.OS}}/{{.ITEM.ARCH}} && cp quartz_{{.ITEM.OS}}_{{.ITEM.ARCH}}_*/quartz* pkg/{{.ITEM.OS}}/{{.ITEM.ARCH}}/
+      - cd pkg && tar -czvf ../../quartz.tar.gz *
+
+  deps-update:
+    cmds:
+      - go get -u ./...
+      - go mod tidy

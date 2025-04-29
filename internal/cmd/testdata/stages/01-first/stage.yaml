@@ -1,0 +1,9 @@
+override_vars: true
+
+checks:
+  pre_install:
+    before:
+    - apply
+    state:
+    - key: "key1"
+      value: "true"

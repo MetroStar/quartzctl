@@ -1,0 +1,45 @@
+description: test stage with explicit dependencies for automatic ordering
+dependencies:
+- second
+- third
+auto_destroy: false
+vars:
+  root_name:
+    stage:
+      name: root
+      output: name
+  second_name:
+    stage:
+      name: second
+      output: name
+  third_name:
+    env: PWD
+checks:
+  pre_install:
+    before:
+    - apply
+    kubernetes:
+    - name: public-cert
+      namespace: istio-system
+      kind: Certificate
+      state: Ready
+    - name: istio
+      namespace: bigbang
+      kind: HelmRelease
+      state: Ready
+    - name: keycloak
+      namespace: bigbang
+      kind: HelmRelease
+      state: Ready
+    http:
+    - url: https://www.google.com
+      status_codes:
+      - 200
+  post_install:
+    after:
+    - apply
+    http:
+    - url: https://www.google.com
+      status_codes:
+      - 200
+      verify: false
