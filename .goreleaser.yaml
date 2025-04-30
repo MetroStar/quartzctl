@@ -13,7 +13,7 @@ builds:
     main: ./cmd/quartz/main.go
     binary: quartz
     ldflags:
-      - -s -w -X main.version={{ .Env.BUILD_VERSION }} -X main.buildDate={{ .Env.BUILD_DATE }}
+      - -s -w -X main.version={{ .Version }} -X main.buildDate={{ .Timestamp }}
     env:
       - CGO_ENABLED=0
     goos:
@@ -48,6 +48,7 @@ sboms:
   - artifacts: archive
 
 changelog:
+  use: github
   sort: asc
   filters:
     exclude:

@@ -10,20 +10,21 @@ version: '3'
 vars:
   # https://github.com/go-task/task/issues/892#issuecomment-1278217185
   SHELL: '{{if eq .OS "Windows_NT"}}pwsh -c{{end}}'
-  BUILD_VERSION:
-    sh: git describe --always --long --dirty 2>/dev/null || echo "0.0.1"
-  BUILD_DATE:
-    sh: date +%s
 
 tasks:
+  setup:
+    cmds:
+      - pre-commit install
+      - pre-commit install --hook-type commit-msg
+
   build-all:
     cmds:
-      - BUILD_VERSION={{ .BUILD_VERSION }} BUILD_DATE={{ .BUILD_DATE }} goreleaser build --clean --auto-snapshot
+      - goreleaser build --clean --auto-snapshot
 
   build:
     cmds:
       - mkdir -p ./bin
-      - BUILD_VERSION={{ .BUILD_VERSION }} BUILD_DATE={{ .BUILD_DATE }} goreleaser build --clean --snapshot --single-target --output ./bin/quartz
+      - goreleaser build --clean --snapshot --single-target --output ./bin/quartz
       - ./bin/quartz --version
 
   compress:
@@ -33,7 +34,7 @@ tasks:
 
   release:
     cmds:
-      - BUILD_VERSION={{ .BUILD_VERSION }} BUILD_DATE={{ .BUILD_DATE }} goreleaser release --clean
+      - goreleaser release --clean
 
   install:
     deps: [build]
@@ -47,6 +48,10 @@ tasks:
       - 'go.sum'
     cmds:
       - CGO_ENABLED=0 go test -json -cover ./... {{ if .RUN }}-run {{ .RUN }}{{ end }} | tparse -all
+
+  test-ci:
+    cmds:
+      - CGO_ENABLED=0 go test -json -cover ./...
 
   lint:
     cmds:
