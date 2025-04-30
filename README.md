@@ -1,6 +1,6 @@
 # quartzctl
 
-[![Build Status](https://github.com/MetroStar/quartzctl/actions/workflows/ci.yml/badge.svg)](https://github.com/MetroStar/quartzctl/actions/workflows/ci.yml)
+[![Build Status](https://github.com/MetroStar/quartzctl/actions/workflows/pr.yaml/badge.svg)](https://github.com/MetroStar/quartzctl/actions/workflows/pr.yaml)
 [![codecov](https://codecov.io/gh/MetroStar/quartzctl/graph/badge.svg?token=7RIVIXH7A3)](https://codecov.io/gh/MetroStar/quartzctl)
 [![GoDoc](https://godoc.org/github.com/MetroStar/quartzctl?status.svg)](https://godoc.org/github.com/MetroStar/quartzctl)
 [![Go Report Card](https://goreportcard.com/badge/github.com/MetroStar/quartzctl)](https://goreportcard.com/report/github.com/MetroStar/quartzctl)
