@@ -9,6 +9,14 @@
 
 > **quartzctl** is an open-source CLI tool designed to automate the installation and maintenance of multi-stage Terraform projects. It leverages a single YAML configuration to define stages, their dependencies, input variables, environment variables, and health checks, streamlining complex infrastructure deployments.
 
+## Problem Statement
+
+Modern DevSecOps teams require a consistent, secure, and automated way to stand up and manage Kubernetes-based development platforms. These environments must be reproducible, resilient, and customizable, with minimal manual intervention. Teams often struggle with complex infrastructure provisioning, initial platform bootstrapping, and the orchestration of supporting tools like Keycloak, ArgoCD, Jenkins, SonarQube, and Istio—especially in secure environments. Ensuring uninterrupted, health-aware deployments while adhering to GitOps practices further complicates the process.
+
+## About Quartz
+
+Quartz is an open-source CLI tool designed to automate the full lifecycle of Kubernetes-based platform infrastructure with a focus on DevSecOps enablement. Originally inspired by U.S. government platform initiatives like PlatformOne and BigBang, Quartz simplifies the provisioning, configuration, and teardown of secure, GitOps-enabled environments. It leverages a top-level YAML configuration to drive installations, source secrets, and orchestrate tools like FluxCD or ArgoCD. With robust health checks, retry logic, and zero-interaction execution, Quartz empowers teams to build reproducible, production-like platforms in development or staging deployments.
+
 ---
 
 ## 📖 Table of Contents
