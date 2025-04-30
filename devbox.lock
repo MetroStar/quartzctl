@@ -50,8 +50,8 @@
       }
     },
     "github:NixOS/nixpkgs/nixpkgs-unstable": {
-      "last_modified": "2025-04-23T03:04:08Z",
-      "resolved": "github:NixOS/nixpkgs/507b63021ada5fee621b6ca371c4fca9ca46f52c?lastModified=1745377448&narHash=sha256-jhZDfXVKdD7TSEGgzFJQvEEZ2K65UMiqW5YJ2aIqxMA%3D"
+      "last_modified": "2025-04-29T13:50:59Z",
+      "resolved": "github:NixOS/nixpkgs/fbc071e5c11e23fba50037de37268e3d8a1858eb?lastModified=1745934659&narHash=sha256-odZyAgjybOV1ha%2FlEoVL5HVOJw1YqFDfem9u3t%2BVB2o%3D"
     },
     "gitleaks@latest": {
       "last_modified": "2025-04-12T15:53:49Z",
@@ -242,54 +242,6 @@
             }
           ],
           "store_path": "/nix/store/7dqkhrpn6i52ninr0cndfwhxnkn3lj03-golangci-lint-2.0.2"
-        }
-      }
-    },
-    "gomarkdoc@latest": {
-      "last_modified": "2025-03-11T17:52:14Z",
-      "resolved": "github:NixOS/nixpkgs/0d534853a55b5d02a4ababa1d71921ce8f0aee4c#gomarkdoc",
-      "source": "devbox-search",
-      "version": "1.1.0",
-      "systems": {
-        "aarch64-darwin": {
-          "outputs": [
-            {
-              "name": "out",
-              "path": "/nix/store/sr3y8jn7vdgn1b457xcj8smq0hwsfzkj-gomarkdoc-1.1.0",
-              "default": true
-            }
-          ],
-          "store_path": "/nix/store/sr3y8jn7vdgn1b457xcj8smq0hwsfzkj-gomarkdoc-1.1.0"
-        },
-        "aarch64-linux": {
-          "outputs": [
-            {
-              "name": "out",
-              "path": "/nix/store/6x44hrijknmfvgzm6sfhwbn8ym27f9aj-gomarkdoc-1.1.0",
-              "default": true
-            }
-          ],
-          "store_path": "/nix/store/6x44hrijknmfvgzm6sfhwbn8ym27f9aj-gomarkdoc-1.1.0"
-        },
-        "x86_64-darwin": {
-          "outputs": [
-            {
-              "name": "out",
-              "path": "/nix/store/6j4d098ljlk8i2ngxxn3hdc39lmnk6xv-gomarkdoc-1.1.0",
-              "default": true
-            }
-          ],
-          "store_path": "/nix/store/6j4d098ljlk8i2ngxxn3hdc39lmnk6xv-gomarkdoc-1.1.0"
-        },
-        "x86_64-linux": {
-          "outputs": [
-            {
-              "name": "out",
-              "path": "/nix/store/mbl8355f0ynlqfsbkj7g9z39c3fp7aw4-gomarkdoc-1.1.0",
-              "default": true
-            }
-          ],
-          "store_path": "/nix/store/mbl8355f0ynlqfsbkj7g9z39c3fp7aw4-gomarkdoc-1.1.0"
         }
       }
     },

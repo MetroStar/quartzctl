@@ -52,10 +52,6 @@ tasks:
     cmds:
       - golangci-lint run -v
 
-  docs:
-    cmds:
-      - gomarkdoc -o README.md -e ./...
-
   tar:
     deps: [build-all]
     dir: dist
