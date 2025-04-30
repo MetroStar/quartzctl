@@ -29,12 +29,12 @@ require (
 	github.com/tidwall/gjson v1.18.0
 	github.com/urfave/cli/v3 v3.0.0-beta1
 	go.uber.org/fx v1.23.0
-	go.uber.org/zap v1.26.0
+	go.uber.org/zap v1.27.0
 	k8s.io/api v0.32.2
 	k8s.io/apimachinery v0.32.2
 	k8s.io/cli-runtime v0.32.2
 	k8s.io/client-go v0.32.2
-	kmodules.xyz/client-go v0.30.46
+	kmodules.xyz/client-go v0.32.2
 	sigs.k8s.io/aws-iam-authenticator v0.6.30
 	sigs.k8s.io/yaml v1.4.0
 )
