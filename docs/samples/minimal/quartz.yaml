@@ -1,0 +1,75 @@
+name: mequartzenv
+
+tmp: ./out
+
+dns:
+  zone: quartz.example.com
+
+github:
+  organization: mygithuborg
+  webhooks:
+    build: false
+
+aws:
+  region: us-east-1
+
+administrators: []
+
+# default ./terraform/stages
+stage_paths:
+  - stages
+
+# will be autodetected from the stage_paths directories according to convention, only need to specify if you want to override the autodetected values
+# <optional prefix for the stage ordering>-<stage name>
+# stages/01-infrastructure
+# stages/02-charts
+stages: {}
+
+gitops:
+  # repo where the core infrastructure is stored
+  core:
+    repo: myquartzrepo
+    branch: main
+  # assumes we're using a different repo for the app manifests
+  apps:
+    repo: mygitopsrepo
+    # branch: main
+
+applications:
+  myapp:
+    branch: main
+    repo: myfrontendapp
+    type: ui
+    base_url: 'https://myapp-$env.$domain'
+    callback_urls:
+    - path: '/signin'
+
+auth:
+  # users and groups to configure in the system IDP, usually keycloak
+  users:
+    testuser1:
+      first_name: Test
+      last_name: User
+      email_address: test.user1@example.com
+      password:
+        temporary: false
+      groups:
+      - Users
+      test: true
+  groups:
+    Users:
+      roles: # default group name if empty
+        - User
+    Admins:
+      roles:
+        - Admin
+
+# configure logging
+log:
+  console:
+    level: error
+  file:
+    enabled: true
+    level: debug
+  terraform:
+    enabled: true

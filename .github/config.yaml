@@ -1,0 +1,17 @@
+blank_issues_enabled: false
+contact_links:
+  - name: ❓ Questions & Support
+    url: https://github.com/MetroStar/quartzctl/discussions
+    about: Please ask general questions in Discussions, not in GitHub Issues.
+  - name: 🔐 Security Issues
+    url: https://github.com/MetroStar/quartzctl/security/policy
+    about: Please report security vulnerabilities via our responsible disclosure process.
+issue_templates:
+  - name: 🐛 Bug Report
+    description: File a bug report for an unexpected or broken behavior.
+    labels: [bug, needs-triage]
+    file: .github/ISSUE_TEMPLATE/bug_report.md
+  - name: 💡 Feature Request
+    description: Suggest a new idea or enhancement.
+    labels: [enhancement, needs-triage]
+    file: .github/ISSUE_TEMPLATE/feature_request.md

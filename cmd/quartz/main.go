@@ -6,7 +6,7 @@ import (
 )
 
 var (
-	version   = "0.1.0"
+	version   = "dev"
 	buildDate = ""
 )
 

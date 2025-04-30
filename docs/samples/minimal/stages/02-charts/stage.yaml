@@ -1,0 +1,40 @@
+description: second sample stage
+dependencies:
+- infrastructure
+providers:
+  kubernetes: true
+vars:
+  chart_path:
+    config: chart.path
+  github_username:
+    secret: github.username
+  github_token:
+    secret: github.token
+  vpc_id:
+    stage:
+      name: host
+      output: vpc.vpc_id
+  hostname:
+    env: HOSTNAME
+checks:
+  post_install:
+    after:
+    - apply
+    kubernetes:
+    - name: quartz
+      namespace: quartz
+      kind: HelmRelease
+      state: Ready
+      timeout: 300
+    http:
+    - path: /healthz
+      app: myapp
+      content:
+        json:
+          key: status
+        value: UP
+destroy:
+  # don't bother destroying these under normal circumstances, the cluster is probable coming down anyway
+  exclude:
+  - helm_release.this
+  - kubernetes_namespace.this
