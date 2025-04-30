@@ -51,7 +51,7 @@ tasks:
 
   test-ci:
     cmds:
-      - CGO_ENABLED=0 go test -json -cover ./...
+      - CGO_ENABLED=0 go test -json -cover -coverprofile=coverage.out ./...
 
   lint:
     cmds:
