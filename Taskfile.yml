@@ -12,6 +12,11 @@ vars:
   SHELL: '{{if eq .OS "Windows_NT"}}pwsh -c{{end}}'
 
 tasks:
+  setup:
+    cmds:
+      - pre-commit install
+      - pre-commit install --hook-type commit-msg
+
   build-all:
     cmds:
       - goreleaser build --clean --auto-snapshot

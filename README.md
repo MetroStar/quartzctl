@@ -78,7 +78,7 @@ quartz [command] [flags]
 - `render`: Write internal configuration to yaml (For development use).
 - `restart`: Restart target resource(s).
 - `terraform`: Terraform subcommands for configured stages.
-  - `apply`: Run `terraform apply` for a stage (`--stage <name>` required). 
+  - `apply`: Run `terraform apply` for a stage (`--stage <name>` required).
   - `destroy`: Run `terraform destroy` for a stage (`--stage <name>` required).
   - `format`: Run `terraform fmt` for a stage (`--stage <name>` required).
   - `format-all`: Run `terraform fmt` for all stages.
@@ -194,8 +194,8 @@ checks:
 destroy:
   include:
   - "module.to_destroy"
-  exclude: 
-  - "module.skip_destroy"  
+  exclude:
+  - "module.skip_destroy"
 
 ```
 
