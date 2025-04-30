@@ -4,7 +4,7 @@
 [![codecov](https://codecov.io/gh/MetroStar/quartzctl/graph/badge.svg?token=7RIVIXH7A3)](https://codecov.io/gh/MetroStar/quartzctl)
 [![GoDoc](https://godoc.org/github.com/MetroStar/quartzctl?status.svg)](https://godoc.org/github.com/MetroStar/quartzctl)
 [![Go Report Card](https://goreportcard.com/badge/github.com/MetroStar/quartzctl)](https://goreportcard.com/report/github.com/MetroStar/quartzctl)
-[![OpenSSF Scorecard](https://api.securityscorecards.dev/projects/github.com/MetroStar/quartzctl/badge)](https://securityscorecards.dev/viewer/?uri=github.com/MetroStar/quartzctl)
+[![OpenSSF Best Practices](https://www.bestpractices.dev/projects/10503/badge)](https://www.bestpractices.dev/projects/10503)
 [![License](https://img.shields.io/github/license/MetroStar/quartzctl)](LICENSE)
 
 > **quartzctl** is an open-source CLI tool designed to automate the installation and maintenance of multi-stage Terraform projects. It leverages a single YAML configuration to define stages, their dependencies, input variables, environment variables, and health checks, streamlining complex infrastructure deployments.
