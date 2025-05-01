@@ -46,6 +46,23 @@ archives:
 
 sboms:
   - artifacts: archive
+  - id: source
+    artifacts: source
+
+binary_signs:
+  - signature: "${artifact}.sig"
+
+signs:
+  - artifacts: checksum
+    signature: "${artifact}.sig"
+    args:
+      - "--batch"
+      - "-u"
+      - "{{ .Env.GPG_FINGERPRINT }}"
+      - "--output"
+      - "${signature}"
+      - "--detach-sign"
+      - "${artifact}"
 
 changelog:
   use: github
