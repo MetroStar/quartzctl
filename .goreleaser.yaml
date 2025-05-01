@@ -49,9 +49,12 @@ sboms:
   - id: source
     artifacts: source
 
+binary_signs:
+  - signature: "${artifact}.sig"
+
 signs:
   - artifacts: checksum
-    cmd: gpg2
+    signature: "${artifact}.sig"
     args:
       - "--batch"
       - "-u"
