@@ -4,13 +4,8 @@
     "@semantic-release/commit-analyzer",
     "@semantic-release/release-notes-generator",
     [
-      "@semantic-release/changelog", {
-        "changelogFile": "CHANGELOG.md"
-      }
-    ],
-    [
       "@semantic-release/git", {
-        "assets": ["CHANGELOG.md", "go.mod", "go.sum"],
+        "assets": [],
         "message": "chore(release): ${nextRelease.version} [skip ci]\n\n${nextRelease.notes}"
       }
     ],
