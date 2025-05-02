@@ -33,7 +33,6 @@ type CliDependencies struct {
 //   - *cli.Command: The root CLI command for the Quartz tool.
 func NewCliCommand(deps CliDependencies, p AppServiceParams) *cli.Command {
 	cli.VersionPrinter = func(ccmd *cli.Command) {
-		configureLogger(ccmd)
 		Version(p.Version, p.BuildDate)
 	}
 
