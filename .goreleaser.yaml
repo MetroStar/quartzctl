@@ -43,11 +43,10 @@ sboms:
     artifacts: source
 
 binary_signs:
-  - signature: "${artifact}.sig"
+  - {}
 
 signs:
-  - artifacts: checksum
-    signature: "${artifact}.sig"
+  - artifacts: all
     args:
       - "--batch"
       - "-u"
