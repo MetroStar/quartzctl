@@ -57,19 +57,6 @@ tasks:
     cmds:
       - golangci-lint run -v
 
-  tar:
-    deps: [build-all]
-    dir: dist
-    cmds:
-      - rm -f ../quartz.tar.gz || true
-      - rm -rf pkg || true
-      - for:
-          matrix:
-            OS: ["linux", "darwin"]
-            ARCH: ["amd64", "arm64"]
-        cmd: mkdir -p pkg/{{.ITEM.OS}}/{{.ITEM.ARCH}} && cp quartz_{{.ITEM.OS}}_{{.ITEM.ARCH}}_*/quartz* pkg/{{.ITEM.OS}}/{{.ITEM.ARCH}}/
-      - cd pkg && tar -czvf ../../quartz.tar.gz *
-
   deps-update:
     cmds:
       - go get -u ./...
