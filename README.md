@@ -19,6 +19,8 @@ Quartz is an open-source CLI tool designed to automate the full lifecycle of Kub
 
 ## Roadmap
 
+- `add` subcommands to streamline adding new stages
+- `generate` subcommands to create new projects with all required boilerplate (quartz.yaml, stages), options to enable/disable common items like eks, core helm charts, etc...
 - Plugin framework to expand beyond AWS and Terraform
 - Unwind tightly coupled assumptions of the platform (ex: separate repositories vs monorepo, use of gitops, core application stack, etc...)
 
