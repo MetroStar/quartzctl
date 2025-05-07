@@ -9,6 +9,23 @@ repos:
     rev: v8.25.1
     hooks:
       - id: gitleaks
+  - repo: https://github.com/Lucas-C/pre-commit-hooks
+    rev: v1.5.5
+    hooks:
+      - id: insert-license
+        files: \.go$
+        args:
+          - --license-filepath
+          - docs/license_header.txt
+          - --comment-style
+          - //
+          - --use-current-year
+      - id: insert-license
+        files: Taskfile.yml
+        args:
+          - --license-filepath
+          - docs/license_header.txt
+          - --use-current-year
   - repo: https://github.com/pre-commit/pre-commit-hooks
     rev: v5.0.0
     hooks:
