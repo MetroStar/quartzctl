@@ -1,7 +1,6 @@
 module github.com/MetroStar/quartzctl
 
 go 1.24.1
-
 require (
 	github.com/aws/aws-sdk-go v1.55.7
 	github.com/aws/aws-sdk-go-v2 v1.36.3
@@ -35,7 +34,7 @@ require (
 	k8s.io/cli-runtime v0.33.0
 	k8s.io/client-go v0.33.0
 	kmodules.xyz/client-go v0.32.3
-	sigs.k8s.io/aws-iam-authenticator v0.6.31
+	sigs.k8s.io/aws-iam-authenticator v0.7.2
 	sigs.k8s.io/yaml v1.4.0
 )
 
@@ -149,7 +148,6 @@ require (
 	golang.org/x/term v0.31.0 // indirect
 	golang.org/x/text v0.24.0 // indirect
 	golang.org/x/time v0.11.0 // indirect
-	golang.org/x/tools v0.30.0 // indirect
 	google.golang.org/protobuf v1.36.6 // indirect
 	gopkg.in/evanphx/json-patch.v4 v4.12.0 // indirect
 	gopkg.in/inf.v0 v0.9.1 // indirect
