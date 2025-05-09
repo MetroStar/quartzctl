@@ -9,7 +9,7 @@
     "errcheck@latest",
     "gitleaks@latest",
     "pre-commit@latest",
-    "go@1.24.1",
+    "go@1.24.2",
     "upx@latest"
   ]
 }
