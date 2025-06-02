@@ -422,8 +422,8 @@ k8s.io/kube-openapi v0.0.0-20250318190949-c8a335a9a2ff h1:/usPimJzUKKu+m+TE36gUy
 k8s.io/kube-openapi v0.0.0-20250318190949-c8a335a9a2ff/go.mod h1:5jIi+8yX4RIb8wk3XwBo5Pq2ccx4FP10ohkbSKCZoK8=
 k8s.io/utils v0.0.0-20250502105355-0f33e8f1c979 h1:jgJW5IePPXLGB8e/1wvd0Ich9QE97RvvF3a8J3fP/Lg=
 k8s.io/utils v0.0.0-20250502105355-0f33e8f1c979/go.mod h1:OLgZIPagt7ERELqWJFomSt595RzquPNLL48iOWgYOg0=
-kmodules.xyz/client-go v0.32.3 h1:dO6VQkmii2rhyoXy+VVjiXMyJGcPne9b2rZ7fSrzDbQ=
-kmodules.xyz/client-go v0.32.3/go.mod h1:ZwLnc7UqEXUNSe43n/SnER6+7YAQCu38L2te6YefoHU=
+kmodules.xyz/client-go v0.32.6 h1:/V9T0aLfe38PsyF+5FeU5QaC3GcqD8hQoWSCZw/uOpI=
+kmodules.xyz/client-go v0.32.6/go.mod h1:ZwLnc7UqEXUNSe43n/SnER6+7YAQCu38L2te6YefoHU=
 sigs.k8s.io/aws-iam-authenticator v0.7.2 h1:BYmT3H+sLuDBdygRVAvOlUNdqaAkqVfygJH7rg+BRDQ=
 sigs.k8s.io/aws-iam-authenticator v0.7.2/go.mod h1:AD93ajyKnJXVrahgZ+4BuvITpjeS8S7KgP8A++jvsiI=
 sigs.k8s.io/json v0.0.0-20241014173422-cfa47c3a1cc8 h1:gBQPwqORJ8d8/YNZWEjoZs7npUVDpVXUUOFfW6CgAqE=
