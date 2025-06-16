@@ -27,7 +27,7 @@ require (
 	github.com/knadh/koanf/v2 v2.2.0
 	github.com/stretchr/testify v1.10.0
 	github.com/tidwall/gjson v1.18.0
-	github.com/urfave/cli/v3 v3.3.2
+	github.com/urfave/cli/v3 v3.3.8
 	go.uber.org/fx v1.23.0
 	go.uber.org/zap v1.27.0
 	k8s.io/api v0.33.0
