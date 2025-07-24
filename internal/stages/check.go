@@ -16,6 +16,7 @@ package stages
 
 import (
 	"context"
+	"errors"
 	"strings"
 	"sync"
 	"time"
@@ -23,7 +24,6 @@ import (
 	"github.com/MetroStar/quartzctl/internal/config/schema"
 	"github.com/MetroStar/quartzctl/internal/provider"
 	"github.com/MetroStar/quartzctl/internal/util"
-	"k8s.io/apimachinery/pkg/util/errors"
 )
 
 // StageCheck defines the interface for stage checks.
@@ -159,7 +159,7 @@ func RunChecks(ctx context.Context, cfg schema.QuartzConfig, stage string, event
 	}
 
 	if len(errs) > 0 {
-		return res, errors.NewAggregate(errs)
+		return res, errors.Join(errs...)
 	}
 
 	return res, nil
