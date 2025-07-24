@@ -30,10 +30,10 @@ require (
 	github.com/urfave/cli/v3 v3.3.8
 	go.uber.org/fx v1.24.0
 	go.uber.org/zap v1.27.0
-	k8s.io/api v0.33.0
-	k8s.io/apimachinery v0.33.0
-	k8s.io/cli-runtime v0.33.0
-	k8s.io/client-go v0.33.0
+	k8s.io/api v0.33.2
+	k8s.io/apimachinery v0.33.2
+	k8s.io/cli-runtime v0.33.2
+	k8s.io/client-go v0.33.2
 	kmodules.xyz/client-go v0.32.6
 	sigs.k8s.io/aws-iam-authenticator v0.7.2
 	sigs.k8s.io/yaml v1.4.0
