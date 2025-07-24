@@ -17,6 +17,7 @@ package provider
 import (
 	"cmp"
 	"context"
+	"errors"
 	"fmt"
 	"io"
 	"os"
@@ -35,7 +36,6 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"k8s.io/apimachinery/pkg/runtime/schema"
-	kerrors "k8s.io/apimachinery/pkg/util/errors"
 	"k8s.io/cli-runtime/pkg/genericclioptions"
 	"k8s.io/cli-runtime/pkg/printers"
 	"k8s.io/cli-runtime/pkg/resource"
@@ -204,13 +204,37 @@ func (c KubernetesClient) PrintClusterInfo(ctx context.Context) {
 func (c KubernetesClient) PrintClusterAppInfo(ctx context.Context, apps map[string]quartzSchema.ApplicationLookupConfig) {
 	ch := make(chan KubernetesAppConnectionInfo, len(apps))
 
+	tctx, cancel := context.WithTimeout(ctx, 15*time.Second)
+	defer cancel()
+
+	var wg sync.WaitGroup
 	for k, v := range apps {
+		wg.Add(1)
 		app := k
 		opts := v
 		go func() {
-			ch <- c.GetAppConnectionInfo(ctx, app, opts)
+			defer wg.Done()
+			defer func() {
+				if r := recover(); r != nil {
+					ch <- KubernetesAppConnectionInfo{
+						Name:  app,
+						Error: fmt.Errorf("panic: %v", r),
+					}
+				}
+			}()
+
+			select {
+			case ch <- c.GetAppConnectionInfo(tctx, app, opts):
+			case <-tctx.Done():
+				// Context canceled, don't block trying to send
+			}
 		}()
 	}
+
+	go func() {
+		wg.Wait()
+		close(ch)
+	}()
 
 	var rows [][]string
 	hasError := false
@@ -226,7 +250,6 @@ func (c KubernetesClient) PrintClusterAppInfo(ctx context.Context, apps map[stri
 
 		rows = append(rows, []string{i.Name, fmt.Sprintf("https://%s", i.PublicEndpoint), i.AdminUsername, i.AdminPassword})
 	}
-	close(ch)
 
 	headers := []string{"Application", "URL", "Admin User", "Admin Password"}
 	if hasError {
@@ -319,7 +342,7 @@ func (c KubernetesClient) Export(ctx context.Context, cfg quartzSchema.ExportCon
 		res[fmt.Sprintf("%s.%s.yaml", s.Namespace, s.Name)] = y
 	}
 
-	return res, kerrors.NewAggregate(errs)
+	return res, errors.Join(errs...)
 }
 
 // WaitConditionState waits for a resource to reach a specific condition state.
@@ -467,7 +490,7 @@ func (c KubernetesClient) GetAppConnectionInfo(ctx context.Context, name string,
 	}
 
 	if len(errs) > 0 {
-		res.Error = kerrors.NewAggregate(errs)
+		res.Error = errors.Join(errs...)
 	}
 
 	return res

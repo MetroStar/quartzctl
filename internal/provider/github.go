@@ -16,6 +16,7 @@ package provider
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"slices"
 	"strconv"
@@ -26,7 +27,6 @@ import (
 	"github.com/MetroStar/quartzctl/internal/log"
 	"github.com/MetroStar/quartzctl/internal/util"
 	"github.com/google/go-github/v63/github"
-	"k8s.io/apimachinery/pkg/util/errors"
 )
 
 // GithubTokenSource represents a source for GitHub access tokens.
@@ -164,7 +164,7 @@ func (c GithubClient) CheckGithubRepoAccess(ctx context.Context) ([]GithubCheckA
 	}
 
 	if len(errs) > 0 {
-		return res, errors.NewAggregate(errs)
+		return res, errors.Join(errs...)
 	}
 
 	return res, nil

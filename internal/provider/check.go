@@ -138,7 +138,7 @@ func printTable(providerName string, r ProviderCheckResult) {
 
 		// padding up to the number of columns needed
 		dataLen := len(v.Data)
-		for i := 0; i < colsLen-dataLen; i++ {
+		for range colsLen - dataLen {
 			row = append(row, "")
 		}
 
