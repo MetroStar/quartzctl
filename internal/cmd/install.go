@@ -64,13 +64,11 @@ func NewRootCleanCommand(p *CommandParams) RootCommandResult {
 			Usage: "Perform a full cleanup/teardown of the system",
 			Flags: []cli.Flag{
 				&cli.BoolFlag{Name: "refresh", Aliases: []string{"r"}, Usage: "refresh", Value: false},
-				&cli.BoolFlag{Name: "force-cleanup", Aliases: []string{"f"}, Usage: "Force AWS resource cleanup before Terraform destroy (detach ENIs, delete SGs)", Value: false},
 			},
 			Action: func(ctx context.Context, ccmd *cli.Command) error {
 				refresh := ccmd.Bool("refresh")
-				forceCleanup := ccmd.Bool("force-cleanup")
 
-				err := Clean(ctx, refresh, forceCleanup, p)
+				err := Clean(ctx, refresh, p)
 				if err != nil {
 					return err
 				}
@@ -143,12 +141,11 @@ func Install(ctx context.Context, p *CommandParams) error {
 // Parameters:
 //   - ctx: The context for the operation.
 //   - refresh: A boolean indicating whether to refresh the Terraform state before destruction.
-//   - forceCleanup: A boolean indicating whether to run AWS resource cleanup before Terraform destroy.
 //   - p: *CommandParams containing configuration and runtime parameters.
 //
 // Returns:
 //   - error: An error if the cleanup fails, otherwise nil.
-func Clean(ctx context.Context, refresh bool, forceCleanup bool, p *CommandParams) error {
+func Clean(ctx context.Context, refresh bool, p *CommandParams) error {
 	log.Debug("Entering", "command", "clean")
 	defer log.Debug("Completed", "command", "clean")
 
@@ -163,16 +160,15 @@ func Clean(ctx context.Context, refresh bool, forceCleanup bool, p *CommandParam
 	cleanupStart := time.Now()
 	stageTiming := make(map[string]time.Duration)
 
-	// Run force cleanup if requested
-	if forceCleanup {
-		util.Hdr("Force AWS Cleanup")
-		forceStart := time.Now()
-		err = ForceAWSCleanup(ctx, p)
-		stageTiming["force-cleanup"] = time.Since(forceStart)
-		if err != nil {
-			log.Warn("Force cleanup encountered errors (continuing)", "error", err)
-			// Continue despite errors - the goal is to clean up as much as possible
-		}
+	// Run AWS cleanup before Terraform destroy to handle resources that may block deletion
+	// (EC2 instances, ENIs attached to security groups, load balancers, etc.)
+	util.Hdr("AWS Resource Cleanup")
+	forceStart := time.Now()
+	err = ForceAWSCleanup(ctx, p)
+	stageTiming["aws-cleanup"] = time.Since(forceStart)
+	if err != nil {
+		log.Warn("AWS cleanup encountered errors (continuing)", "error", err)
+		// Continue despite errors - the goal is to clean up as much as possible
 	}
 
 	stages := p.Settings().Config.StagesOrdered()
