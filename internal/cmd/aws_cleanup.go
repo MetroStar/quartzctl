@@ -57,16 +57,24 @@ func ForceAWSCleanup(ctx context.Context, p *CommandParams) error {
 	}
 	util.Msgf("  LoadBalancer cleanup completed in %v", time.Since(startTime))
 
-	// Phase 2: Detach and delete ENIs
-	util.Msg("Phase 2: Cleaning up ENIs...")
+	// Phase 2: Terminate EC2 instances (especially Karpenter nodes)
+	util.Msg("Phase 2: Terminating cluster EC2 instances...")
+	ec2Start := time.Now()
+	if err := cleanupEC2Instances(ctx, clusterName, region); err != nil {
+		log.Warn("Error terminating EC2 instances", "error", err)
+	}
+	util.Msgf("  EC2 instance cleanup completed in %v", time.Since(ec2Start))
+
+	// Phase 3: Detach and delete ENIs
+	util.Msg("Phase 3: Cleaning up ENIs...")
 	eniStart := time.Now()
 	if err := cleanupENIs(ctx, clusterName, region); err != nil {
 		log.Warn("Error cleaning up ENIs", "error", err)
 	}
 	util.Msgf("  ENI cleanup completed in %v", time.Since(eniStart))
 
-	// Phase 3: Delete Security Groups
-	util.Msg("Phase 3: Cleaning up Security Groups...")
+	// Phase 4: Delete Security Groups
+	util.Msg("Phase 4: Cleaning up Security Groups...")
 	sgStart := time.Now()
 	if err := cleanupSecurityGroups(ctx, clusterName, region); err != nil {
 		log.Warn("Error cleaning up Security Groups", "error", err)
@@ -145,6 +153,71 @@ func cleanupLoadBalancers(ctx context.Context, clusterName, region string) error
 		if remaining == 0 {
 			util.Msg("  ✅ All LoadBalancers deleted")
 			return nil
+		}
+	}
+
+	return nil
+}
+
+// cleanupEC2Instances terminates all EC2 instances tagged with the cluster name.
+// This is especially important for Karpenter-provisioned nodes that may not be cleaned up
+// when the EKS cluster is destroyed.
+func cleanupEC2Instances(ctx context.Context, clusterName, region string) error {
+	// Find running instances with cluster tag
+	cmd := exec.CommandContext(ctx, "aws", "ec2", "describe-instances",
+		"--region", region,
+		"--filters",
+		fmt.Sprintf("Name=tag:kubernetes.io/cluster/%s,Values=owned,shared", clusterName),
+		"Name=instance-state-name,Values=running,pending,stopping,stopped",
+		"--query", "Reservations[].Instances[].InstanceId",
+		"--output", "text")
+	output, err := cmd.Output()
+	if err != nil {
+		return fmt.Errorf("failed to list EC2 instances: %w", err)
+	}
+
+	instanceIds := strings.Fields(strings.TrimSpace(string(output)))
+	if len(instanceIds) == 0 || (len(instanceIds) == 1 && instanceIds[0] == "") {
+		util.Msg("  No cluster EC2 instances found")
+		return nil
+	}
+
+	util.Msgf("  Found %d EC2 instances to terminate", len(instanceIds))
+
+	// Terminate instances
+	args := []string{"ec2", "terminate-instances", "--region", region, "--instance-ids"}
+	args = append(args, instanceIds...)
+	cmd = exec.CommandContext(ctx, "aws", args...)
+	if out, err := cmd.CombinedOutput(); err != nil {
+		return fmt.Errorf("failed to terminate instances: %w, output: %s", err, string(out))
+	}
+
+	util.Msgf("  Initiated termination of %d instances", len(instanceIds))
+
+	// Wait for instances to terminate (up to 5 minutes)
+	util.Msg("  Waiting for instances to terminate...")
+	for i := 0; i < 30; i++ {
+		time.Sleep(10 * time.Second)
+
+		cmd = exec.CommandContext(ctx, "aws", "ec2", "describe-instances",
+			"--region", region,
+			"--instance-ids", strings.Join(instanceIds, " "),
+			"--query", "Reservations[].Instances[?State.Name!='terminated'].InstanceId",
+			"--output", "text")
+		output, err := cmd.Output()
+		if err != nil {
+			// Instances may no longer exist
+			break
+		}
+
+		remaining := strings.TrimSpace(string(output))
+		if remaining == "" || remaining == "None" {
+			util.Msg("  ✅ All instances terminated")
+			return nil
+		}
+
+		if i%6 == 0 { // Every minute
+			util.Msgf("  Still waiting for instances to terminate... (%ds)", (i+1)*10)
 		}
 	}
 
