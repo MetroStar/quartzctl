@@ -40,7 +40,7 @@ func ForceAWSCleanup(ctx context.Context, p *CommandParams) error {
 
 	cfg := p.Settings().Config
 	clusterName := cfg.Name
-	region := cfg.Region
+	region := cfg.Aws.Region
 
 	if clusterName == "" || region == "" {
 		return fmt.Errorf("cluster name and region are required for AWS cleanup")
