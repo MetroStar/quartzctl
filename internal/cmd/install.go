@@ -160,17 +160,6 @@ func Clean(ctx context.Context, refresh bool, p *CommandParams) error {
 	cleanupStart := time.Now()
 	stageTiming := make(map[string]time.Duration)
 
-	// Run AWS cleanup before Terraform destroy to handle resources that may block deletion
-	// (EC2 instances, ENIs attached to security groups, load balancers, etc.)
-	util.Hdr("AWS Resource Cleanup")
-	forceStart := time.Now()
-	err = ForceAWSCleanup(ctx, p)
-	stageTiming["aws-cleanup"] = time.Since(forceStart)
-	if err != nil {
-		log.Warn("AWS cleanup encountered errors (continuing)", "error", err)
-		// Continue despite errors - the goal is to clean up as much as possible
-	}
-
 	stages := p.Settings().Config.StagesOrdered()
 
 	// refresh each stage in case local state is out of sync
@@ -229,6 +218,10 @@ func printCleanupTimingSummary(stageTiming map[string]time.Duration, totalDurati
 // TfDestroyWithRetry attempts to destroy a stage with retry logic for transient failures
 // such as AWS resource dependency violations that may resolve after ENI cleanup completes.
 //
+// If a retryable error is encountered (e.g., DependencyViolation), it runs AWS CLI cleanup
+// to handle orphaned resources (EC2 instances, ENIs, security groups) before retrying.
+// This is a fallback - primary cleanup is handled by Terraform's Helm pre-delete hooks.
+//
 // Parameters:
 //   - ctx: The context for the operation.
 //   - stage: The stage ID to destroy.
@@ -240,6 +233,8 @@ func printCleanupTimingSummary(stageTiming map[string]time.Duration, totalDurati
 //   - error: An error if all attempts fail, otherwise nil.
 func TfDestroyWithRetry(ctx context.Context, stage string, p *CommandParams, maxRetries int, retryDelay time.Duration) error {
 	var lastErr error
+	awsCleanupRun := false
+
 	for attempt := 0; attempt <= maxRetries; attempt++ {
 		if attempt > 0 {
 			log.Info("Retrying destroy after transient failure", "stage", stage, "attempt", attempt, "maxRetries", maxRetries)
@@ -260,6 +255,19 @@ func TfDestroyWithRetry(ctx context.Context, stage string, p *CommandParams, max
 		}
 
 		log.Warn("Retryable error during destroy", "stage", stage, "attempt", attempt, "error", lastErr)
+
+		// Run AWS CLI cleanup as fallback (only once)
+		// This handles orphaned EC2 instances, ENIs, and security groups that may be
+		// blocking Terraform destroy. The primary cleanup runs via Helm pre-delete hooks,
+		// but those may fail if the cluster is unreachable or has other issues.
+		if !awsCleanupRun {
+			util.Hdr("Running AWS Resource Cleanup (fallback)")
+			util.Msg("Terraform encountered a dependency error. Running AWS CLI cleanup to remove orphaned resources...")
+			if cleanupErr := ForceAWSCleanup(ctx, p); cleanupErr != nil {
+				log.Warn("AWS cleanup encountered errors (continuing)", "error", cleanupErr)
+			}
+			awsCleanupRun = true
+		}
 	}
 
 	return lastErr
