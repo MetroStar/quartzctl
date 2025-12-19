@@ -25,6 +25,64 @@ import (
 	"github.com/MetroStar/quartzctl/internal/util"
 )
 
+// HasBlockingAWSResources performs a quick check to detect resources that would block
+// Terraform destroy (orphaned EC2 instances, in-use ENIs). This is a fast check
+// (~2-3 seconds) that allows us to proactively run cleanup instead of waiting
+// 15+ minutes for Terraform to timeout.
+//
+// Parameters:
+//   - ctx: The context for the operation.
+//   - p: *CommandParams containing configuration and runtime parameters.
+//
+// Returns:
+//   - bool: true if blocking resources were found, false otherwise.
+//   - error: An error if the check fails.
+func HasBlockingAWSResources(ctx context.Context, p *CommandParams) (bool, error) {
+	cfg := p.Settings().Config
+	clusterName := cfg.Name
+	region := cfg.Aws.Region
+
+	if clusterName == "" || region == "" {
+		return false, fmt.Errorf("cluster name and region are required")
+	}
+
+	// Check for running EC2 instances tagged with this cluster
+	cmd := exec.CommandContext(ctx, "aws", "ec2", "describe-instances",
+		"--region", region,
+		"--filters",
+		fmt.Sprintf("Name=tag:kubernetes.io/cluster/%s,Values=owned,shared", clusterName),
+		"Name=instance-state-name,Values=running,pending,stopping,stopped",
+		"--query", "length(Reservations[].Instances[])",
+		"--output", "text")
+	output, err := cmd.Output()
+	if err == nil {
+		count := strings.TrimSpace(string(output))
+		if count != "" && count != "0" && count != "None" {
+			log.Info("Found running EC2 instances", "count", count)
+			return true, nil
+		}
+	}
+
+	// Check for in-use ENIs tagged with this cluster
+	cmd = exec.CommandContext(ctx, "aws", "ec2", "describe-network-interfaces",
+		"--region", region,
+		"--filters",
+		fmt.Sprintf("Name=tag:kubernetes.io/cluster/%s,Values=owned,shared", clusterName),
+		"Name=status,Values=in-use",
+		"--query", "length(NetworkInterfaces)",
+		"--output", "text")
+	output, err = cmd.Output()
+	if err == nil {
+		count := strings.TrimSpace(string(output))
+		if count != "" && count != "0" && count != "None" {
+			log.Info("Found in-use ENIs", "count", count)
+			return true, nil
+		}
+	}
+
+	return false, nil
+}
+
 // ForceAWSCleanup runs AWS CLI commands to forcibly clean up resources that may block Terraform destroy.
 // This includes detaching/deleting ENIs and removing security groups that may have lingering dependencies.
 //

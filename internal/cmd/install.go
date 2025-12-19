@@ -160,6 +160,24 @@ func Clean(ctx context.Context, refresh bool, p *CommandParams) error {
 	cleanupStart := time.Now()
 	stageTiming := make(map[string]time.Duration)
 
+	// Quick pre-check: detect resources that will block Terraform destroy
+	// (orphaned EC2 instances, in-use ENIs). If found, run cleanup proactively
+	// to avoid waiting 15+ minutes for Terraform timeout.
+	util.Msg("Checking for resources that may block cleanup...")
+	checkStart := time.Now()
+	if hasBlockingResources, err := HasBlockingAWSResources(ctx, p); err != nil {
+		log.Warn("Could not check for blocking resources", "error", err)
+	} else if hasBlockingResources {
+		util.Hdr("AWS Resource Cleanup (proactive)")
+		util.Msg("Detected orphaned resources that would block Terraform. Cleaning up first...")
+		if cleanupErr := ForceAWSCleanup(ctx, p); cleanupErr != nil {
+			log.Warn("AWS cleanup encountered errors (continuing)", "error", cleanupErr)
+		}
+		stageTiming["aws-cleanup"] = time.Since(checkStart)
+	} else {
+		util.Msg("No blocking resources detected, proceeding with Terraform destroy")
+	}
+
 	stages := p.Settings().Config.StagesOrdered()
 
 	// refresh each stage in case local state is out of sync
