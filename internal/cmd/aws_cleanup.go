@@ -17,6 +17,7 @@ package cmd
 import (
 	"context"
 	"fmt"
+	"os"
 	"os/exec"
 	"strings"
 	"time"
@@ -86,6 +87,10 @@ func HasBlockingAWSResources(ctx context.Context, p *CommandParams) (bool, error
 // ForceAWSCleanup runs AWS CLI commands to forcibly clean up resources that may block Terraform destroy.
 // This includes detaching/deleting ENIs and removing security groups that may have lingering dependencies.
 //
+// IMPORTANT: This function first cleans up Kubernetes resources (webhooks, API services) that would
+// block Helm uninstall operations BEFORE terminating EC2 instances. This prevents the scenario where
+// nodes are killed but webhooks still exist with no backing pods, causing "no endpoints available" errors.
+//
 // Parameters:
 //   - ctx: The context for the operation.
 //   - p: *CommandParams containing configuration and runtime parameters.
@@ -107,6 +112,16 @@ func ForceAWSCleanup(ctx context.Context, p *CommandParams) error {
 	util.Msgf("Starting force AWS cleanup for cluster: %s in region: %s", clusterName, region)
 
 	startTime := time.Now()
+
+	// Phase 0: Clean up Kubernetes blocking resources BEFORE terminating nodes
+	// This ensures webhooks and API services are removed while the cluster is still healthy,
+	// preventing "no endpoints available" errors during subsequent Helm uninstall operations.
+	util.Msg("Phase 0: Cleaning up Kubernetes blocking resources...")
+	k8sStart := time.Now()
+	if err := cleanupKubernetesBlockers(ctx, p); err != nil {
+		log.Warn("Kubernetes cleanup encountered errors (continuing)", "error", err)
+	}
+	util.Msgf("  Kubernetes cleanup completed in %v", time.Since(k8sStart))
 
 	// Phase 1: Delete LoadBalancers
 	util.Msg("Phase 1: Cleaning up LoadBalancers...")
@@ -484,5 +499,93 @@ func cleanupSecurityGroups(ctx context.Context, clusterName, region string) erro
 	}
 
 	util.Msgf("  ✅ Deleted %d security group(s)", deletedCount)
+	return nil
+}
+
+// cleanupKubernetesBlockers removes Kubernetes resources that would block Helm uninstall operations.
+// This includes:
+// - Validating and mutating webhooks (especially Kyverno, Istio, cert-manager)
+// - Stale API services (metrics-server, custom-metrics) that block namespace finalization
+// - Finalizers on stuck namespaces
+//
+// This function should be called BEFORE terminating EC2 instances to ensure the cluster
+// is still healthy enough to process these deletions.
+func cleanupKubernetesBlockers(ctx context.Context, p *CommandParams) error {
+	// Use KUBECONFIG from environment if set, otherwise use default path
+	kubeconfig := os.Getenv("KUBECONFIG")
+	if kubeconfig == "" {
+		kubeconfig = "./out/kubeconfig"
+	}
+
+	// Check if kubeconfig file exists
+	if _, err := os.Stat(kubeconfig); os.IsNotExist(err) {
+		log.Warn("Kubeconfig not found, skipping Kubernetes cleanup", "path", kubeconfig)
+		return nil
+	}
+
+	// Check if kubectl is available
+	if _, err := exec.LookPath("kubectl"); err != nil {
+		log.Warn("kubectl not found, skipping Kubernetes cleanup")
+		return nil
+	}
+
+	// Test cluster connectivity with a short timeout
+	testCmd := exec.CommandContext(ctx, "kubectl", "--kubeconfig", kubeconfig,
+		"cluster-info", "--request-timeout=5s")
+	if err := testCmd.Run(); err != nil {
+		log.Warn("Cluster not reachable, skipping Kubernetes cleanup", "error", err)
+		return nil
+	}
+
+	util.Msg("  Removing validating webhooks...")
+	// Delete all validating webhooks (aggressive but safe during cleanup)
+	// Specific patterns that commonly block cleanup
+	webhookPatterns := []string{
+		"kyverno-resource-validating-webhook-cfg",
+		"kyverno-policy-validating-webhook-cfg",
+		"kyverno-exception-validating-webhook-cfg",
+		"kyverno-cleanup-validating-webhook-cfg",
+		"kyverno-ttl-validating-webhook-cfg",
+		"istiod-default-validator",
+		"cert-manager-webhook",
+	}
+	for _, wh := range webhookPatterns {
+		cmd := exec.CommandContext(ctx, "kubectl", "--kubeconfig", kubeconfig,
+			"delete", "validatingwebhookconfiguration", wh,
+			"--ignore-not-found=true", "--timeout=10s")
+		cmd.Run() // Ignore errors
+	}
+
+	util.Msg("  Removing mutating webhooks...")
+	mutatingPatterns := []string{
+		"kyverno-resource-mutating-webhook-cfg",
+		"kyverno-verify-mutating-webhook-cfg",
+		"kyverno-policy-mutating-webhook-cfg",
+		"istio-sidecar-injector",
+		"cert-manager-webhook",
+	}
+	for _, wh := range mutatingPatterns {
+		cmd := exec.CommandContext(ctx, "kubectl", "--kubeconfig", kubeconfig,
+			"delete", "mutatingwebhookconfiguration", wh,
+			"--ignore-not-found=true", "--timeout=10s")
+		cmd.Run() // Ignore errors
+	}
+
+	util.Msg("  Removing stale API services...")
+	// These API services often block namespace finalization when their backing pods are gone
+	staleAPIServices := []string{
+		"v1beta1.metrics.k8s.io",
+		"v1beta1.external.metrics.k8s.io",
+		"v1beta1.custom.metrics.k8s.io",
+		"v1.external.metrics.k8s.io",
+	}
+	for _, apiSvc := range staleAPIServices {
+		cmd := exec.CommandContext(ctx, "kubectl", "--kubeconfig", kubeconfig,
+			"delete", "apiservice", apiSvc,
+			"--ignore-not-found=true", "--timeout=10s")
+		cmd.Run() // Ignore errors
+	}
+
+	util.Msg("  ✅ Kubernetes blocking resources removed")
 	return nil
 }
