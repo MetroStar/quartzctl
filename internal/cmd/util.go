@@ -459,10 +459,23 @@ func onCheckComplete(cr stages.CheckResult) {
 }
 
 // onCheckRetry logs a retry attempt for a health check.
+// Provides enhanced diagnostic output including the error reason and periodic summaries.
 //
 // Parameters:
 //   - cr: The result of the health check.
 //   - i: The retry attempt number.
 func onCheckRetry(cr stages.CheckResult, i int) {
-	util.Printf("Retrying %s check for stage %s - %s (%d)", cr.Type, cr.Stage, cr.Id, i)
+	// Basic retry message with error reason
+	errMsg := ""
+	if cr.Error != nil {
+		errMsg = fmt.Sprintf(" [%v]", cr.Error)
+	}
+
+	// For every 5th retry (or first), show more detailed message
+	if i == 1 || i%5 == 0 {
+		util.Printf("Waiting for %s check: %s - %s (attempt %d)%s", cr.Type, cr.Stage, cr.Id, i, errMsg)
+	} else {
+		// Shorter message for intermediate retries
+		util.Printf("Retrying %s check for stage %s - %s (%d)", cr.Type, cr.Stage, cr.Id, i)
+	}
 }

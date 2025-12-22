@@ -130,7 +130,23 @@ func RunChecks(ctx context.Context, cfg schema.QuartzConfig, stage string, event
 				}
 
 				if ro.WaitSeconds > 0 {
-					time.Sleep(time.Duration(ro.WaitSeconds) * time.Second)
+					// Use exponential backoff: start with configured wait, cap at 60s
+					// Formula: min(baseWait * 2^(attempt-1), maxWait)
+					baseWait := ro.WaitSeconds
+					if baseWait < 10 {
+						baseWait = 10 // Minimum 10 seconds
+					}
+					maxWait := 60 // Maximum 60 seconds cap
+
+					waitTime := baseWait
+					// Apply exponential growth for retries 2+, capped at maxWait
+					if i > 1 {
+						// Calculate exponential delay, but cap growth after a few retries
+						factor := 1 << min(i-1, 3) // 2^(i-1), capped at 2^3 = 8x
+						waitTime = min(baseWait*factor, maxWait)
+					}
+
+					time.Sleep(time.Duration(waitTime) * time.Second)
 				}
 
 				i = i + 1
