@@ -165,9 +165,7 @@ func Clean(ctx context.Context, refresh bool, p *CommandParams) error {
 	// We do this BEFORE any AWS cleanup to ensure the cluster is still healthy.
 	util.Hdr("Kubernetes Cleanup (preparation)")
 	k8sStart := time.Now()
-	if err := cleanupKubernetesBlockers(ctx, p); err != nil {
-		log.Warn("Kubernetes cleanup encountered errors (continuing)", "error", err)
-	}
+	cleanupKubernetesBlockers(ctx)
 	stageTiming["k8s-cleanup"] = time.Since(k8sStart)
 
 	// Phase 2: Check for blocking AWS resources and clean up if needed
@@ -290,9 +288,7 @@ func TfDestroyWithRetry(ctx context.Context, stage string, p *CommandParams, max
 		if isHelmReleaseError(errStr) && !k8sCleanupRun {
 			util.Hdr("Running Kubernetes Cleanup (retry)")
 			util.Msg("Terraform encountered a Helm/Kubernetes error. Cleaning up blocking resources...")
-			if cleanupErr := cleanupKubernetesBlockers(ctx, p); cleanupErr != nil {
-				log.Warn("Kubernetes cleanup encountered errors (continuing)", "error", cleanupErr)
-			}
+			cleanupKubernetesBlockers(ctx)
 			k8sCleanupRun = true
 		}
 

@@ -35,13 +35,13 @@ type StageConfig struct {
 
 // StageChecksConfig represents the configuration for checks associated with a stage.
 type StageChecksConfig struct {
-	Before     []string                       `koanf:"before"`
-	After      []string                       `koanf:"after"`
-	Http       []StageChecksHttpConfig        `koanf:"http"`
-	Kubernetes []StageChecksKubernetesConfig  `koanf:"kubernetes"`
-	DaemonSet  []StageChecksDaemonSetConfig   `koanf:"daemonset"`
-	State      []StageChecksStateConfig       `koanf:"state"`
-	Order      int                            `koanf:"order"`
+	Before     []string                      `koanf:"before"`
+	After      []string                      `koanf:"after"`
+	Http       []StageChecksHttpConfig       `koanf:"http"`
+	Kubernetes []StageChecksKubernetesConfig `koanf:"kubernetes"`
+	DaemonSet  []StageChecksDaemonSetConfig  `koanf:"daemonset"`
+	State      []StageChecksStateConfig      `koanf:"state"`
+	Order      int                           `koanf:"order"`
 }
 
 // StageProvidersConfig represents the configuration for providers used in a stage.

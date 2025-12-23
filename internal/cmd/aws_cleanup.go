@@ -26,6 +26,9 @@ import (
 	"github.com/MetroStar/quartzctl/internal/util"
 )
 
+// awsNoneValue is the string AWS CLI returns for empty/null query results
+const awsNoneValue = "None"
+
 // HasBlockingAWSResources performs a quick check to detect resources that would block
 // Terraform destroy (orphaned EC2 instances, in-use ENIs). This is a fast check
 // (~2-3 seconds) that allows us to proactively run cleanup instead of waiting
@@ -58,7 +61,7 @@ func HasBlockingAWSResources(ctx context.Context, p *CommandParams) (bool, error
 	output, err := cmd.Output()
 	if err == nil {
 		count := strings.TrimSpace(string(output))
-		if count != "" && count != "0" && count != "None" {
+		if count != "" && count != "0" && count != awsNoneValue {
 			log.Info("Found running EC2 instances", "count", count)
 			return true, nil
 		}
@@ -75,7 +78,7 @@ func HasBlockingAWSResources(ctx context.Context, p *CommandParams) (bool, error
 	output, err = cmd.Output()
 	if err == nil {
 		count := strings.TrimSpace(string(output))
-		if count != "" && count != "0" && count != "None" {
+		if count != "" && count != "0" && count != awsNoneValue {
 			log.Info("Found in-use ENIs", "count", count)
 			return true, nil
 		}
@@ -118,9 +121,7 @@ func ForceAWSCleanup(ctx context.Context, p *CommandParams) error {
 	// preventing "no endpoints available" errors during subsequent Helm uninstall operations.
 	util.Msg("Phase 0: Cleaning up Kubernetes blocking resources...")
 	k8sStart := time.Now()
-	if err := cleanupKubernetesBlockers(ctx, p); err != nil {
-		log.Warn("Kubernetes cleanup encountered errors (continuing)", "error", err)
-	}
+	cleanupKubernetesBlockers(ctx)
 	util.Msgf("  Kubernetes cleanup completed in %v", time.Since(k8sStart))
 
 	// Phase 1: Delete LoadBalancers
@@ -178,7 +179,7 @@ func cleanupLoadBalancers(ctx context.Context, clusterName, region string) error
 
 	// Check each LB for cluster tag
 	for _, arn := range lbArns {
-		if arn == "" || arn == "None" {
+		if arn == "" || arn == awsNoneValue {
 			continue
 		}
 
@@ -237,6 +238,7 @@ func cleanupLoadBalancers(ctx context.Context, clusterName, region string) error
 // when the EKS cluster is destroyed.
 func cleanupEC2Instances(ctx context.Context, clusterName, region string) error {
 	// Find running instances with cluster tag
+	// #nosec G204 -- clusterName and region are validated configuration values, not user input
 	cmd := exec.CommandContext(ctx, "aws", "ec2", "describe-instances",
 		"--region", region,
 		"--filters",
@@ -272,6 +274,7 @@ func cleanupEC2Instances(ctx context.Context, clusterName, region string) error 
 	for i := 0; i < 30; i++ {
 		time.Sleep(10 * time.Second)
 
+		// #nosec G204 -- region is validated configuration, instanceIds are from previous AWS API call
 		cmd = exec.CommandContext(ctx, "aws", "ec2", "describe-instances",
 			"--region", region,
 			"--instance-ids", strings.Join(instanceIds, " "),
@@ -284,7 +287,7 @@ func cleanupEC2Instances(ctx context.Context, clusterName, region string) error 
 		}
 
 		remaining := strings.TrimSpace(string(output))
-		if remaining == "" || remaining == "None" {
+		if remaining == "" || remaining == awsNoneValue {
 			util.Msg("  ✅ All instances terminated")
 			return nil
 		}
@@ -300,6 +303,7 @@ func cleanupEC2Instances(ctx context.Context, clusterName, region string) error 
 // cleanupENIs detaches and deletes ENIs associated with the cluster.
 func cleanupENIs(ctx context.Context, clusterName, region string) error {
 	// Find ENIs with cluster tag
+	// #nosec G204 -- clusterName and region are validated configuration values, not user input
 	cmd := exec.CommandContext(ctx, "aws", "ec2", "describe-network-interfaces",
 		"--region", region,
 		"--filters", fmt.Sprintf("Name=tag:kubernetes.io/cluster/%s,Values=owned,shared", clusterName),
@@ -326,7 +330,7 @@ func cleanupENIs(ctx context.Context, clusterName, region string) error {
 		attachmentId := parts[1]
 		requesterManaged := parts[2]
 
-		if eniId == "" || eniId == "None" {
+		if eniId == "" || eniId == awsNoneValue {
 			continue
 		}
 
@@ -335,7 +339,7 @@ func cleanupENIs(ctx context.Context, clusterName, region string) error {
 			continue
 		}
 
-		if attachmentId != "" && attachmentId != "None" {
+		if attachmentId != "" && attachmentId != awsNoneValue {
 			util.Msgf("  Force detaching ENI: %s", eniId)
 			detachCmd := exec.CommandContext(ctx, "aws", "ec2", "detach-network-interface",
 				"--region", region,
@@ -351,6 +355,7 @@ func cleanupENIs(ctx context.Context, clusterName, region string) error {
 	time.Sleep(15 * time.Second)
 
 	// Delete available ENIs
+	// #nosec G204 -- clusterName and region are validated configuration values, not user input
 	availableCmd := exec.CommandContext(ctx, "aws", "ec2", "describe-network-interfaces",
 		"--region", region,
 		"--filters",
@@ -366,7 +371,7 @@ func cleanupENIs(ctx context.Context, clusterName, region string) error {
 	eniIds := strings.Fields(string(availableOutput))
 	deletedCount := 0
 	for _, eniId := range eniIds {
-		if eniId == "" || eniId == "None" {
+		if eniId == "" || eniId == awsNoneValue {
 			continue
 		}
 
@@ -387,6 +392,7 @@ func cleanupENIs(ctx context.Context, clusterName, region string) error {
 // cleanupSecurityGroups removes rules and deletes security groups associated with the cluster.
 func cleanupSecurityGroups(ctx context.Context, clusterName, region string) error {
 	// Find security groups with cluster tags
+	// #nosec G204 -- clusterName and region are validated configuration values, not user input
 	cmd := exec.CommandContext(ctx, "aws", "ec2", "describe-security-groups",
 		"--region", region,
 		"--filters",
@@ -401,6 +407,7 @@ func cleanupSecurityGroups(ctx context.Context, clusterName, region string) erro
 	k8sSgs := strings.Fields(string(output))
 
 	// Also find LB-specific security groups
+	// #nosec G204 -- clusterName and region are validated configuration values, not user input
 	lbCmd := exec.CommandContext(ctx, "aws", "ec2", "describe-security-groups",
 		"--region", region,
 		"--filters",
@@ -411,6 +418,7 @@ func cleanupSecurityGroups(ctx context.Context, clusterName, region string) erro
 	lbSgs := strings.Fields(string(lbOutput))
 
 	// Also find backend SG by name
+	// #nosec G204 -- clusterName and region are validated configuration values, not user input
 	backendCmd := exec.CommandContext(ctx, "aws", "ec2", "describe-security-groups",
 		"--region", region,
 		"--filters",
@@ -423,17 +431,17 @@ func cleanupSecurityGroups(ctx context.Context, clusterName, region string) erro
 	// Combine and dedupe
 	sgSet := make(map[string]bool)
 	for _, sg := range k8sSgs {
-		if sg != "" && sg != "None" {
+		if sg != "" && sg != awsNoneValue {
 			sgSet[sg] = true
 		}
 	}
 	for _, sg := range lbSgs {
-		if sg != "" && sg != "None" {
+		if sg != "" && sg != awsNoneValue {
 			sgSet[sg] = true
 		}
 	}
 	for _, sg := range backendSgs {
-		if sg != "" && sg != "None" {
+		if sg != "" && sg != awsNoneValue {
 			sgSet[sg] = true
 		}
 	}
@@ -464,7 +472,7 @@ func cleanupSecurityGroups(ctx context.Context, clusterName, region string) erro
 				"--region", region,
 				"--group-id", sg,
 				"--ip-permissions", string(ingressRules))
-			revokeCmd.Run() // Ignore errors
+			_ = revokeCmd.Run() // Ignore errors - best effort cleanup
 		}
 
 		// Revoke all egress rules (except default)
@@ -479,7 +487,7 @@ func cleanupSecurityGroups(ctx context.Context, clusterName, region string) erro
 				"--region", region,
 				"--group-id", sg,
 				"--ip-permissions", string(egressRules))
-			revokeCmd.Run() // Ignore errors
+			_ = revokeCmd.Run() // Ignore errors - best effort cleanup
 		}
 	}
 
@@ -510,7 +518,7 @@ func cleanupSecurityGroups(ctx context.Context, clusterName, region string) erro
 //
 // This function should be called BEFORE terminating EC2 instances to ensure the cluster
 // is still healthy enough to process these deletions.
-func cleanupKubernetesBlockers(ctx context.Context, p *CommandParams) error {
+func cleanupKubernetesBlockers(ctx context.Context) {
 	// Use KUBECONFIG from environment if set, otherwise use default path
 	kubeconfig := os.Getenv("KUBECONFIG")
 	if kubeconfig == "" {
@@ -520,13 +528,13 @@ func cleanupKubernetesBlockers(ctx context.Context, p *CommandParams) error {
 	// Check if kubeconfig file exists
 	if _, err := os.Stat(kubeconfig); os.IsNotExist(err) {
 		log.Warn("Kubeconfig not found, skipping Kubernetes cleanup", "path", kubeconfig)
-		return nil
+		return
 	}
 
 	// Check if kubectl is available
 	if _, err := exec.LookPath("kubectl"); err != nil {
 		log.Warn("kubectl not found, skipping Kubernetes cleanup")
-		return nil
+		return
 	}
 
 	// Test cluster connectivity with a short timeout
@@ -534,7 +542,7 @@ func cleanupKubernetesBlockers(ctx context.Context, p *CommandParams) error {
 		"cluster-info", "--request-timeout=5s")
 	if err := testCmd.Run(); err != nil {
 		log.Warn("Cluster not reachable, skipping Kubernetes cleanup", "error", err)
-		return nil
+		return
 	}
 
 	util.Msg("  Removing ALL validating webhooks...")
@@ -568,7 +576,7 @@ func cleanupKubernetesBlockers(ctx context.Context, p *CommandParams) error {
 		cmd := exec.CommandContext(ctx, "kubectl", "--kubeconfig", kubeconfig,
 			"delete", "apiservice", apiSvc,
 			"--ignore-not-found=true", "--timeout=10s")
-		cmd.Run() // Ignore errors
+		_ = cmd.Run() // Ignore errors - best effort cleanup
 	}
 
 	util.Msg("  Patching stuck namespaces to remove finalizers...")
@@ -603,5 +611,4 @@ func cleanupKubernetesBlockers(ctx context.Context, p *CommandParams) error {
 	}
 
 	util.Msg("  ✅ Kubernetes blocking resources removed")
-	return nil
 }
