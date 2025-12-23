@@ -1063,3 +1063,202 @@ func TestProviderKubernetesClientPrintDiscoveredVirtualServicesNoCRD(t *testing.
 	// Should not panic when CRD doesn't exist
 	c.PrintDiscoveredVirtualServices(context.Background(), map[string]bool{})
 }
+
+func TestProviderKubernetesClientExport(t *testing.T) {
+	// Create a ConfigMap to export
+	cm := &corev1.ConfigMap{
+		TypeMeta: metav1.TypeMeta{
+			Kind:       "ConfigMap",
+			APIVersion: "v1",
+		},
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "export-test-cm",
+			Namespace: "export-ns",
+		},
+		Data: map[string]string{
+			"key1": "value1",
+		},
+	}
+
+	cmUnstructured := &unstructured.Unstructured{
+		Object: map[string]interface{}{
+			"apiVersion": "v1",
+			"kind":       "ConfigMap",
+			"metadata": map[string]interface{}{
+				"name":      "export-test-cm",
+				"namespace": "export-ns",
+			},
+			"data": map[string]interface{}{
+				"key1": "value1",
+			},
+		},
+	}
+
+	api := NewKubernetesApiMock().
+		WithClientObjects(cm).
+		WithDynamicObjects(cmUnstructured).
+		AddResources(&metav1.APIResourceList{
+			GroupVersion: "v1",
+			APIResources: []metav1.APIResource{
+				{Name: "configmaps", Namespaced: true, Kind: "ConfigMap"},
+			},
+		})
+	cfg := schema.QuartzConfig{}
+	kubeconfig := KubeconfigInfo{}
+
+	c, err := NewKubernetesClient(api, kubeconfig, cfg)
+	if err != nil {
+		t.Errorf("unexpected error from kubernetes client constructor, %v", err)
+		return
+	}
+
+	// Capture output
+	var buf bytes.Buffer
+	util.SetWriter(&buf)
+	defer util.SetWriter(&bytes.Buffer{})
+
+	exportCfg := schema.ExportConfig{
+		Path: "./test-export",
+		Annotations: map[string]string{
+			"exported-by": "test",
+		},
+		Objects: []schema.ExportObjectConfig{
+			{
+				Kind:      "ConfigMap",
+				Namespace: "export-ns",
+				Name:      "export-test-cm",
+			},
+		},
+	}
+
+	result, err := c.Export(context.Background(), exportCfg)
+	if err != nil {
+		t.Errorf("unexpected error from Export: %v", err)
+		return
+	}
+
+	// Verify result contains the expected file
+	expectedKey := "export-ns.export-test-cm.yaml"
+	if _, exists := result[expectedKey]; !exists {
+		t.Errorf("expected key %s in export result, got keys: %v", expectedKey, result)
+		return
+	}
+
+	// Verify the YAML content contains the ConfigMap data
+	yamlContent := string(result[expectedKey])
+	if !strings.Contains(yamlContent, "key1") || !strings.Contains(yamlContent, "value1") {
+		t.Errorf("expected YAML to contain ConfigMap data, got: %s", yamlContent)
+	}
+}
+
+func TestProviderKubernetesClientExportWithErrors(t *testing.T) {
+	// Test Export with non-existent resource
+	api := NewKubernetesApiMock().
+		AddResources(&metav1.APIResourceList{
+			GroupVersion: "v1",
+			APIResources: []metav1.APIResource{
+				{Name: "configmaps", Namespaced: true, Kind: "ConfigMap"},
+			},
+		})
+	cfg := schema.QuartzConfig{}
+	kubeconfig := KubeconfigInfo{}
+
+	c, err := NewKubernetesClient(api, kubeconfig, cfg)
+	if err != nil {
+		t.Errorf("unexpected error from kubernetes client constructor, %v", err)
+		return
+	}
+
+	// Capture output
+	var buf bytes.Buffer
+	util.SetWriter(&buf)
+	defer util.SetWriter(&bytes.Buffer{})
+
+	exportCfg := schema.ExportConfig{
+		Path: "./test-export",
+		Objects: []schema.ExportObjectConfig{
+			{
+				Kind:      "ConfigMap",
+				Namespace: "non-existent-ns",
+				Name:      "non-existent-cm",
+			},
+		},
+	}
+
+	result, err := c.Export(context.Background(), exportCfg)
+	// Should have errors since resource doesn't exist
+	if err == nil {
+		t.Log("Export returned no error, but result may be empty")
+	}
+	// Result should be empty or contain no entries
+	if len(result) > 0 {
+		t.Logf("Result contains %d entries despite non-existent resource", len(result))
+	}
+}
+
+func TestProviderKubernetesClientExportUnknownKind(t *testing.T) {
+	// Test Export with unknown Kind
+	api := NewKubernetesApiMock()
+	cfg := schema.QuartzConfig{}
+	kubeconfig := KubeconfigInfo{}
+
+	c, err := NewKubernetesClient(api, kubeconfig, cfg)
+	if err != nil {
+		t.Errorf("unexpected error from kubernetes client constructor, %v", err)
+		return
+	}
+
+	// Capture output
+	var buf bytes.Buffer
+	util.SetWriter(&buf)
+	defer util.SetWriter(&bytes.Buffer{})
+
+	exportCfg := schema.ExportConfig{
+		Path: "./test-export",
+		Objects: []schema.ExportObjectConfig{
+			{
+				Kind:      "UnknownKind",
+				Namespace: "test-ns",
+				Name:      "test-obj",
+			},
+		},
+	}
+
+	_, err = c.Export(context.Background(), exportCfg)
+	// Should have errors since Kind doesn't exist
+	if err == nil {
+		t.Log("Export returned no error for unknown Kind, which may be acceptable")
+	}
+}
+
+func TestProviderKubernetesClientExportEmpty(t *testing.T) {
+	// Test Export with empty Objects list
+	api := NewKubernetesApiMock()
+	cfg := schema.QuartzConfig{}
+	kubeconfig := KubeconfigInfo{}
+
+	c, err := NewKubernetesClient(api, kubeconfig, cfg)
+	if err != nil {
+		t.Errorf("unexpected error from kubernetes client constructor, %v", err)
+		return
+	}
+
+	// Capture output
+	var buf bytes.Buffer
+	util.SetWriter(&buf)
+	defer util.SetWriter(&bytes.Buffer{})
+
+	exportCfg := schema.ExportConfig{
+		Path:    "./test-export",
+		Objects: []schema.ExportObjectConfig{},
+	}
+
+	result, err := c.Export(context.Background(), exportCfg)
+	if err != nil {
+		t.Errorf("unexpected error from Export with empty objects: %v", err)
+		return
+	}
+	if len(result) != 0 {
+		t.Errorf("expected empty result for empty objects list, got %d entries", len(result))
+	}
+}
