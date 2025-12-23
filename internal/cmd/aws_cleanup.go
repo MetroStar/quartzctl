@@ -537,38 +537,23 @@ func cleanupKubernetesBlockers(ctx context.Context, p *CommandParams) error {
 		return nil
 	}
 
-	util.Msg("  Removing validating webhooks...")
-	// Delete all validating webhooks (aggressive but safe during cleanup)
-	// Specific patterns that commonly block cleanup
-	webhookPatterns := []string{
-		"kyverno-resource-validating-webhook-cfg",
-		"kyverno-policy-validating-webhook-cfg",
-		"kyverno-exception-validating-webhook-cfg",
-		"kyverno-cleanup-validating-webhook-cfg",
-		"kyverno-ttl-validating-webhook-cfg",
-		"istiod-default-validator",
-		"cert-manager-webhook",
-	}
-	for _, wh := range webhookPatterns {
-		cmd := exec.CommandContext(ctx, "kubectl", "--kubeconfig", kubeconfig,
-			"delete", "validatingwebhookconfiguration", wh,
-			"--ignore-not-found=true", "--timeout=10s")
-		cmd.Run() // Ignore errors
+	util.Msg("  Removing ALL validating webhooks...")
+	// Delete ALL validating webhooks during cleanup to prevent any blocking
+	// This is aggressive but safe during teardown - the cluster is being destroyed anyway
+	cmd := exec.CommandContext(ctx, "kubectl", "--kubeconfig", kubeconfig,
+		"delete", "validatingwebhookconfiguration", "--all",
+		"--ignore-not-found=true", "--timeout=30s")
+	if out, err := cmd.CombinedOutput(); err != nil {
+		log.Warn("Failed to delete all validating webhooks", "error", err, "output", string(out))
 	}
 
-	util.Msg("  Removing mutating webhooks...")
-	mutatingPatterns := []string{
-		"kyverno-resource-mutating-webhook-cfg",
-		"kyverno-verify-mutating-webhook-cfg",
-		"kyverno-policy-mutating-webhook-cfg",
-		"istio-sidecar-injector",
-		"cert-manager-webhook",
-	}
-	for _, wh := range mutatingPatterns {
-		cmd := exec.CommandContext(ctx, "kubectl", "--kubeconfig", kubeconfig,
-			"delete", "mutatingwebhookconfiguration", wh,
-			"--ignore-not-found=true", "--timeout=10s")
-		cmd.Run() // Ignore errors
+	util.Msg("  Removing ALL mutating webhooks...")
+	// Delete ALL mutating webhooks during cleanup
+	cmd = exec.CommandContext(ctx, "kubectl", "--kubeconfig", kubeconfig,
+		"delete", "mutatingwebhookconfiguration", "--all",
+		"--ignore-not-found=true", "--timeout=30s")
+	if out, err := cmd.CombinedOutput(); err != nil {
+		log.Warn("Failed to delete all mutating webhooks", "error", err, "output", string(out))
 	}
 
 	util.Msg("  Removing stale API services...")
@@ -584,6 +569,37 @@ func cleanupKubernetesBlockers(ctx context.Context, p *CommandParams) error {
 			"delete", "apiservice", apiSvc,
 			"--ignore-not-found=true", "--timeout=10s")
 		cmd.Run() // Ignore errors
+	}
+
+	util.Msg("  Patching stuck namespaces to remove finalizers...")
+	// Remove finalizers from namespaces that commonly get stuck during cleanup
+	stuckNamespaces := []string{
+		"flux-system",
+		"kyverno",
+		"monitoring",
+		"istio-system",
+		"cert-manager",
+	}
+	for _, ns := range stuckNamespaces {
+		// Check if namespace exists and is terminating
+		cmd := exec.CommandContext(ctx, "kubectl", "--kubeconfig", kubeconfig,
+			"get", "namespace", ns, "-o", "jsonpath={.status.phase}",
+			"--ignore-not-found=true", "--request-timeout=5s")
+		out, err := cmd.Output()
+		if err != nil || string(out) != "Terminating" {
+			continue
+		}
+
+		// Remove finalizers from terminating namespace
+		patchCmd := exec.CommandContext(ctx, "kubectl", "--kubeconfig", kubeconfig,
+			"patch", "namespace", ns, "--type=merge",
+			"-p", `{"spec":{"finalizers":null}}`,
+			"--timeout=10s")
+		if err := patchCmd.Run(); err != nil {
+			log.Warn("Failed to patch namespace finalizers", "namespace", ns, "error", err)
+		} else {
+			util.Msgf("    Removed finalizers from namespace: %s", ns)
+		}
 	}
 
 	util.Msg("  ✅ Kubernetes blocking resources removed")

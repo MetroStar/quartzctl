@@ -160,7 +160,17 @@ func Clean(ctx context.Context, refresh bool, p *CommandParams) error {
 	cleanupStart := time.Now()
 	stageTiming := make(map[string]time.Duration)
 
-	// Quick pre-check: detect resources that will block Terraform destroy
+	// Phase 1: Always clean up Kubernetes blocking resources first
+	// This removes webhooks, API services, and finalizers that would block Helm uninstalls.
+	// We do this BEFORE any AWS cleanup to ensure the cluster is still healthy.
+	util.Hdr("Kubernetes Cleanup (preparation)")
+	k8sStart := time.Now()
+	if err := cleanupKubernetesBlockers(ctx, p); err != nil {
+		log.Warn("Kubernetes cleanup encountered errors (continuing)", "error", err)
+	}
+	stageTiming["k8s-cleanup"] = time.Since(k8sStart)
+
+	// Phase 2: Check for blocking AWS resources and clean up if needed
 	// (orphaned EC2 instances, in-use ENIs). If found, run cleanup proactively
 	// to avoid waiting 15+ minutes for Terraform timeout.
 	util.Msg("Checking for resources that may block cleanup...")
@@ -252,6 +262,7 @@ func printCleanupTimingSummary(stageTiming map[string]time.Duration, totalDurati
 func TfDestroyWithRetry(ctx context.Context, stage string, p *CommandParams, maxRetries int, retryDelay time.Duration) error {
 	var lastErr error
 	awsCleanupRun := false
+	k8sCleanupRun := false
 
 	for attempt := 0; attempt <= maxRetries; attempt++ {
 		if attempt > 0 {
@@ -265,7 +276,7 @@ func TfDestroyWithRetry(ctx context.Context, stage string, p *CommandParams, max
 			return nil
 		}
 
-		// Check if this is a retryable error (DependencyViolation typically resolves after waiting)
+		// Check if this is a retryable error
 		errStr := lastErr.Error()
 		if !isRetryableDestroyError(errStr) {
 			log.Warn("Non-retryable error during destroy", "stage", stage, "error", lastErr)
@@ -273,6 +284,17 @@ func TfDestroyWithRetry(ctx context.Context, stage string, p *CommandParams, max
 		}
 
 		log.Warn("Retryable error during destroy", "stage", stage, "attempt", attempt, "error", lastErr)
+
+		// If it's a Helm release error (cluster unreachable, webhooks, etc.),
+		// try cleaning up K8s blocking resources first
+		if isHelmReleaseError(errStr) && !k8sCleanupRun {
+			util.Hdr("Running Kubernetes Cleanup (retry)")
+			util.Msg("Terraform encountered a Helm/Kubernetes error. Cleaning up blocking resources...")
+			if cleanupErr := cleanupKubernetesBlockers(ctx, p); cleanupErr != nil {
+				log.Warn("Kubernetes cleanup encountered errors (continuing)", "error", cleanupErr)
+			}
+			k8sCleanupRun = true
+		}
 
 		// Run AWS CLI cleanup as fallback (only once)
 		// This handles orphaned EC2 instances, ENIs, and security groups that may be
@@ -299,8 +321,31 @@ func isRetryableDestroyError(errStr string) bool {
 		"is currently in use",
 		"NetworkInterfaceInUse",
 		"InvalidGroup.InUse",
+		// Helm release errors that occur when cluster is unreachable
+		"failed to delete release",
+		"Kubernetes cluster unreachable",
+		"connection refused",
+		"no endpoints available",
+		"i/o timeout",
 	}
 	for _, pattern := range retryablePatterns {
+		if len(errStr) > 0 && contains(errStr, pattern) {
+			return true
+		}
+	}
+	return false
+}
+
+// isHelmReleaseError checks if the error is specifically a Helm release failure
+// (cluster unreachable, release already gone, etc.)
+func isHelmReleaseError(errStr string) bool {
+	helmPatterns := []string{
+		"failed to delete release",
+		"release: not found",
+		"Kubernetes cluster unreachable",
+		"no endpoints available",
+	}
+	for _, pattern := range helmPatterns {
 		if len(errStr) > 0 && contains(errStr, pattern) {
 			return true
 		}
