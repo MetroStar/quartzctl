@@ -28,6 +28,7 @@ import (
 	"github.com/MetroStar/quartzctl/internal/config/schema"
 	"github.com/MetroStar/quartzctl/internal/util"
 	corev1 "k8s.io/api/core/v1"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	k8sSchema "k8s.io/apimachinery/pkg/runtime/schema"
 )
@@ -615,6 +616,164 @@ func TestProviderKubernetesClientWaitConditionState(t *testing.T) {
 	err = c.WaitConditionState(context.Background(), kind, "test", "test-vs", "THINKING...", 1)
 	if err != nil {
 		t.Errorf("unexpected response from kubernetes client wait, %v", err)
+	}
+}
+
+func TestProviderKubernetesClientGetDaemonSetStatus(t *testing.T) {
+	ds := &unstructured.Unstructured{
+		Object: map[string]interface{}{
+			"apiVersion": "apps/v1",
+			"kind":       "DaemonSet",
+			"metadata": map[string]interface{}{
+				"namespace": "kube-system",
+				"name":      "test-daemonset",
+			},
+			"status": map[string]interface{}{
+				"desiredNumberScheduled": int64(3),
+				"numberReady":            int64(3),
+			},
+		},
+	}
+
+	api := NewKubernetesApiMock().
+		WithDynamicObjects(ds).
+		AddResources(&metav1.APIResourceList{
+			GroupVersion: "apps/v1",
+			APIResources: []metav1.APIResource{
+				{Name: "daemonsets", Namespaced: true, Kind: "DaemonSet"},
+			},
+		})
+	cfg := schema.QuartzConfig{}
+	kubeconfig := KubeconfigInfo{}
+
+	c, err := NewKubernetesClient(api, kubeconfig, cfg)
+	if err != nil {
+		t.Errorf("unexpected error from kubernetes client constructor, %v", err)
+		return
+	}
+
+	kind, err := c.LookupKind(context.Background(), "DaemonSet")
+	if err != nil {
+		t.Errorf("failed to lookup daemonset kind, %v", err)
+		return
+	}
+
+	ready, desired, err := c.GetDaemonSetStatus(context.Background(), kind, "kube-system", "test-daemonset")
+	if err != nil {
+		t.Errorf("unexpected error from GetDaemonSetStatus, %v", err)
+		return
+	}
+
+	if ready != 3 {
+		t.Errorf("expected ready=3, got %d", ready)
+	}
+	if desired != 3 {
+		t.Errorf("expected desired=3, got %d", desired)
+	}
+}
+
+func TestProviderKubernetesClientGetDaemonSetStatusNotReady(t *testing.T) {
+	ds := &unstructured.Unstructured{
+		Object: map[string]interface{}{
+			"apiVersion": "apps/v1",
+			"kind":       "DaemonSet",
+			"metadata": map[string]interface{}{
+				"namespace": "kube-system",
+				"name":      "test-daemonset",
+			},
+			"status": map[string]interface{}{
+				"desiredNumberScheduled": int64(5),
+				"numberReady":            int64(2),
+			},
+		},
+	}
+
+	api := NewKubernetesApiMock().
+		WithDynamicObjects(ds).
+		AddResources(&metav1.APIResourceList{
+			GroupVersion: "apps/v1",
+			APIResources: []metav1.APIResource{
+				{Name: "daemonsets", Namespaced: true, Kind: "DaemonSet"},
+			},
+		})
+	cfg := schema.QuartzConfig{}
+	kubeconfig := KubeconfigInfo{}
+
+	c, err := NewKubernetesClient(api, kubeconfig, cfg)
+	if err != nil {
+		t.Errorf("unexpected error from kubernetes client constructor, %v", err)
+		return
+	}
+
+	kind, err := c.LookupKind(context.Background(), "DaemonSet")
+	if err != nil {
+		t.Errorf("failed to lookup daemonset kind, %v", err)
+		return
+	}
+
+	ready, desired, err := c.GetDaemonSetStatus(context.Background(), kind, "kube-system", "test-daemonset")
+	if err != nil {
+		t.Errorf("unexpected error from GetDaemonSetStatus, %v", err)
+		return
+	}
+
+	if ready != 2 {
+		t.Errorf("expected ready=2, got %d", ready)
+	}
+	if desired != 5 {
+		t.Errorf("expected desired=5, got %d", desired)
+	}
+}
+
+func TestProviderKubernetesClientGetDaemonSetStatusNotFound(t *testing.T) {
+	api := NewKubernetesApiMock().
+		AddResources(&metav1.APIResourceList{
+			GroupVersion: "apps/v1",
+			APIResources: []metav1.APIResource{
+				{Name: "daemonsets", Namespaced: true, Kind: "DaemonSet"},
+			},
+		})
+	cfg := schema.QuartzConfig{}
+	kubeconfig := KubeconfigInfo{}
+
+	c, err := NewKubernetesClient(api, kubeconfig, cfg)
+	if err != nil {
+		t.Errorf("unexpected error from kubernetes client constructor, %v", err)
+		return
+	}
+
+	kind, err := c.LookupKind(context.Background(), "DaemonSet")
+	if err != nil {
+		t.Errorf("failed to lookup daemonset kind, %v", err)
+		return
+	}
+
+	_, _, err = c.GetDaemonSetStatus(context.Background(), kind, "kube-system", "nonexistent")
+	if err == nil {
+		t.Error("expected error for nonexistent daemonset")
+	}
+}
+
+func TestProviderKubernetesClientCleanupStuckTerminatingPods(t *testing.T) {
+	api := NewKubernetesApiMock()
+	cfg := schema.QuartzConfig{}
+	kubeconfig := KubeconfigInfo{}
+
+	c, err := NewKubernetesClient(api, kubeconfig, cfg)
+	if err != nil {
+		t.Errorf("unexpected error from kubernetes client constructor, %v", err)
+		return
+	}
+
+	// Test with no pods - should return empty list
+	cleaned, err := c.CleanupStuckTerminatingPods(context.Background(), 5*60*1000000000) // 5 minutes in nanoseconds
+	if err != nil {
+		t.Errorf("unexpected error from CleanupStuckTerminatingPods, %v", err)
+		return
+	}
+
+	if len(cleaned) != 0 {
+		t.Errorf("expected 0 cleaned pods, got %d", len(cleaned))
 	}
 }
 
