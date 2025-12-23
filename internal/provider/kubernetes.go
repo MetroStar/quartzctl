@@ -65,6 +65,7 @@ type KubernetesProviderClient interface {
 	Restart(ctx context.Context, kind schema.GroupVersionResource, ns string, name string) error
 	GetDaemonSetStatus(ctx context.Context, kind schema.GroupVersionResource, ns string, name string) (int64, int64, error)
 	CleanupStuckTerminatingPods(ctx context.Context, timeout time.Duration) ([]string, error)
+	ListVirtualServices(ctx context.Context) ([]VirtualServiceInfo, error)
 }
 
 // KubernetesClient is the implementation of the Kubernetes provider client.
@@ -107,6 +108,14 @@ type KubernetesResource struct {
 	Namespace string
 	Kind      schema.GroupVersionResource
 	Item      unstructured.Unstructured
+}
+
+// VirtualServiceInfo contains information about a VirtualService.
+type VirtualServiceInfo struct {
+	Name      string
+	Namespace string
+	Hosts     []string
+	Gateways  []string
 }
 
 type KubernetesProviderCheckResult struct {
@@ -184,6 +193,8 @@ func (c KubernetesClient) WriteKubeconfig(w io.Writer) error {
 // PrintClusterInfo prints information about the cluster and its applications.
 func (c KubernetesClient) PrintClusterInfo(ctx context.Context) {
 	apps := map[string]quartzSchema.ApplicationLookupConfig{}
+	configuredIngressNames := make(map[string]bool)
+
 	for k, v := range c.cfg.Core.Applications {
 		if v.Disabled {
 			continue
@@ -198,8 +209,62 @@ func (c KubernetesClient) PrintClusterInfo(ctx context.Context) {
 			name = k
 		}
 		apps[name] = v.Lookup
+
+		// Track configured ingress names to exclude from discovery
+		if v.Lookup.Ingress.Name != "" {
+			configuredIngressNames[v.Lookup.Ingress.Name] = true
+		}
 	}
 	c.PrintClusterAppInfo(ctx, apps)
+
+	// Print additional discovered VirtualServices
+	c.PrintDiscoveredVirtualServices(ctx, configuredIngressNames)
+}
+
+// PrintDiscoveredVirtualServices prints VirtualServices that are not in the configured applications.
+func (c KubernetesClient) PrintDiscoveredVirtualServices(ctx context.Context, excludeNames map[string]bool) {
+	virtualServices, err := c.ListVirtualServices(ctx)
+	if err != nil {
+		log.Debug("Failed to list VirtualServices", "error", err)
+		return
+	}
+
+	var rows [][]string
+	for _, vs := range virtualServices {
+		// Skip VirtualServices that are in the configured apps
+		if excludeNames[vs.Name] {
+			continue
+		}
+
+		// Skip mesh-only gateways (internal services)
+		isMeshOnly := true
+		for _, gw := range vs.Gateways {
+			if gw != "mesh" {
+				isMeshOnly = false
+				break
+			}
+		}
+		if isMeshOnly && len(vs.Gateways) > 0 {
+			continue
+		}
+
+		// Get the first host for display
+		host := ""
+		if len(vs.Hosts) > 0 {
+			host = vs.Hosts[0]
+		}
+
+		rows = append(rows, []string{vs.Name, vs.Namespace, fmt.Sprintf("https://%s", host)})
+	}
+
+	if len(rows) == 0 {
+		return
+	}
+
+	fmt.Println() // Add spacing
+	util.Printf("Additional Services")
+	headers := []string{"Name", "Namespace", "URL"}
+	util.PrintTable(headers, rows)
 }
 
 // PrintClusterAppInfo prints detailed information about the specified applications in the cluster.
@@ -303,6 +368,51 @@ func (c KubernetesClient) RefreshExternalSecrets(ctx context.Context) ([]Kuberne
 	})
 
 	return result, err
+}
+
+// ListVirtualServices returns all VirtualServices in the cluster with their hosts and gateways.
+func (c KubernetesClient) ListVirtualServices(ctx context.Context) (result []VirtualServiceInfo, err error) {
+	// Recover from panics (e.g., during tests with fake clients that don't have all kinds registered)
+	defer func() {
+		if r := recover(); r != nil {
+			log.Debug("Recovered from panic in ListVirtualServices", "panic", r)
+			err = fmt.Errorf("failed to list VirtualServices: %v", r)
+		}
+	}()
+
+	kind, lookupErr := c.LookupKind(ctx, "VirtualService")
+	if lookupErr != nil {
+		return nil, fmt.Errorf("failed to lookup VirtualService kind: %w", lookupErr)
+	}
+
+	listErr := c.ForEachDynamicResources(ctx, kind, "", func(item unstructured.Unstructured) {
+		name := item.GetName()
+		ns := item.GetNamespace()
+
+		hosts, _, _ := unstructured.NestedStringSlice(item.Object, "spec", "hosts")
+		gateways, _, _ := unstructured.NestedStringSlice(item.Object, "spec", "gateways")
+
+		result = append(result, VirtualServiceInfo{
+			Name:      name,
+			Namespace: ns,
+			Hosts:     hosts,
+			Gateways:  gateways,
+		})
+	})
+
+	if listErr != nil {
+		return nil, fmt.Errorf("failed to list VirtualServices: %w", listErr)
+	}
+
+	// Sort by namespace/name for consistent ordering
+	slices.SortFunc(result, func(a, b VirtualServiceInfo) int {
+		if a.Namespace != b.Namespace {
+			return cmp.Compare(a.Namespace, b.Namespace)
+		}
+		return cmp.Compare(a.Name, b.Name)
+	})
+
+	return result, nil
 }
 
 // Export exports Kubernetes resources based on the provided configuration.

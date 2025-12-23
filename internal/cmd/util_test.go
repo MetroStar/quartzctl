@@ -129,8 +129,9 @@ func TestNewRootInternalCommand(t *testing.T) {
 
 	assert.Equal(t, "internal", cmd.Name)
 	assert.True(t, cmd.Hidden)
-	assert.Len(t, cmd.Commands, 1)
+	assert.Len(t, cmd.Commands, 2)
 	assert.Equal(t, "force-cleanup", cmd.Commands[0].Name)
+	assert.Equal(t, "cleanup-terminating-pods", cmd.Commands[1].Name)
 
 	err := cmd.Commands[0].Action(context.Background(), &cli.Command{})
 	assert.NoError(t, err)
