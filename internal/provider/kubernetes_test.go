@@ -790,3 +790,151 @@ func newK8sObject(apiVersion, kind, namespace, name string) *unstructured.Unstru
 	}
 	return o
 }
+
+func TestProviderKubernetesClientListVirtualServices(t *testing.T) {
+	vs1 := &unstructured.Unstructured{
+		Object: map[string]interface{}{
+			"apiVersion": "networking.istio.io/v1beta1",
+			"kind":       "VirtualService",
+			"metadata": map[string]interface{}{
+				"namespace": "app1",
+				"name":      "my-service",
+			},
+			"spec": map[string]interface{}{
+				"hosts":    []interface{}{"my-service.example.com"},
+				"gateways": []interface{}{"istio-system/main-gateway"},
+			},
+		},
+	}
+	vs2 := &unstructured.Unstructured{
+		Object: map[string]interface{}{
+			"apiVersion": "networking.istio.io/v1beta1",
+			"kind":       "VirtualService",
+			"metadata": map[string]interface{}{
+				"namespace": "app2",
+				"name":      "another-service",
+			},
+			"spec": map[string]interface{}{
+				"hosts":    []interface{}{"another.example.com"},
+				"gateways": []interface{}{"mesh"}, // mesh-only gateway
+			},
+		},
+	}
+
+	api := NewKubernetesApiMock().
+		WithDynamicObjects(vs1, vs2).
+		AddResources(&metav1.APIResourceList{
+			GroupVersion: "networking.istio.io/v1beta1",
+			APIResources: []metav1.APIResource{
+				{Name: "virtualservices", Namespaced: true, Kind: "VirtualService"},
+			},
+		})
+	cfg := schema.QuartzConfig{}
+	kubeconfig := KubeconfigInfo{}
+
+	c, err := NewKubernetesClient(api, kubeconfig, cfg)
+	if err != nil {
+		t.Errorf("unexpected error from kubernetes client constructor, %v", err)
+		return
+	}
+
+	result, err := c.ListVirtualServices(context.Background())
+	if err != nil {
+		t.Errorf("unexpected error from ListVirtualServices, %v", err)
+		return
+	}
+
+	if len(result) != 2 {
+		t.Errorf("expected 2 VirtualServices, got %d", len(result))
+		return
+	}
+
+	// Results should be sorted by namespace/name
+	if result[0].Name != "my-service" {
+		t.Errorf("expected first VirtualService to be 'my-service', got '%s'", result[0].Name)
+	}
+	if result[0].Namespace != "app1" {
+		t.Errorf("expected first VirtualService namespace 'app1', got '%s'", result[0].Namespace)
+	}
+	if len(result[0].Hosts) != 1 || result[0].Hosts[0] != "my-service.example.com" {
+		t.Errorf("unexpected hosts for first VirtualService: %v", result[0].Hosts)
+	}
+}
+
+func TestProviderKubernetesClientListVirtualServicesNotFound(t *testing.T) {
+	// Test when VirtualService CRD doesn't exist
+	api := NewKubernetesApiMock()
+	cfg := schema.QuartzConfig{}
+	kubeconfig := KubeconfigInfo{}
+
+	c, err := NewKubernetesClient(api, kubeconfig, cfg)
+	if err != nil {
+		t.Errorf("unexpected error from kubernetes client constructor, %v", err)
+		return
+	}
+
+	_, err = c.ListVirtualServices(context.Background())
+	if err == nil {
+		t.Error("expected error when VirtualService CRD not found")
+	}
+}
+
+func TestProviderKubernetesClientForEachDynamicResourcesNamespaced(t *testing.T) {
+	// Test ForEachDynamicResources with a specific namespace
+	ds1 := &unstructured.Unstructured{
+		Object: map[string]interface{}{
+			"apiVersion": "apps/v1",
+			"kind":       "Deployment",
+			"metadata": map[string]interface{}{
+				"namespace": "ns1",
+				"name":      "deploy1",
+			},
+		},
+	}
+	ds2 := &unstructured.Unstructured{
+		Object: map[string]interface{}{
+			"apiVersion": "apps/v1",
+			"kind":       "Deployment",
+			"metadata": map[string]interface{}{
+				"namespace": "ns2",
+				"name":      "deploy2",
+			},
+		},
+	}
+
+	api := NewKubernetesApiMock().
+		WithDynamicObjects(ds1, ds2).
+		AddResources(&metav1.APIResourceList{
+			GroupVersion: "apps/v1",
+			APIResources: []metav1.APIResource{
+				{Name: "deployments", Namespaced: true, Kind: "Deployment"},
+			},
+		})
+	cfg := schema.QuartzConfig{}
+	kubeconfig := KubeconfigInfo{}
+
+	c, err := NewKubernetesClient(api, kubeconfig, cfg)
+	if err != nil {
+		t.Errorf("unexpected error from kubernetes client constructor, %v", err)
+		return
+	}
+
+	kind, err := c.LookupKind(context.Background(), "Deployment")
+	if err != nil {
+		t.Errorf("failed to lookup Deployment kind, %v", err)
+		return
+	}
+
+	var found []string
+	err = c.ForEachDynamicResources(context.Background(), kind, "ns1", func(item unstructured.Unstructured) {
+		found = append(found, item.GetName())
+	})
+	if err != nil {
+		t.Errorf("unexpected error from ForEachDynamicResources, %v", err)
+		return
+	}
+
+	if len(found) != 1 || found[0] != "deploy1" {
+		t.Errorf("expected only deploy1 in ns1, got %v", found)
+	}
+}
