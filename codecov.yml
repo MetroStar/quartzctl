@@ -25,8 +25,6 @@ coverage:
 ignore:
   # AWS CLI integration code - uses exec.CommandContext extensively
   - "internal/cmd/aws_cleanup.go"
-  # CLI command wiring and prompt handling
-  - "internal/cmd/internal.go"
   # Main entry point
   - "cmd/quartz/main.go"
 
