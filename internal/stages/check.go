@@ -246,7 +246,7 @@ func postEventChecks(sc schema.StageConfig, event string, providerFactory provid
 }
 
 // appendChecks appends the specified stage checks to the result slice.
-// Handles HTTP, Kubernetes, and state checks.
+// Handles HTTP, Kubernetes, DaemonSet, and state checks.
 func appendChecks(r []StageCheck, s schema.StageChecksConfig, providerFactory provider.ProviderFactory) []StageCheck {
 	for _, hc := range s.Http {
 		ihc := hc
@@ -256,6 +256,11 @@ func appendChecks(r []StageCheck, s schema.StageChecksConfig, providerFactory pr
 	for _, kc := range s.Kubernetes {
 		ikc := kc
 		r = append(r, NewKubernetesStageCheck(ikc, providerFactory))
+	}
+
+	for _, dc := range s.DaemonSet {
+		idc := dc
+		r = append(r, NewDaemonSetStageCheck(idc, providerFactory))
 	}
 
 	for _, sc := range s.State {

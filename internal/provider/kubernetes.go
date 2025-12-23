@@ -63,6 +63,8 @@ type KubernetesProviderClient interface {
 	GetConfigMapValue(ctx context.Context, ns string, name string) (map[string]string, error)
 	GetSecretValue(ctx context.Context, ns string, name string) (map[string]string, error)
 	Restart(ctx context.Context, kind schema.GroupVersionResource, ns string, name string) error
+	GetDaemonSetStatus(ctx context.Context, kind schema.GroupVersionResource, ns string, name string) (int64, int64, error)
+	CleanupStuckTerminatingPods(ctx context.Context, timeout time.Duration) ([]string, error)
 }
 
 // KubernetesClient is the implementation of the Kubernetes provider client.
@@ -557,6 +559,53 @@ func (c KubernetesClient) GetDynamicResource(ctx context.Context, kind schema.Gr
 	return res.Object, nil
 }
 
+// CleanupStuckTerminatingPods force-deletes pods that have been stuck in Terminating
+// state for longer than the specified timeout. This handles scenarios where pods
+// cannot terminate gracefully due to CNI issues or other infrastructure problems.
+func (c KubernetesClient) CleanupStuckTerminatingPods(ctx context.Context, timeout time.Duration) ([]string, error) {
+	clientset, err := c.api.ClientSet()
+	if err != nil {
+		return nil, err
+	}
+
+	pods, err := clientset.CoreV1().Pods("").List(ctx, metav1.ListOptions{})
+	if err != nil {
+		return nil, err
+	}
+
+	var cleaned []string
+	gracePeriod := int64(0)
+	deleteOpts := metav1.DeleteOptions{GracePeriodSeconds: &gracePeriod}
+
+	for _, pod := range pods.Items {
+		// Check if pod is terminating (has a deletionTimestamp)
+		if pod.DeletionTimestamp == nil {
+			continue
+		}
+
+		// Check if pod has been terminating longer than timeout
+		terminatingDuration := time.Since(pod.DeletionTimestamp.Time)
+		if terminatingDuration < timeout {
+			continue
+		}
+
+		log.Info("Force-deleting stuck terminating pod",
+			"namespace", pod.Namespace,
+			"name", pod.Name,
+			"terminating_for", terminatingDuration.Round(time.Second).String())
+
+		err := clientset.CoreV1().Pods(pod.Namespace).Delete(ctx, pod.Name, deleteOpts)
+		if err != nil {
+			log.Warn("Failed to force-delete pod", "namespace", pod.Namespace, "name", pod.Name, "err", err)
+			continue
+		}
+
+		cleaned = append(cleaned, fmt.Sprintf("%s/%s", pod.Namespace, pod.Name))
+	}
+
+	return cleaned, nil
+}
+
 // ForEachDynamicResources iterates over all dynamic resources of a specific kind and namespace.
 func (c KubernetesClient) ForEachDynamicResources(ctx context.Context, kind schema.GroupVersionResource, ns string, onEachItem func(unstructured.Unstructured)) error {
 	dyn, err := c.api.DynamicClient()
@@ -613,6 +662,26 @@ func (c KubernetesClient) Update(ctx context.Context, kind schema.GroupVersionRe
 	}
 
 	return u, nil
+}
+
+// GetDaemonSetStatus retrieves the ready and desired replica counts for a DaemonSet.
+// This is used to verify that all DaemonSet pods are running on all applicable nodes,
+// which is critical for CNI plugins like istio-cni that must be fully deployed
+// before other pods can be scheduled.
+func (c KubernetesClient) GetDaemonSetStatus(ctx context.Context, kind schema.GroupVersionResource, ns string, name string) (int64, int64, error) {
+	obj, err := c.GetDynamicResource(ctx, kind, ns, name)
+	if err != nil {
+		return 0, 0, err
+	}
+
+	desired, found, err := unstructured.NestedInt64(obj, "status", "desiredNumberScheduled")
+	if err != nil || !found {
+		return 0, 0, fmt.Errorf("could not get desiredNumberScheduled for DaemonSet %s/%s: %v", ns, name, err)
+	}
+
+	ready, _, _ := unstructured.NestedInt64(obj, "status", "numberReady")
+
+	return ready, desired, nil
 }
 
 // Restart restarts resources of a specific kind in the cluster.
