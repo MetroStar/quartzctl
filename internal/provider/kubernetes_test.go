@@ -938,3 +938,128 @@ func TestProviderKubernetesClientForEachDynamicResourcesNamespaced(t *testing.T)
 		t.Errorf("expected only deploy1 in ns1, got %v", found)
 	}
 }
+
+func TestProviderKubernetesClientGetSecret(t *testing.T) {
+	secret := &corev1.Secret{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "my-secret",
+			Namespace: "default",
+		},
+		Data: map[string][]byte{
+			"username": []byte("admin"),
+			"password": []byte("secret123"),
+		},
+	}
+
+	api := NewKubernetesApiMock().WithClientObjects(secret)
+	cfg := schema.QuartzConfig{}
+	kubeconfig := KubeconfigInfo{}
+
+	c, err := NewKubernetesClient(api, kubeconfig, cfg)
+	if err != nil {
+		t.Errorf("unexpected error from kubernetes client constructor, %v", err)
+		return
+	}
+
+	s, err := c.GetSecret(context.Background(), "default", "my-secret")
+	if err != nil {
+		t.Errorf("unexpected error from GetSecret, %v", err)
+		return
+	}
+
+	if string(s.Data["username"]) != "admin" {
+		t.Errorf("expected username 'admin', got '%s'", s.Data["username"])
+	}
+	if string(s.Data["password"]) != "secret123" {
+		t.Errorf("expected password 'secret123', got '%s'", s.Data["password"])
+	}
+}
+
+func TestProviderKubernetesClientGetSecretNotFound(t *testing.T) {
+	api := NewKubernetesApiMock()
+	cfg := schema.QuartzConfig{}
+	kubeconfig := KubeconfigInfo{}
+
+	c, err := NewKubernetesClient(api, kubeconfig, cfg)
+	if err != nil {
+		t.Errorf("unexpected error from kubernetes client constructor, %v", err)
+		return
+	}
+
+	_, err = c.GetSecret(context.Background(), "default", "nonexistent")
+	if err == nil {
+		t.Error("expected error for nonexistent secret")
+	}
+}
+
+func TestProviderKubernetesClientPrintDiscoveredVirtualServices(t *testing.T) {
+	// VirtualService with external gateway (should be printed)
+	vs1 := &unstructured.Unstructured{
+		Object: map[string]interface{}{
+			"apiVersion": "networking.istio.io/v1beta1",
+			"kind":       "VirtualService",
+			"metadata": map[string]interface{}{
+				"namespace": "app1",
+				"name":      "my-service",
+			},
+			"spec": map[string]interface{}{
+				"hosts":    []interface{}{"my-service.example.com"},
+				"gateways": []interface{}{"istio-system/main-gateway"},
+			},
+		},
+	}
+	// VirtualService with mesh-only gateway (should be skipped)
+	vs2 := &unstructured.Unstructured{
+		Object: map[string]interface{}{
+			"apiVersion": "networking.istio.io/v1beta1",
+			"kind":       "VirtualService",
+			"metadata": map[string]interface{}{
+				"namespace": "app2",
+				"name":      "internal-service",
+			},
+			"spec": map[string]interface{}{
+				"hosts":    []interface{}{"internal.svc.cluster.local"},
+				"gateways": []interface{}{"mesh"},
+			},
+		},
+	}
+
+	api := NewKubernetesApiMock().
+		WithDynamicObjects(vs1, vs2).
+		AddResources(&metav1.APIResourceList{
+			GroupVersion: "networking.istio.io/v1beta1",
+			APIResources: []metav1.APIResource{
+				{Name: "virtualservices", Namespaced: true, Kind: "VirtualService"},
+			},
+		})
+	cfg := schema.QuartzConfig{}
+	kubeconfig := KubeconfigInfo{}
+
+	c, err := NewKubernetesClient(api, kubeconfig, cfg)
+	if err != nil {
+		t.Errorf("unexpected error from kubernetes client constructor, %v", err)
+		return
+	}
+
+	// Test with empty exclude list - should not panic
+	c.PrintDiscoveredVirtualServices(context.Background(), map[string]bool{})
+
+	// Test with exclusion - should not panic
+	c.PrintDiscoveredVirtualServices(context.Background(), map[string]bool{"my-service": true})
+}
+
+func TestProviderKubernetesClientPrintDiscoveredVirtualServicesNoCRD(t *testing.T) {
+	// Test when VirtualService CRD doesn't exist - should handle gracefully
+	api := NewKubernetesApiMock()
+	cfg := schema.QuartzConfig{}
+	kubeconfig := KubeconfigInfo{}
+
+	c, err := NewKubernetesClient(api, kubeconfig, cfg)
+	if err != nil {
+		t.Errorf("unexpected error from kubernetes client constructor, %v", err)
+		return
+	}
+
+	// Should not panic when CRD doesn't exist
+	c.PrintDiscoveredVirtualServices(context.Background(), map[string]bool{})
+}
