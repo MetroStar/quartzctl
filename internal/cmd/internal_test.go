@@ -61,4 +61,3 @@ func TestCleanupTerminatingPodsZeroTimeout(t *testing.T) {
 	err := CleanupTerminatingPods(context.Background(), p, 0)
 	assert.NoError(t, err)
 }
-
