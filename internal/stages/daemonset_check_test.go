@@ -168,3 +168,29 @@ func TestDaemonSetStageCheckRetryOptsCustom(t *testing.T) {
 	assert.Equal(t, 60, opts.Limit, "Custom retry limit should be 60")
 	assert.Equal(t, 5, opts.WaitSeconds, "Custom wait seconds should be 5")
 }
+
+func TestDaemonSetStageCheckRunDaemonSetNotFound(t *testing.T) {
+	cfg := schema.QuartzConfig{
+		State: schema.NewStateConfig(),
+	}
+
+	// Create mock with DaemonSet resource type registered but no actual DaemonSet
+	api := provider.NewKubernetesApiMock().
+		AddResources(&metav1.APIResourceList{
+			GroupVersion: "apps/v1",
+			APIResources: []metav1.APIResource{
+				{Name: "daemonsets", Namespaced: true, Kind: "DaemonSet"},
+			},
+		})
+	kubeconfig := provider.KubeconfigInfo{}
+	k8s, _ := provider.NewKubernetesClient(api, kubeconfig, cfg)
+	f := provider.NewProviderFactory(cfg, schema.QuartzSecrets{}, provider.WithKubernetesProvider(k8s))
+
+	c := NewDaemonSetStageCheck(schema.StageChecksDaemonSetConfig{
+		Name:      "nonexistent",
+		Namespace: "kube-system",
+	}, *f)
+
+	err := c.Run(context.Background(), cfg)
+	assert.Error(t, err, "DaemonSet check should fail when DaemonSet not found")
+}
