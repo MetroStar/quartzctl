@@ -162,7 +162,7 @@ func NewInfrastructureEnvironmentConfig(name string, desc string) Infrastructure
 				DefaultPath:                "/applications",
 				Scopes:                     []string{"argocd"},
 				AccessTokenLifespanSeconds: 60 * 60 * 12, // 12 hrs
-				Lookup:                     NewApplicationLookupConfig("argocd", "argocd-initial-admin-secret", "admin", "", "password", "argocd-argocd-server"),
+				Lookup:                     NewApplicationLookupConfig("argocd", "argocd-initial-admin-secret", "admin", "", "password", "argocd-argocd"),
 				Keycloak: map[string]interface{}{
 					"mappers": map[string]interface{}{
 						"username": map[string]interface{}{

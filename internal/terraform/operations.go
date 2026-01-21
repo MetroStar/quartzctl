@@ -159,6 +159,8 @@ func (c *TerraformClient) Destroy(ctx context.Context, stage schema.StageConfig)
 
 	var vars []tfexec.DestroyOption
 	vars = append(vars, tfexec.Refresh(false))
+	// Increase lock timeout for long-running destroy operations (e.g., waiting for SG cleanup)
+	vars = append(vars, tfexec.LockTimeout("30m"))
 	for _, v := range c.stageVars(ctx, stage) {
 		vars = append(vars, v)
 	}

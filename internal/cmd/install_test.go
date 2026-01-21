@@ -65,3 +65,130 @@ func TestCmdClean(t *testing.T) {
 		t.Errorf("unexpected error in cmd Clean, %v", err)
 	}
 }
+
+func TestIsRetryableDestroyError(t *testing.T) {
+	tests := []struct {
+		name     string
+		errStr   string
+		expected bool
+	}{
+		{
+			name:     "DependencyViolation error",
+			errStr:   "Error: DependencyViolation: resource has dependencies",
+			expected: true,
+		},
+		{
+			name:     "has a dependent object error",
+			errStr:   "cannot delete: has a dependent object",
+			expected: true,
+		},
+		{
+			name:     "NetworkInterfaceInUse error",
+			errStr:   "Error: NetworkInterfaceInUse: interface eni-123 is in use",
+			expected: true,
+		},
+		{
+			name:     "InvalidGroup.InUse error",
+			errStr:   "Error: InvalidGroup.InUse: security group sg-123 is in use",
+			expected: true,
+		},
+		{
+			name:     "Helm failed to delete release",
+			errStr:   "Error: failed to delete release: connection refused",
+			expected: true,
+		},
+		{
+			name:     "Kubernetes cluster unreachable",
+			errStr:   "Kubernetes cluster unreachable: dial tcp timeout",
+			expected: true,
+		},
+		{
+			name:     "connection refused",
+			errStr:   "Post https://api.cluster.local: connection refused",
+			expected: true,
+		},
+		{
+			name:     "no endpoints available",
+			errStr:   "Internal error: failed calling webhook: no endpoints available",
+			expected: true,
+		},
+		{
+			name:     "i/o timeout",
+			errStr:   "Post https://api.cluster.local: i/o timeout",
+			expected: true,
+		},
+		{
+			name:     "unrelated error",
+			errStr:   "Error: resource not found",
+			expected: false,
+		},
+		{
+			name:     "empty string",
+			errStr:   "",
+			expected: false,
+		},
+		{
+			name:     "permission denied",
+			errStr:   "Error: Access Denied",
+			expected: false,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			result := isRetryableDestroyError(tt.errStr)
+			assert.Equal(t, tt.expected, result, "isRetryableDestroyError(%q) = %v, want %v", tt.errStr, result, tt.expected)
+		})
+	}
+}
+
+func TestIsHelmReleaseError(t *testing.T) {
+	tests := []struct {
+		name     string
+		errStr   string
+		expected bool
+	}{
+		{
+			name:     "failed to delete release",
+			errStr:   "Error: failed to delete release reloader",
+			expected: true,
+		},
+		{
+			name:     "release not found",
+			errStr:   "Error: release: not found",
+			expected: true,
+		},
+		{
+			name:     "Kubernetes cluster unreachable",
+			errStr:   "Kubernetes cluster unreachable: dial tcp timeout",
+			expected: true,
+		},
+		{
+			name:     "no endpoints available for webhook",
+			errStr:   "Internal error: failed calling webhook: no endpoints available for service kyverno",
+			expected: true,
+		},
+		{
+			name:     "generic AWS error",
+			errStr:   "Error: DependencyViolation: resource has dependencies",
+			expected: false,
+		},
+		{
+			name:     "empty string",
+			errStr:   "",
+			expected: false,
+		},
+		{
+			name:     "unrelated error",
+			errStr:   "Error: resource not found",
+			expected: false,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			result := isHelmReleaseError(tt.errStr)
+			assert.Equal(t, tt.expected, result, "isHelmReleaseError(%q) = %v, want %v", tt.errStr, result, tt.expected)
+		})
+	}
+}

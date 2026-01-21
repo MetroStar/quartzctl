@@ -63,6 +63,9 @@ type KubernetesProviderClient interface {
 	GetConfigMapValue(ctx context.Context, ns string, name string) (map[string]string, error)
 	GetSecretValue(ctx context.Context, ns string, name string) (map[string]string, error)
 	Restart(ctx context.Context, kind schema.GroupVersionResource, ns string, name string) error
+	GetDaemonSetStatus(ctx context.Context, kind schema.GroupVersionResource, ns string, name string) (int64, int64, error)
+	CleanupStuckTerminatingPods(ctx context.Context, timeout time.Duration) ([]string, error)
+	ListVirtualServices(ctx context.Context) ([]VirtualServiceInfo, error)
 }
 
 // KubernetesClient is the implementation of the Kubernetes provider client.
@@ -105,6 +108,14 @@ type KubernetesResource struct {
 	Namespace string
 	Kind      schema.GroupVersionResource
 	Item      unstructured.Unstructured
+}
+
+// VirtualServiceInfo contains information about a VirtualService.
+type VirtualServiceInfo struct {
+	Name      string
+	Namespace string
+	Hosts     []string
+	Gateways  []string
 }
 
 type KubernetesProviderCheckResult struct {
@@ -182,6 +193,8 @@ func (c KubernetesClient) WriteKubeconfig(w io.Writer) error {
 // PrintClusterInfo prints information about the cluster and its applications.
 func (c KubernetesClient) PrintClusterInfo(ctx context.Context) {
 	apps := map[string]quartzSchema.ApplicationLookupConfig{}
+	configuredIngressNames := make(map[string]bool)
+
 	for k, v := range c.cfg.Core.Applications {
 		if v.Disabled {
 			continue
@@ -196,8 +209,62 @@ func (c KubernetesClient) PrintClusterInfo(ctx context.Context) {
 			name = k
 		}
 		apps[name] = v.Lookup
+
+		// Track configured ingress names to exclude from discovery
+		if v.Lookup.Ingress.Name != "" {
+			configuredIngressNames[v.Lookup.Ingress.Name] = true
+		}
 	}
 	c.PrintClusterAppInfo(ctx, apps)
+
+	// Print additional discovered VirtualServices
+	c.PrintDiscoveredVirtualServices(ctx, configuredIngressNames)
+}
+
+// PrintDiscoveredVirtualServices prints VirtualServices that are not in the configured applications.
+func (c KubernetesClient) PrintDiscoveredVirtualServices(ctx context.Context, excludeNames map[string]bool) {
+	virtualServices, err := c.ListVirtualServices(ctx)
+	if err != nil {
+		log.Debug("Failed to list VirtualServices", "error", err)
+		return
+	}
+
+	var rows [][]string
+	for _, vs := range virtualServices {
+		// Skip VirtualServices that are in the configured apps
+		if excludeNames[vs.Name] {
+			continue
+		}
+
+		// Skip mesh-only gateways (internal services)
+		isMeshOnly := true
+		for _, gw := range vs.Gateways {
+			if gw != "mesh" {
+				isMeshOnly = false
+				break
+			}
+		}
+		if isMeshOnly && len(vs.Gateways) > 0 {
+			continue
+		}
+
+		// Get the first host for display
+		host := ""
+		if len(vs.Hosts) > 0 {
+			host = vs.Hosts[0]
+		}
+
+		rows = append(rows, []string{vs.Name, vs.Namespace, fmt.Sprintf("https://%s", host)})
+	}
+
+	if len(rows) == 0 {
+		return
+	}
+
+	fmt.Println() // Add spacing
+	util.Printf("Additional Services")
+	headers := []string{"Name", "Namespace", "URL"}
+	util.PrintTable(headers, rows)
 }
 
 // PrintClusterAppInfo prints detailed information about the specified applications in the cluster.
@@ -301,6 +368,51 @@ func (c KubernetesClient) RefreshExternalSecrets(ctx context.Context) ([]Kuberne
 	})
 
 	return result, err
+}
+
+// ListVirtualServices returns all VirtualServices in the cluster with their hosts and gateways.
+func (c KubernetesClient) ListVirtualServices(ctx context.Context) (result []VirtualServiceInfo, err error) {
+	// Recover from panics (e.g., during tests with fake clients that don't have all kinds registered)
+	defer func() {
+		if r := recover(); r != nil {
+			log.Debug("Recovered from panic in ListVirtualServices", "panic", r)
+			err = fmt.Errorf("failed to list VirtualServices: %v", r)
+		}
+	}()
+
+	kind, lookupErr := c.LookupKind(ctx, "VirtualService")
+	if lookupErr != nil {
+		return nil, fmt.Errorf("failed to lookup VirtualService kind: %w", lookupErr)
+	}
+
+	listErr := c.ForEachDynamicResources(ctx, kind, "", func(item unstructured.Unstructured) {
+		name := item.GetName()
+		ns := item.GetNamespace()
+
+		hosts, _, _ := unstructured.NestedStringSlice(item.Object, "spec", "hosts")
+		gateways, _, _ := unstructured.NestedStringSlice(item.Object, "spec", "gateways")
+
+		result = append(result, VirtualServiceInfo{
+			Name:      name,
+			Namespace: ns,
+			Hosts:     hosts,
+			Gateways:  gateways,
+		})
+	})
+
+	if listErr != nil {
+		return nil, fmt.Errorf("failed to list VirtualServices: %w", listErr)
+	}
+
+	// Sort by namespace/name for consistent ordering
+	slices.SortFunc(result, func(a, b VirtualServiceInfo) int {
+		if a.Namespace != b.Namespace {
+			return cmp.Compare(a.Namespace, b.Namespace)
+		}
+		return cmp.Compare(a.Name, b.Name)
+	})
+
+	return result, nil
 }
 
 // Export exports Kubernetes resources based on the provided configuration.
@@ -557,6 +669,53 @@ func (c KubernetesClient) GetDynamicResource(ctx context.Context, kind schema.Gr
 	return res.Object, nil
 }
 
+// CleanupStuckTerminatingPods force-deletes pods that have been stuck in Terminating
+// state for longer than the specified timeout. This handles scenarios where pods
+// cannot terminate gracefully due to CNI issues or other infrastructure problems.
+func (c KubernetesClient) CleanupStuckTerminatingPods(ctx context.Context, timeout time.Duration) ([]string, error) {
+	clientset, err := c.api.ClientSet()
+	if err != nil {
+		return nil, err
+	}
+
+	pods, err := clientset.CoreV1().Pods("").List(ctx, metav1.ListOptions{})
+	if err != nil {
+		return nil, err
+	}
+
+	var cleaned []string
+	gracePeriod := int64(0)
+	deleteOpts := metav1.DeleteOptions{GracePeriodSeconds: &gracePeriod}
+
+	for _, pod := range pods.Items {
+		// Check if pod is terminating (has a deletionTimestamp)
+		if pod.DeletionTimestamp == nil {
+			continue
+		}
+
+		// Check if pod has been terminating longer than timeout
+		terminatingDuration := time.Since(pod.DeletionTimestamp.Time)
+		if terminatingDuration < timeout {
+			continue
+		}
+
+		log.Info("Force-deleting stuck terminating pod",
+			"namespace", pod.Namespace,
+			"name", pod.Name,
+			"terminating_for", terminatingDuration.Round(time.Second).String())
+
+		err := clientset.CoreV1().Pods(pod.Namespace).Delete(ctx, pod.Name, deleteOpts)
+		if err != nil {
+			log.Warn("Failed to force-delete pod", "namespace", pod.Namespace, "name", pod.Name, "err", err)
+			continue
+		}
+
+		cleaned = append(cleaned, fmt.Sprintf("%s/%s", pod.Namespace, pod.Name))
+	}
+
+	return cleaned, nil
+}
+
 // ForEachDynamicResources iterates over all dynamic resources of a specific kind and namespace.
 func (c KubernetesClient) ForEachDynamicResources(ctx context.Context, kind schema.GroupVersionResource, ns string, onEachItem func(unstructured.Unstructured)) error {
 	dyn, err := c.api.DynamicClient()
@@ -613,6 +772,26 @@ func (c KubernetesClient) Update(ctx context.Context, kind schema.GroupVersionRe
 	}
 
 	return u, nil
+}
+
+// GetDaemonSetStatus retrieves the ready and desired replica counts for a DaemonSet.
+// This is used to verify that all DaemonSet pods are running on all applicable nodes,
+// which is critical for CNI plugins like istio-cni that must be fully deployed
+// before other pods can be scheduled.
+func (c KubernetesClient) GetDaemonSetStatus(ctx context.Context, kind schema.GroupVersionResource, ns string, name string) (int64, int64, error) {
+	obj, err := c.GetDynamicResource(ctx, kind, ns, name)
+	if err != nil {
+		return 0, 0, err
+	}
+
+	desired, found, err := unstructured.NestedInt64(obj, "status", "desiredNumberScheduled")
+	if err != nil || !found {
+		return 0, 0, fmt.Errorf("could not get desiredNumberScheduled for DaemonSet %s/%s: %v", ns, name, err)
+	}
+
+	ready, _, _ := unstructured.NestedInt64(obj, "status", "numberReady")
+
+	return ready, desired, nil
 }
 
 // Restart restarts resources of a specific kind in the cluster.

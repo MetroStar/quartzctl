@@ -206,9 +206,16 @@ func (c AwsClient) PrepareAccount(ctx context.Context) error {
 			AWSServiceName: aws.String(svc),
 		})
 		if err != nil {
-			// expecting a 400 response when the roles exist already which they pretty much
-			// always will except the first install in a new account
-			log.Debug("Error creating service linked role", "service", svc, "err", err)
+			// Service linked roles typically already exist in most accounts.
+			// Only log as debug for expected "already exists" errors, log as warning for unexpected errors.
+			errStr := err.Error()
+			if strings.Contains(errStr, "has been taken") || strings.Contains(errStr, "already exists") {
+				log.Debug("Service linked role already exists (expected)", "service", svc)
+			} else {
+				log.Warn("Unexpected error creating service linked role", "service", svc, "err", err)
+			}
+		} else {
+			log.Info("Created service linked role", "service", svc)
 		}
 	}
 

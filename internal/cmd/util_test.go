@@ -25,6 +25,7 @@ import (
 
 	"github.com/MetroStar/quartzctl/internal/config"
 	"github.com/MetroStar/quartzctl/internal/provider"
+	"github.com/MetroStar/quartzctl/internal/stages"
 	"github.com/MetroStar/quartzctl/internal/terraform"
 	"github.com/MetroStar/quartzctl/internal/util"
 	"github.com/knadh/koanf/v2"
@@ -129,8 +130,9 @@ func TestNewRootInternalCommand(t *testing.T) {
 
 	assert.Equal(t, "internal", cmd.Name)
 	assert.True(t, cmd.Hidden)
-	assert.Len(t, cmd.Commands, 1)
+	assert.Len(t, cmd.Commands, 2)
 	assert.Equal(t, "force-cleanup", cmd.Commands[0].Name)
+	assert.Equal(t, "cleanup-terminating-pods", cmd.Commands[1].Name)
 
 	err := cmd.Commands[0].Action(context.Background(), &cli.Command{})
 	assert.NoError(t, err)
@@ -340,4 +342,111 @@ func defaultTestConfig(t *testing.T) *CommandParams {
 	}
 
 	return &p
+}
+
+func TestOnCheckStart(t *testing.T) {
+	cr := stages.CheckResult{
+		Id:    "test-check-id",
+		Type:  "http",
+		Stage: "bigbang",
+		Event: "install",
+	}
+
+	// Should not panic
+	onCheckStart(cr)
+}
+
+func TestOnCheckComplete(t *testing.T) {
+	tests := []struct {
+		name string
+		cr   stages.CheckResult
+	}{
+		{
+			name: "success case",
+			cr: stages.CheckResult{
+				Id:    "test-check-id",
+				Type:  "http",
+				Stage: "bigbang",
+				Event: "install",
+				Error: nil,
+			},
+		},
+		{
+			name: "error case",
+			cr: stages.CheckResult{
+				Id:    "test-check-id",
+				Type:  "kubernetes",
+				Stage: "bigbang",
+				Event: "install",
+				Error: fmt.Errorf("check failed: deployment not ready"),
+			},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			// Should not panic
+			onCheckComplete(tt.cr)
+		})
+	}
+}
+
+func TestOnCheckRetry(t *testing.T) {
+	tests := []struct {
+		name    string
+		cr      stages.CheckResult
+		attempt int
+	}{
+		{
+			name: "first attempt with error",
+			cr: stages.CheckResult{
+				Id:    "test-check-id",
+				Type:  "daemonset",
+				Stage: "bigbang",
+				Event: "install",
+				Error: fmt.Errorf("not ready: 2/3 pods"),
+			},
+			attempt: 1,
+		},
+		{
+			name: "intermediate attempt",
+			cr: stages.CheckResult{
+				Id:    "test-check-id",
+				Type:  "daemonset",
+				Stage: "bigbang",
+				Event: "install",
+				Error: fmt.Errorf("not ready: 2/3 pods"),
+			},
+			attempt: 3,
+		},
+		{
+			name: "fifth attempt (detailed message)",
+			cr: stages.CheckResult{
+				Id:    "test-check-id",
+				Type:  "daemonset",
+				Stage: "bigbang",
+				Event: "install",
+				Error: fmt.Errorf("not ready: 2/3 pods"),
+			},
+			attempt: 5,
+		},
+		{
+			name: "tenth attempt (detailed message)",
+			cr: stages.CheckResult{
+				Id:    "test-check-id",
+				Type:  "daemonset",
+				Stage: "bigbang",
+				Event: "install",
+				Error: nil,
+			},
+			attempt: 10,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			// Should not panic
+			onCheckRetry(tt.cr, tt.attempt)
+		})
+	}
 }

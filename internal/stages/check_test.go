@@ -232,3 +232,133 @@ func TestStagesCheckRunChecksError(t *testing.T) {
 		t.Errorf("unexpected result from stages runchecks, %v", res)
 	}
 }
+
+func TestStagesCheckAppendChecksDaemonSet(t *testing.T) {
+	f := provider.NewProviderFactory(schema.QuartzConfig{}, schema.QuartzSecrets{})
+
+	cfg := schema.StageChecksConfig{
+		DaemonSet: []schema.StageChecksDaemonSetConfig{
+			{Name: "istio-cni-node", Namespace: "kube-system"},
+			{Name: "calico-node", Namespace: "kube-system"},
+		},
+	}
+
+	result := appendChecks(nil, cfg, *f)
+
+	if len(result) != 2 {
+		t.Errorf("expected 2 checks, got %d", len(result))
+		return
+	}
+
+	// Verify they're DaemonSet checks
+	for i, check := range result {
+		if check.Type() != "daemonset" {
+			t.Errorf("check %d: expected type 'daemonset', got '%s'", i, check.Type())
+		}
+	}
+}
+
+func TestStagesCheckAppendChecksMultipleTypes(t *testing.T) {
+	svr := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer svr.Close()
+
+	f := provider.NewProviderFactory(schema.QuartzConfig{}, schema.QuartzSecrets{})
+
+	cfg := schema.StageChecksConfig{
+		Http: []schema.StageChecksHttpConfig{
+			{Url: svr.URL, StatusCodes: []int{200}},
+		},
+		DaemonSet: []schema.StageChecksDaemonSetConfig{
+			{Name: "istio-cni-node", Namespace: "kube-system"},
+		},
+	}
+
+	result := appendChecks(nil, cfg, *f)
+
+	if len(result) != 2 {
+		t.Errorf("expected 2 checks (http + daemonset), got %d", len(result))
+		return
+	}
+
+	typeCount := map[string]int{}
+	for _, check := range result {
+		typeCount[check.Type()]++
+	}
+
+	if typeCount["http"] != 1 {
+		t.Errorf("expected 1 http check, got %d", typeCount["http"])
+	}
+	if typeCount["daemonset"] != 1 {
+		t.Errorf("expected 1 daemonset check, got %d", typeCount["daemonset"])
+	}
+}
+
+func TestStagesPreEventChecksWithOrder(t *testing.T) {
+	f := provider.NewProviderFactory(schema.QuartzConfig{}, schema.QuartzSecrets{})
+
+	stageConfig := schema.StageConfig{
+		Checks: map[string]schema.StageChecksConfig{
+			"first": {
+				Order:  1,
+				Before: []string{"install"},
+				DaemonSet: []schema.StageChecksDaemonSetConfig{
+					{Name: "ds1", Namespace: "ns1"},
+				},
+			},
+			"second": {
+				Order:  2,
+				Before: []string{"install"},
+				DaemonSet: []schema.StageChecksDaemonSetConfig{
+					{Name: "ds2", Namespace: "ns2"},
+				},
+			},
+		},
+	}
+
+	result := preEventChecks(stageConfig, "install", *f)
+
+	if len(result) != 2 {
+		t.Errorf("expected 2 check groups, got %d", len(result))
+		return
+	}
+
+	// First group should have ds1, second group should have ds2
+	if len(result[0]) != 1 {
+		t.Errorf("expected 1 check in first group, got %d", len(result[0]))
+	}
+	if len(result[1]) != 1 {
+		t.Errorf("expected 1 check in second group, got %d", len(result[1]))
+	}
+}
+
+func TestStagesPostEventChecksWithDaemonSet(t *testing.T) {
+	f := provider.NewProviderFactory(schema.QuartzConfig{}, schema.QuartzSecrets{})
+
+	stageConfig := schema.StageConfig{
+		Checks: map[string]schema.StageChecksConfig{
+			"cni-ready": {
+				After: []string{"helm-install"},
+				DaemonSet: []schema.StageChecksDaemonSetConfig{
+					{Name: "istio-cni-node", Namespace: "kube-system"},
+				},
+			},
+		},
+	}
+
+	result := postEventChecks(stageConfig, "helm-install", *f)
+
+	if len(result) != 1 {
+		t.Errorf("expected 1 check group, got %d", len(result))
+		return
+	}
+
+	if len(result[0]) != 1 {
+		t.Errorf("expected 1 check in group, got %d", len(result[0]))
+	}
+
+	if result[0][0].Type() != "daemonset" {
+		t.Errorf("expected daemonset check, got '%s'", result[0][0].Type())
+	}
+}

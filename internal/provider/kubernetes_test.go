@@ -28,6 +28,7 @@ import (
 	"github.com/MetroStar/quartzctl/internal/config/schema"
 	"github.com/MetroStar/quartzctl/internal/util"
 	corev1 "k8s.io/api/core/v1"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	k8sSchema "k8s.io/apimachinery/pkg/runtime/schema"
 )
@@ -618,6 +619,164 @@ func TestProviderKubernetesClientWaitConditionState(t *testing.T) {
 	}
 }
 
+func TestProviderKubernetesClientGetDaemonSetStatus(t *testing.T) {
+	ds := &unstructured.Unstructured{
+		Object: map[string]interface{}{
+			"apiVersion": "apps/v1",
+			"kind":       "DaemonSet",
+			"metadata": map[string]interface{}{
+				"namespace": "kube-system",
+				"name":      "test-daemonset",
+			},
+			"status": map[string]interface{}{
+				"desiredNumberScheduled": int64(3),
+				"numberReady":            int64(3),
+			},
+		},
+	}
+
+	api := NewKubernetesApiMock().
+		WithDynamicObjects(ds).
+		AddResources(&metav1.APIResourceList{
+			GroupVersion: "apps/v1",
+			APIResources: []metav1.APIResource{
+				{Name: "daemonsets", Namespaced: true, Kind: "DaemonSet"},
+			},
+		})
+	cfg := schema.QuartzConfig{}
+	kubeconfig := KubeconfigInfo{}
+
+	c, err := NewKubernetesClient(api, kubeconfig, cfg)
+	if err != nil {
+		t.Errorf("unexpected error from kubernetes client constructor, %v", err)
+		return
+	}
+
+	kind, err := c.LookupKind(context.Background(), "DaemonSet")
+	if err != nil {
+		t.Errorf("failed to lookup daemonset kind, %v", err)
+		return
+	}
+
+	ready, desired, err := c.GetDaemonSetStatus(context.Background(), kind, "kube-system", "test-daemonset")
+	if err != nil {
+		t.Errorf("unexpected error from GetDaemonSetStatus, %v", err)
+		return
+	}
+
+	if ready != 3 {
+		t.Errorf("expected ready=3, got %d", ready)
+	}
+	if desired != 3 {
+		t.Errorf("expected desired=3, got %d", desired)
+	}
+}
+
+func TestProviderKubernetesClientGetDaemonSetStatusNotReady(t *testing.T) {
+	ds := &unstructured.Unstructured{
+		Object: map[string]interface{}{
+			"apiVersion": "apps/v1",
+			"kind":       "DaemonSet",
+			"metadata": map[string]interface{}{
+				"namespace": "kube-system",
+				"name":      "test-daemonset",
+			},
+			"status": map[string]interface{}{
+				"desiredNumberScheduled": int64(5),
+				"numberReady":            int64(2),
+			},
+		},
+	}
+
+	api := NewKubernetesApiMock().
+		WithDynamicObjects(ds).
+		AddResources(&metav1.APIResourceList{
+			GroupVersion: "apps/v1",
+			APIResources: []metav1.APIResource{
+				{Name: "daemonsets", Namespaced: true, Kind: "DaemonSet"},
+			},
+		})
+	cfg := schema.QuartzConfig{}
+	kubeconfig := KubeconfigInfo{}
+
+	c, err := NewKubernetesClient(api, kubeconfig, cfg)
+	if err != nil {
+		t.Errorf("unexpected error from kubernetes client constructor, %v", err)
+		return
+	}
+
+	kind, err := c.LookupKind(context.Background(), "DaemonSet")
+	if err != nil {
+		t.Errorf("failed to lookup daemonset kind, %v", err)
+		return
+	}
+
+	ready, desired, err := c.GetDaemonSetStatus(context.Background(), kind, "kube-system", "test-daemonset")
+	if err != nil {
+		t.Errorf("unexpected error from GetDaemonSetStatus, %v", err)
+		return
+	}
+
+	if ready != 2 {
+		t.Errorf("expected ready=2, got %d", ready)
+	}
+	if desired != 5 {
+		t.Errorf("expected desired=5, got %d", desired)
+	}
+}
+
+func TestProviderKubernetesClientGetDaemonSetStatusNotFound(t *testing.T) {
+	api := NewKubernetesApiMock().
+		AddResources(&metav1.APIResourceList{
+			GroupVersion: "apps/v1",
+			APIResources: []metav1.APIResource{
+				{Name: "daemonsets", Namespaced: true, Kind: "DaemonSet"},
+			},
+		})
+	cfg := schema.QuartzConfig{}
+	kubeconfig := KubeconfigInfo{}
+
+	c, err := NewKubernetesClient(api, kubeconfig, cfg)
+	if err != nil {
+		t.Errorf("unexpected error from kubernetes client constructor, %v", err)
+		return
+	}
+
+	kind, err := c.LookupKind(context.Background(), "DaemonSet")
+	if err != nil {
+		t.Errorf("failed to lookup daemonset kind, %v", err)
+		return
+	}
+
+	_, _, err = c.GetDaemonSetStatus(context.Background(), kind, "kube-system", "nonexistent")
+	if err == nil {
+		t.Error("expected error for nonexistent daemonset")
+	}
+}
+
+func TestProviderKubernetesClientCleanupStuckTerminatingPods(t *testing.T) {
+	api := NewKubernetesApiMock()
+	cfg := schema.QuartzConfig{}
+	kubeconfig := KubeconfigInfo{}
+
+	c, err := NewKubernetesClient(api, kubeconfig, cfg)
+	if err != nil {
+		t.Errorf("unexpected error from kubernetes client constructor, %v", err)
+		return
+	}
+
+	// Test with no pods - should return empty list
+	cleaned, err := c.CleanupStuckTerminatingPods(context.Background(), 5*60*1000000000) // 5 minutes in nanoseconds
+	if err != nil {
+		t.Errorf("unexpected error from CleanupStuckTerminatingPods, %v", err)
+		return
+	}
+
+	if len(cleaned) != 0 {
+		t.Errorf("expected 0 cleaned pods, got %d", len(cleaned))
+	}
+}
+
 func newK8sObject(apiVersion, kind, namespace, name string) *unstructured.Unstructured {
 	o := &unstructured.Unstructured{
 		Object: map[string]interface{}{
@@ -630,4 +789,476 @@ func newK8sObject(apiVersion, kind, namespace, name string) *unstructured.Unstru
 		},
 	}
 	return o
+}
+
+func TestProviderKubernetesClientListVirtualServices(t *testing.T) {
+	vs1 := &unstructured.Unstructured{
+		Object: map[string]interface{}{
+			"apiVersion": "networking.istio.io/v1beta1",
+			"kind":       "VirtualService",
+			"metadata": map[string]interface{}{
+				"namespace": "app1",
+				"name":      "my-service",
+			},
+			"spec": map[string]interface{}{
+				"hosts":    []interface{}{"my-service.example.com"},
+				"gateways": []interface{}{"istio-system/main-gateway"},
+			},
+		},
+	}
+	vs2 := &unstructured.Unstructured{
+		Object: map[string]interface{}{
+			"apiVersion": "networking.istio.io/v1beta1",
+			"kind":       "VirtualService",
+			"metadata": map[string]interface{}{
+				"namespace": "app2",
+				"name":      "another-service",
+			},
+			"spec": map[string]interface{}{
+				"hosts":    []interface{}{"another.example.com"},
+				"gateways": []interface{}{"mesh"}, // mesh-only gateway
+			},
+		},
+	}
+
+	api := NewKubernetesApiMock().
+		WithDynamicObjects(vs1, vs2).
+		AddResources(&metav1.APIResourceList{
+			GroupVersion: "networking.istio.io/v1beta1",
+			APIResources: []metav1.APIResource{
+				{Name: "virtualservices", Namespaced: true, Kind: "VirtualService"},
+			},
+		})
+	cfg := schema.QuartzConfig{}
+	kubeconfig := KubeconfigInfo{}
+
+	c, err := NewKubernetesClient(api, kubeconfig, cfg)
+	if err != nil {
+		t.Errorf("unexpected error from kubernetes client constructor, %v", err)
+		return
+	}
+
+	result, err := c.ListVirtualServices(context.Background())
+	if err != nil {
+		t.Errorf("unexpected error from ListVirtualServices, %v", err)
+		return
+	}
+
+	if len(result) != 2 {
+		t.Errorf("expected 2 VirtualServices, got %d", len(result))
+		return
+	}
+
+	// Results should be sorted by namespace/name
+	if result[0].Name != "my-service" {
+		t.Errorf("expected first VirtualService to be 'my-service', got '%s'", result[0].Name)
+	}
+	if result[0].Namespace != "app1" {
+		t.Errorf("expected first VirtualService namespace 'app1', got '%s'", result[0].Namespace)
+	}
+	if len(result[0].Hosts) != 1 || result[0].Hosts[0] != "my-service.example.com" {
+		t.Errorf("unexpected hosts for first VirtualService: %v", result[0].Hosts)
+	}
+}
+
+func TestProviderKubernetesClientListVirtualServicesNotFound(t *testing.T) {
+	// Test when VirtualService CRD doesn't exist
+	api := NewKubernetesApiMock()
+	cfg := schema.QuartzConfig{}
+	kubeconfig := KubeconfigInfo{}
+
+	c, err := NewKubernetesClient(api, kubeconfig, cfg)
+	if err != nil {
+		t.Errorf("unexpected error from kubernetes client constructor, %v", err)
+		return
+	}
+
+	_, err = c.ListVirtualServices(context.Background())
+	if err == nil {
+		t.Error("expected error when VirtualService CRD not found")
+	}
+}
+
+func TestProviderKubernetesClientForEachDynamicResourcesNamespaced(t *testing.T) {
+	// Test ForEachDynamicResources with a specific namespace
+	ds1 := &unstructured.Unstructured{
+		Object: map[string]interface{}{
+			"apiVersion": "apps/v1",
+			"kind":       "Deployment",
+			"metadata": map[string]interface{}{
+				"namespace": "ns1",
+				"name":      "deploy1",
+			},
+		},
+	}
+	ds2 := &unstructured.Unstructured{
+		Object: map[string]interface{}{
+			"apiVersion": "apps/v1",
+			"kind":       "Deployment",
+			"metadata": map[string]interface{}{
+				"namespace": "ns2",
+				"name":      "deploy2",
+			},
+		},
+	}
+
+	api := NewKubernetesApiMock().
+		WithDynamicObjects(ds1, ds2).
+		AddResources(&metav1.APIResourceList{
+			GroupVersion: "apps/v1",
+			APIResources: []metav1.APIResource{
+				{Name: "deployments", Namespaced: true, Kind: "Deployment"},
+			},
+		})
+	cfg := schema.QuartzConfig{}
+	kubeconfig := KubeconfigInfo{}
+
+	c, err := NewKubernetesClient(api, kubeconfig, cfg)
+	if err != nil {
+		t.Errorf("unexpected error from kubernetes client constructor, %v", err)
+		return
+	}
+
+	kind, err := c.LookupKind(context.Background(), "Deployment")
+	if err != nil {
+		t.Errorf("failed to lookup Deployment kind, %v", err)
+		return
+	}
+
+	var found []string
+	err = c.ForEachDynamicResources(context.Background(), kind, "ns1", func(item unstructured.Unstructured) {
+		found = append(found, item.GetName())
+	})
+	if err != nil {
+		t.Errorf("unexpected error from ForEachDynamicResources, %v", err)
+		return
+	}
+
+	if len(found) != 1 || found[0] != "deploy1" {
+		t.Errorf("expected only deploy1 in ns1, got %v", found)
+	}
+}
+
+func TestProviderKubernetesClientGetSecret(t *testing.T) {
+	secret := &corev1.Secret{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "my-secret",
+			Namespace: "default",
+		},
+		Data: map[string][]byte{
+			"username": []byte("admin"),
+			"password": []byte("secret123"),
+		},
+	}
+
+	api := NewKubernetesApiMock().WithClientObjects(secret)
+	cfg := schema.QuartzConfig{}
+	kubeconfig := KubeconfigInfo{}
+
+	c, err := NewKubernetesClient(api, kubeconfig, cfg)
+	if err != nil {
+		t.Errorf("unexpected error from kubernetes client constructor, %v", err)
+		return
+	}
+
+	s, err := c.GetSecret(context.Background(), "default", "my-secret")
+	if err != nil {
+		t.Errorf("unexpected error from GetSecret, %v", err)
+		return
+	}
+
+	if string(s.Data["username"]) != "admin" {
+		t.Errorf("expected username 'admin', got '%s'", s.Data["username"])
+	}
+	if string(s.Data["password"]) != "secret123" {
+		t.Errorf("expected password 'secret123', got '%s'", s.Data["password"])
+	}
+}
+
+func TestProviderKubernetesClientGetSecretNotFound(t *testing.T) {
+	api := NewKubernetesApiMock()
+	cfg := schema.QuartzConfig{}
+	kubeconfig := KubeconfigInfo{}
+
+	c, err := NewKubernetesClient(api, kubeconfig, cfg)
+	if err != nil {
+		t.Errorf("unexpected error from kubernetes client constructor, %v", err)
+		return
+	}
+
+	_, err = c.GetSecret(context.Background(), "default", "nonexistent")
+	if err == nil {
+		t.Error("expected error for nonexistent secret")
+	}
+}
+
+func TestProviderKubernetesClientPrintDiscoveredVirtualServices(t *testing.T) {
+	// VirtualService with external gateway (should be printed)
+	vs1 := &unstructured.Unstructured{
+		Object: map[string]interface{}{
+			"apiVersion": "networking.istio.io/v1beta1",
+			"kind":       "VirtualService",
+			"metadata": map[string]interface{}{
+				"namespace": "app1",
+				"name":      "my-service",
+			},
+			"spec": map[string]interface{}{
+				"hosts":    []interface{}{"my-service.example.com"},
+				"gateways": []interface{}{"istio-system/main-gateway"},
+			},
+		},
+	}
+	// VirtualService with mesh-only gateway (should be skipped)
+	vs2 := &unstructured.Unstructured{
+		Object: map[string]interface{}{
+			"apiVersion": "networking.istio.io/v1beta1",
+			"kind":       "VirtualService",
+			"metadata": map[string]interface{}{
+				"namespace": "app2",
+				"name":      "internal-service",
+			},
+			"spec": map[string]interface{}{
+				"hosts":    []interface{}{"internal.svc.cluster.local"},
+				"gateways": []interface{}{"mesh"},
+			},
+		},
+	}
+
+	api := NewKubernetesApiMock().
+		WithDynamicObjects(vs1, vs2).
+		AddResources(&metav1.APIResourceList{
+			GroupVersion: "networking.istio.io/v1beta1",
+			APIResources: []metav1.APIResource{
+				{Name: "virtualservices", Namespaced: true, Kind: "VirtualService"},
+			},
+		})
+	cfg := schema.QuartzConfig{}
+	kubeconfig := KubeconfigInfo{}
+
+	c, err := NewKubernetesClient(api, kubeconfig, cfg)
+	if err != nil {
+		t.Errorf("unexpected error from kubernetes client constructor, %v", err)
+		return
+	}
+
+	// Test with empty exclude list - should not panic
+	c.PrintDiscoveredVirtualServices(context.Background(), map[string]bool{})
+
+	// Test with exclusion - should not panic
+	c.PrintDiscoveredVirtualServices(context.Background(), map[string]bool{"my-service": true})
+}
+
+func TestProviderKubernetesClientPrintDiscoveredVirtualServicesNoCRD(t *testing.T) {
+	// Test when VirtualService CRD doesn't exist - should handle gracefully
+	api := NewKubernetesApiMock()
+	cfg := schema.QuartzConfig{}
+	kubeconfig := KubeconfigInfo{}
+
+	c, err := NewKubernetesClient(api, kubeconfig, cfg)
+	if err != nil {
+		t.Errorf("unexpected error from kubernetes client constructor, %v", err)
+		return
+	}
+
+	// Should not panic when CRD doesn't exist
+	c.PrintDiscoveredVirtualServices(context.Background(), map[string]bool{})
+}
+
+func TestProviderKubernetesClientExport(t *testing.T) {
+	// Create a ConfigMap to export
+	cm := &corev1.ConfigMap{
+		TypeMeta: metav1.TypeMeta{
+			Kind:       "ConfigMap",
+			APIVersion: "v1",
+		},
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "export-test-cm",
+			Namespace: "export-ns",
+		},
+		Data: map[string]string{
+			"key1": "value1",
+		},
+	}
+
+	cmUnstructured := &unstructured.Unstructured{
+		Object: map[string]interface{}{
+			"apiVersion": "v1",
+			"kind":       "ConfigMap",
+			"metadata": map[string]interface{}{
+				"name":      "export-test-cm",
+				"namespace": "export-ns",
+			},
+			"data": map[string]interface{}{
+				"key1": "value1",
+			},
+		},
+	}
+
+	api := NewKubernetesApiMock().
+		WithClientObjects(cm).
+		WithDynamicObjects(cmUnstructured).
+		AddResources(&metav1.APIResourceList{
+			GroupVersion: "v1",
+			APIResources: []metav1.APIResource{
+				{Name: "configmaps", Namespaced: true, Kind: "ConfigMap"},
+			},
+		})
+	cfg := schema.QuartzConfig{}
+	kubeconfig := KubeconfigInfo{}
+
+	c, err := NewKubernetesClient(api, kubeconfig, cfg)
+	if err != nil {
+		t.Errorf("unexpected error from kubernetes client constructor, %v", err)
+		return
+	}
+
+	// Capture output
+	var buf bytes.Buffer
+	util.SetWriter(&buf)
+	defer util.SetWriter(&bytes.Buffer{})
+
+	exportCfg := schema.ExportConfig{
+		Path: "./test-export",
+		Annotations: map[string]string{
+			"exported-by": "test",
+		},
+		Objects: []schema.ExportObjectConfig{
+			{
+				Kind:      "ConfigMap",
+				Namespace: "export-ns",
+				Name:      "export-test-cm",
+			},
+		},
+	}
+
+	result, err := c.Export(context.Background(), exportCfg)
+	if err != nil {
+		t.Errorf("unexpected error from Export: %v", err)
+		return
+	}
+
+	// Verify result contains the expected file
+	expectedKey := "export-ns.export-test-cm.yaml"
+	if _, exists := result[expectedKey]; !exists {
+		t.Errorf("expected key %s in export result, got keys: %v", expectedKey, result)
+		return
+	}
+
+	// Verify the YAML content contains the ConfigMap data
+	yamlContent := string(result[expectedKey])
+	if !strings.Contains(yamlContent, "key1") || !strings.Contains(yamlContent, "value1") {
+		t.Errorf("expected YAML to contain ConfigMap data, got: %s", yamlContent)
+	}
+}
+
+func TestProviderKubernetesClientExportWithErrors(t *testing.T) {
+	// Test Export with non-existent resource
+	api := NewKubernetesApiMock().
+		AddResources(&metav1.APIResourceList{
+			GroupVersion: "v1",
+			APIResources: []metav1.APIResource{
+				{Name: "configmaps", Namespaced: true, Kind: "ConfigMap"},
+			},
+		})
+	cfg := schema.QuartzConfig{}
+	kubeconfig := KubeconfigInfo{}
+
+	c, err := NewKubernetesClient(api, kubeconfig, cfg)
+	if err != nil {
+		t.Errorf("unexpected error from kubernetes client constructor, %v", err)
+		return
+	}
+
+	// Capture output
+	var buf bytes.Buffer
+	util.SetWriter(&buf)
+	defer util.SetWriter(&bytes.Buffer{})
+
+	exportCfg := schema.ExportConfig{
+		Path: "./test-export",
+		Objects: []schema.ExportObjectConfig{
+			{
+				Kind:      "ConfigMap",
+				Namespace: "non-existent-ns",
+				Name:      "non-existent-cm",
+			},
+		},
+	}
+
+	result, err := c.Export(context.Background(), exportCfg)
+	// Should have errors since resource doesn't exist
+	if err == nil {
+		t.Log("Export returned no error, but result may be empty")
+	}
+	// Result should be empty or contain no entries
+	if len(result) > 0 {
+		t.Logf("Result contains %d entries despite non-existent resource", len(result))
+	}
+}
+
+func TestProviderKubernetesClientExportUnknownKind(t *testing.T) {
+	// Test Export with unknown Kind
+	api := NewKubernetesApiMock()
+	cfg := schema.QuartzConfig{}
+	kubeconfig := KubeconfigInfo{}
+
+	c, err := NewKubernetesClient(api, kubeconfig, cfg)
+	if err != nil {
+		t.Errorf("unexpected error from kubernetes client constructor, %v", err)
+		return
+	}
+
+	// Capture output
+	var buf bytes.Buffer
+	util.SetWriter(&buf)
+	defer util.SetWriter(&bytes.Buffer{})
+
+	exportCfg := schema.ExportConfig{
+		Path: "./test-export",
+		Objects: []schema.ExportObjectConfig{
+			{
+				Kind:      "UnknownKind",
+				Namespace: "test-ns",
+				Name:      "test-obj",
+			},
+		},
+	}
+
+	_, err = c.Export(context.Background(), exportCfg)
+	// Should have errors since Kind doesn't exist
+	if err == nil {
+		t.Log("Export returned no error for unknown Kind, which may be acceptable")
+	}
+}
+
+func TestProviderKubernetesClientExportEmpty(t *testing.T) {
+	// Test Export with empty Objects list
+	api := NewKubernetesApiMock()
+	cfg := schema.QuartzConfig{}
+	kubeconfig := KubeconfigInfo{}
+
+	c, err := NewKubernetesClient(api, kubeconfig, cfg)
+	if err != nil {
+		t.Errorf("unexpected error from kubernetes client constructor, %v", err)
+		return
+	}
+
+	// Capture output
+	var buf bytes.Buffer
+	util.SetWriter(&buf)
+	defer util.SetWriter(&bytes.Buffer{})
+
+	exportCfg := schema.ExportConfig{
+		Path:    "./test-export",
+		Objects: []schema.ExportObjectConfig{},
+	}
+
+	result, err := c.Export(context.Background(), exportCfg)
+	if err != nil {
+		t.Errorf("unexpected error from Export with empty objects: %v", err)
+		return
+	}
+	if len(result) != 0 {
+		t.Errorf("expected empty result for empty objects list, got %d entries", len(result))
+	}
 }

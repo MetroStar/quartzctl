@@ -39,6 +39,7 @@ type StageChecksConfig struct {
 	After      []string                      `koanf:"after"`
 	Http       []StageChecksHttpConfig       `koanf:"http"`
 	Kubernetes []StageChecksKubernetesConfig `koanf:"kubernetes"`
+	DaemonSet  []StageChecksDaemonSetConfig  `koanf:"daemonset"`
 	State      []StageChecksStateConfig      `koanf:"state"`
 	Order      int                           `koanf:"order"`
 }
@@ -102,6 +103,15 @@ type StageChecksStateConfig struct {
 	Key   string                 `koanf:"key"`
 	Value string                 `koanf:"value"`
 	Retry StageChecksRetryConfig `koanf:"retry"`
+}
+
+// StageChecksDaemonSetConfig represents the configuration for DaemonSet readiness checks.
+// This is used to verify that critical system DaemonSets (like istio-cni) are fully
+// deployed on all nodes before proceeding with workload deployment.
+type StageChecksDaemonSetConfig struct {
+	Name      string                 `koanf:"name"`
+	Namespace string                 `koanf:"namespace"`
+	Retry     StageChecksRetryConfig `koanf:"retry"`
 }
 
 // StageChecksRetryConfig represents the retry configuration for stage checks.

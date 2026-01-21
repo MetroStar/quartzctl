@@ -17,6 +17,7 @@ package cmd
 import (
 	"context"
 	"fmt"
+	"time"
 
 	"github.com/MetroStar/quartzctl/internal/log"
 	"github.com/MetroStar/quartzctl/internal/util"
@@ -42,6 +43,20 @@ func NewRootInternalCommand(p *CommandParams) RootCommandResult {
 					Usage: "Perform post-delete cleanup actions",
 					Action: func(ctx context.Context, ccmd *cli.Command) error {
 						return ForceCleanup(ctx, p)
+					},
+				},
+				{
+					Name:  "cleanup-terminating-pods",
+					Usage: "Force-delete pods stuck in Terminating state",
+					Flags: []cli.Flag{
+						&cli.IntFlag{
+							Name:  "timeout",
+							Usage: "Minutes a pod must be stuck before force-deleting",
+							Value: 5,
+						},
+					},
+					Action: func(ctx context.Context, ccmd *cli.Command) error {
+						return CleanupTerminatingPods(ctx, p, ccmd.Int("timeout"))
 					},
 				},
 			},
@@ -77,6 +92,46 @@ func ForceCleanup(ctx context.Context, p *CommandParams) error {
 	err = Cleanup(ctx, p)
 	if err != nil {
 		return err
+	}
+
+	return nil
+}
+
+// CleanupTerminatingPods force-deletes pods that have been stuck in Terminating
+// state for longer than the specified timeout. This is useful for cleaning up
+// pods that cannot terminate due to CNI or other infrastructure issues.
+//
+// Parameters:
+//   - ctx: The context for the operation.
+//   - p: *CommandParams containing configuration and runtime parameters.
+//   - timeoutMinutes: Minutes a pod must be stuck before force-deleting.
+//
+// Returns:
+//   - error: An error if the cleanup fails, otherwise nil.
+func CleanupTerminatingPods(ctx context.Context, p *CommandParams, timeoutMinutes int) error {
+	log.Debug("Entering", "command", "internal:cleanupTerminatingPods")
+	defer log.Debug("Completed", "command", "internal:cleanupTerminatingPods")
+
+	kube, err := p.Provider().Kubernetes(ctx)
+	if err != nil {
+		return fmt.Errorf("failed to get kubernetes client: %w", err)
+	}
+
+	timeout := time.Duration(timeoutMinutes) * time.Minute
+	util.Printf("Cleaning up pods stuck in Terminating state for more than %v", timeout)
+
+	cleaned, err := kube.CleanupStuckTerminatingPods(ctx, timeout)
+	if err != nil {
+		return fmt.Errorf("failed to cleanup terminating pods: %w", err)
+	}
+
+	if len(cleaned) == 0 {
+		util.Printf("No stuck terminating pods found")
+	} else {
+		util.Printf("Force-deleted %d stuck pods:", len(cleaned))
+		for _, pod := range cleaned {
+			util.Printf("  - %s", pod)
+		}
 	}
 
 	return nil
