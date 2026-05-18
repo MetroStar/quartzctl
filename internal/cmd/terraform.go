@@ -25,7 +25,7 @@ import (
 	"github.com/urfave/cli/v3"
 )
 
-// NewRootTofuCommand creates the "terraform" (aliased as "tofu") root command for the CLI.
+// NewRootTofuCommand creates the "tofu" (aliased as "tf") root command for the CLI.
 // This command provides subcommands for managing OpenTofu stages.
 //
 // Parameters:
@@ -33,13 +33,13 @@ import (
 //   - p: *CommandParams containing configuration and runtime parameters.
 //
 // Returns:
-//   - RootCommandResult containing the "terraform"/"tofu" CLI command.
+//   - RootCommandResult containing the "tofu"/"tf" CLI command.
 func NewRootTofuCommand(cmds TfCommandParams, p *CommandParams) RootCommandResult {
 	slices.SortFunc(cmds.Commands, ByCommandName)
 	return RootCommandResult{
 		Command: &cli.Command{
-			Name:     "terraform",
-			Aliases:  []string{"tf", "tofu"},
+			Name:     "tofu",
+			Aliases:  []string{"tf"},
 			Usage:    "OpenTofu subcommands for individual stages",
 			Commands: cmds.Commands,
 		},

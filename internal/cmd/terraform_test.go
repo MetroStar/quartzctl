@@ -215,7 +215,7 @@ func TestNewRootTofuCommand(t *testing.T) {
 	}
 	cmd := NewRootTofuCommand(cmds, p).Command
 
-	assert.Equal(t, "terraform", cmd.Name)
+	assert.Equal(t, "tofu", cmd.Name)
 	assert.Equal(t, "OpenTofu subcommands for individual stages", cmd.Usage)
 	assert.Len(t, cmd.Commands, 2)
 	assert.Equal(t, "apply", cmd.Commands[0].Name)
