@@ -40,7 +40,7 @@ func NewStageConfig(id string) schema.StageConfig {
 		Id:           id,
 		Description:  id,
 		Path:         "",
-		Type:         "terraform", // only type supported for now
+		Type:         "tofu", // only type supported for now
 		Dependencies: nil,
 		Order:        -1,
 		Vars:         map[string]schema.StageVarsConfig{},

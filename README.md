@@ -7,7 +7,7 @@
 [![OpenSSF Scorecard](https://api.scorecard.dev/projects/github.com/MetroStar/quartzctl/badge)](https://scorecard.dev/viewer/?uri=github.com/MetroStar/quartzctl)
 [![License](https://img.shields.io/github/license/MetroStar/quartzctl)](LICENSE)
 
-> **quartzctl** is an open-source CLI tool designed to automate the installation and maintenance of multi-stage Terraform projects. It leverages a single YAML configuration to define stages, their dependencies, input variables, environment variables, and health checks, streamlining complex infrastructure deployments.
+> **quartzctl** is an open-source CLI tool designed to automate the installation and maintenance of multi-stage OpenTofu projects. It leverages a single YAML configuration to define stages, their dependencies, input variables, environment variables, and health checks, streamlining complex infrastructure deployments.
 
 ## Problem Statement
 
@@ -21,7 +21,7 @@ Quartz is an open-source CLI tool designed to automate the full lifecycle of Kub
 
 - `add` subcommands to streamline adding new stages
 - `generate` subcommands to create new projects with all required boilerplate (quartz.yaml, stages), options to enable/disable common items like eks, core helm charts, etc...
-- Plugin framework to expand beyond AWS and Terraform
+- Plugin framework to expand beyond AWS and OpenTofu
 - Unwind tightly coupled assumptions of the platform (ex: separate repositories vs monorepo, use of gitops, core application stack, etc...)
 
 ---
@@ -41,7 +41,7 @@ Quartz is an open-source CLI tool designed to automate the full lifecycle of Kub
 
 ## 🚀 Features
 
-- **Multi-Stage Management**: Define and manage multiple Terraform stages with interdependencies.
+- **Multi-Stage Management**: Define and manage multiple OpenTofu stages with interdependencies.
 - **YAML Configuration**: Centralized configuration file specifying stages, variables, and settings.
 - **Dependency Handling**: Automatically determines the order of stage execution based on dependencies.
 - **Dynamic Variables**: Pass output variables from one stage as input to another.
@@ -92,19 +92,19 @@ quartz [command] [flags]
 - `refresh-secrets`: Trigger all external secrets to be refreshed immediately.
 - `render`: Write internal configuration to yaml (For development use).
 - `restart`: Restart target resource(s).
-- `terraform`: Terraform subcommands for configured stages.
-  - `apply`: Run `terraform apply` for a stage (`--stage <name>` required).
-  - `destroy`: Run `terraform destroy` for a stage (`--stage <name>` required).
-  - `format`: Run `terraform fmt` for a stage (`--stage <name>` required).
-  - `format-all`: Run `terraform fmt` for all stages.
-  - `init`: Run `terraform init` for a stage (`--stage <name>` required).
-  - `init-all`: Run `terraform init` for all stages.
-  - `output`: Run `terraform output` for a stage (`--stage <name>` required).
-  - `plan`: Run `terraform plan` for a stage (`--stage <name>` required).
-  - `refresh`: Run `terraform refresh` for a stage (`--stage <name>` required).
-  - `refresh-all`: Run `terraform refresh` for all stages.
-  - `validate`: Run `terraform validate` for a stage (`--stage <name>` required).
-  - `version`: Run `terraform version`.
+- `tofu`: OpenTofu subcommands for configured stages.
+  - `apply`: Run `tofu apply` for a stage (`--stage <name>` required).
+  - `destroy`: Run `tofu destroy` for a stage (`--stage <name>` required).
+  - `format`: Run `tofu fmt` for a stage (`--stage <name>` required).
+  - `format-all`: Run `tofu fmt` for all stages.
+  - `init`: Run `tofu init` for a stage (`--stage <name>` required).
+  - `init-all`: Run `tofu init` for all stages.
+  - `output`: Run `tofu output` for a stage (`--stage <name>` required).
+  - `plan`: Run `tofu plan` for a stage (`--stage <name>` required).
+  - `refresh`: Run `tofu refresh` for a stage (`--stage <name>` required).
+  - `refresh-all`: Run `tofu refresh` for all stages.
+  - `validate`: Run `tofu validate` for a stage (`--stage <name>` required).
+  - `version`: Run `tofu version`.
 - `help`: Shows a list of commands or help for one command
 
 ### Global Flags
@@ -147,7 +147,7 @@ The `stage.yaml` file allows for stage directories to override configuration fro
 
 ```yaml
 
-# define input variables for the terraform stage and their source
+# define input variables for the tofu stage and their source
 # NOTE: all stages assume the existence of a `settings` input variable that recieves the entire rendered config map unless overridden
 vars:
   # input variable <my_env_val> defined in variables.tf

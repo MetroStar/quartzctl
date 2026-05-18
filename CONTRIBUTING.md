@@ -99,7 +99,7 @@ We follow the [Conventional Commits](https://www.conventionalcommits.org/en/v1.0
 ### Examples:
 
 - `feat(config): add support for multiple environments`
-- `fix(apply): prevent crash when terraform is missing`
+- `fix(apply): prevent crash when tofu is missing`
 - `docs: update usage examples in README.md`
 
 PRs that do not follow this format may be asked to rebase before being merged.

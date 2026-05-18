@@ -415,7 +415,7 @@ func TestInitLog(t *testing.T) {
 		Log: log.LogOptionsConfig{
 			Tofu: log.TofuLogConfig{
 				Enabled: true,
-				Path:    filepath.Join(tmpDir, "terraform.log"),
+						Path:    filepath.Join(tmpDir, "tofu.log"),
 				Level:   "DEBUG",
 			},
 		},
@@ -441,7 +441,7 @@ func TestInitLog(t *testing.T) {
 	tf.Version(context.Background(), true)
 
 	// Verify the log file path was created
-	_, err = os.Stat(filepath.Join(tmpDir, "terraform.log"))
+	_, err = os.Stat(filepath.Join(tmpDir, "tofu.log"))
 	assert.NoError(t, err, "OpenTofu log file should exist")
 }
 

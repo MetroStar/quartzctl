@@ -108,7 +108,7 @@ log:
     level: warn
   tofu:
     enabled: true
-    path: /var/log/terraform.log
+    path: /var/log/tofu.log
     level: info
 `)
 	cfgFile := filepath.Join(tmp, "log-config.yaml")
@@ -124,7 +124,7 @@ log:
 	assert.Equal(t, "/var/log/test.log", config.Log.File.Path, "File log path should match the file content")
 	assert.Equal(t, "warn", config.Log.File.Level, "File log level should match the file content")
 	assert.True(t, config.Log.Tofu.Enabled, "OpenTofu logging should be enabled as per the file content")
-	assert.Equal(t, "/var/log/terraform.log", config.Log.Tofu.Path, "OpenTofu log path should match the file content")
+	assert.Equal(t, "/var/log/tofu.log", config.Log.Tofu.Path, "OpenTofu log path should match the file content")
 	assert.Equal(t, "info", config.Log.Tofu.Level, "OpenTofu log level should match the file content")
 }
 

@@ -15,7 +15,7 @@ aws:
 
 administrators: []
 
-# default ./terraform/stages
+# default ./tofu/stages
 stage_paths:
   - stages
 
@@ -71,5 +71,5 @@ log:
   file:
     enabled: true
     level: debug
-  terraform:
+  tofu:
     enabled: true
