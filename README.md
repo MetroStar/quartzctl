@@ -229,22 +229,23 @@ See the included [samples](./docs/samples/) for more details.
    cd quartzctl
    ```
 
-2. Install [taskfile](https://taskfile.dev/installation):
+2. Install [mise](https://mise.jdx.dev/getting-started.html):
 
    ```bash
-   sh -c "$(curl --location https://taskfile.dev/install.sh)" -- -d
+   curl https://mise.jdx.dev/install.sh | sh
+   mise install
    ```
 
 3. Build the application:
 
    ```bash
-   task build
+   mise run build
    ```
 
 ### Running Tests
 
 ```bash
-task test
+mise run test
 ```
 
 ### Linting
@@ -252,7 +253,7 @@ task test
 We use [golangci-lint](https://golangci-lint.run/) for linting.
 
 ```bash
-task lint
+mise run lint
 ```
 
 ---

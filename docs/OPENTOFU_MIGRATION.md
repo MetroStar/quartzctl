@@ -26,7 +26,7 @@ Quartz has migrated from Terraform 1.5.7 (the last MPL-licensed release) to Open
 | Area | Before | After |
 |------|--------|-------|
 | Folder | `terraform/` | `tofu/` |
-| devbox.json | `terraform@1.5.7` | `opentofu@latest` |
+| mise.toml | `terraform@1.5.7` | `opentofu@latest` |
 | Config key | `terraform:` | `tofu:` |
 
 ### quartz-pkgs (build-tools)

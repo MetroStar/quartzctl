@@ -1,0 +1,59 @@
+[tools]
+go = "1.24"
+goreleaser = "latest"
+golangci-lint = "latest"
+"aqua:securego/gosec" = "latest"
+"aqua:mfridman/tparse" = "latest"
+gitleaks = "latest"
+pre-commit = "latest"
+upx = "latest"
+
+[env]
+CGO_ENABLED = "0"
+
+[tasks.setup]
+description = "Install git hooks"
+run = ["pre-commit install", "pre-commit install --hook-type commit-msg"]
+
+[tasks.build-all]
+description = "Build for all platforms"
+run = "goreleaser build --clean --auto-snapshot"
+
+[tasks.build]
+description = "Build quartz binary"
+run = [
+  "mkdir -p ./bin",
+  "goreleaser build --clean --snapshot --single-target --output ./bin/quartz",
+  "./bin/quartz --version",
+]
+
+[tasks.compress]
+description = "Build and compress binary with UPX"
+depends = ["build"]
+run = "upx --best --lzma ./bin/quartz"
+
+[tasks.release]
+description = "Create a release"
+run = "goreleaser release --clean"
+
+[tasks.install]
+description = "Build and install to ~/go/bin"
+depends = ["build"]
+run = "cp ./bin/quartz ~/go/bin/"
+
+[tasks.test]
+description = "Run tests"
+run = "go test -json -cover ./... {{ if env.RUN }}-run $RUN{{ end }} | tparse -all"
+sources = ["**/*.go", "go.mod", "go.sum"]
+
+[tasks."test-ci"]
+description = "Run tests with coverage output"
+run = "go test -json -cover -coverprofile=coverage.out ./..."
+
+[tasks.lint]
+description = "Run golangci-lint"
+run = "golangci-lint run -v"
+
+[tasks."deps-update"]
+description = "Update Go dependencies"
+run = ["go get -u ./...", "go mod tidy"]

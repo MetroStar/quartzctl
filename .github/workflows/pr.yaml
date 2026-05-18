@@ -66,13 +66,11 @@ jobs:
         go-version: 1.24
         cache: true
 
-    - name: Install task
-      uses: arduino/setup-task@v2
-      with:
-        version: 3.x
+    - name: Install mise
+      uses: jdx/mise-action@v2
 
     - name: Run tests
-      run: task test-ci
+      run: mise run test-ci
 
     - name: Upload coverage reports to Codecov
       uses: codecov/codecov-action@v5

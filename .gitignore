@@ -24,7 +24,6 @@ test/
 *terraform.lock*
 
 coverage.txt
-.task/
 
 *.zip
 *.tar.gz
