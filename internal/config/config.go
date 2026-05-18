@@ -216,6 +216,8 @@ func checkCloudConfig(ctx context.Context, k *koanf.Koanf) error {
 
 	pc, err := provider.NewCloudProviderClientWithOpts(ctx, provider.CloudProviderClientOpts{
 		Provider: p,
+		Name:     k.String("name"),
+		Region:   k.String("aws.region"),
 	})
 	if err != nil {
 		return err
@@ -472,6 +474,7 @@ func initTmpDir(k *koanf.Koanf) (string, error) {
 			return "", err
 		}
 
+		k.Set("tmp", a)
 		log.Info("Using tmp", "dir", a)
 		return a, nil
 	}

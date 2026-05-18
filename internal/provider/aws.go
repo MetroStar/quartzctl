@@ -47,7 +47,11 @@ type AwsProviderCheckResult struct {
 }
 
 func NewLazyAwsClient(ctx context.Context, id string, region string) (AwsClient, error) {
-	c, err := config.LoadDefaultConfig(ctx)
+	opts := []func(*config.LoadOptions) error{}
+	if region != "" {
+		opts = append(opts, config.WithRegion(region))
+	}
+	c, err := config.LoadDefaultConfig(ctx, opts...)
 	if err != nil {
 		return AwsClient{}, err
 	}
@@ -83,7 +87,7 @@ func (c AwsClient) ProviderName() string {
 }
 
 func (c AwsClient) CheckConfig() error {
-	if c.cfg.Region == "" {
+	if c.region == "" && c.cfg.Region == "" {
 		return fmt.Errorf("aws.region required")
 	}
 

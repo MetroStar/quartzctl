@@ -254,7 +254,11 @@ func TestAwsClient_CheckConfig(t *testing.T) {
 
 	client.cfg.Region = ""
 	err = client.CheckConfig()
-	assert.Error(t, err, "CheckConfig should return an error if aws.Config.Region is not set")
+	assert.NoError(t, err, "CheckConfig should not return an error if region is set on client")
+
+	client.region = ""
+	err = client.CheckConfig()
+	assert.Error(t, err, "CheckConfig should return an error if neither region is set")
 }
 
 func TestAwsClient_StateBackendInfo(t *testing.T) {
