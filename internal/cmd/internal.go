@@ -65,7 +65,7 @@ func NewRootInternalCommand(p *CommandParams) RootCommandResult {
 }
 
 // ForceCleanup performs post-delete cleanup, including removing temporary files
-// and destroying the Terraform state bucket.
+// and destroying the OpenTofu state bucket.
 //
 // Parameters:
 //   - ctx: The context for the operation.
@@ -82,7 +82,7 @@ func ForceCleanup(ctx context.Context, p *CommandParams) error {
 		return fmt.Errorf("aborting")
 	}
 
-	// Destroy the Terraform backend
+	// Destroy the OpenTofu backend
 	err := TfDestroyBackend(ctx, p)
 	if err != nil {
 		return err

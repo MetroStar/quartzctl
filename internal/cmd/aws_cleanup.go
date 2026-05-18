@@ -30,9 +30,9 @@ import (
 const awsNoneValue = "None"
 
 // HasBlockingAWSResources performs a quick check to detect resources that would block
-// Terraform destroy (orphaned EC2 instances, in-use ENIs). This is a fast check
+// OpenTofu destroy (orphaned EC2 instances, in-use ENIs). This is a fast check
 // (~2-3 seconds) that allows us to proactively run cleanup instead of waiting
-// 15+ minutes for Terraform to timeout.
+// 15+ minutes for OpenTofu to timeout.
 //
 // Parameters:
 //   - ctx: The context for the operation.
@@ -87,7 +87,7 @@ func HasBlockingAWSResources(ctx context.Context, p *CommandParams) (bool, error
 	return false, nil
 }
 
-// ForceAWSCleanup runs AWS CLI commands to forcibly clean up resources that may block Terraform destroy.
+// ForceAWSCleanup runs AWS CLI commands to forcibly clean up resources that may block OpenTofu destroy.
 // This includes detaching/deleting ENIs and removing security groups that may have lingering dependencies.
 //
 // IMPORTANT: This function first cleans up Kubernetes resources (webhooks, API services) that would

@@ -20,7 +20,7 @@ type StageConfig struct {
 	Id           string                       `koanf:"id"`
 	Description  string                       `koanf:"description"`
 	Path         string                       `koanf:"path"`
-	Type         string                       `koanf:"type"`         // terraform, other
+	Type         string                       `koanf:"type"`         // opentofu, other
 	Dependencies []string                     `koanf:"dependencies"` // slice of stages that have to run before
 	Disabled     bool                         `koanf:"disabled"`
 	Manual       bool                         `koanf:"manual"`

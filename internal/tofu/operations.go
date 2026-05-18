@@ -12,7 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-package terraform
+package tofu
 
 import (
 	"context"
@@ -32,10 +32,10 @@ import (
 	"github.com/tidwall/gjson"
 )
 
-// Version retrieves the version of the Terraform CLI.
-// It runs the `terraform version` command and returns the version string.
-func (c *TerraformClient) Version(ctx context.Context) (string, error) {
-	log.Debug("terraform version")
+// Version retrieves the version of the OpenTofu CLI.
+// It runs the `tofu version` command and returns the version string.
+func (c *TofuClient) Version(ctx context.Context) (string, error) {
+	log.Debug("tofu version")
 
 	tf, err := c.newTfOpts(&TfOpts{})
 	if err != nil {
@@ -50,10 +50,10 @@ func (c *TerraformClient) Version(ctx context.Context) (string, error) {
 	return tfVersion.String(), nil
 }
 
-// Init initializes the Terraform working directory for the specified stage.
-// It runs `terraform init -upgrade -reconfigure` with the provided backend configuration options.
-func (c *TerraformClient) Init(ctx context.Context, stage schema.StageConfig, opts TerraformInitOpts) error {
-	log.Debug("terraform init", "stage", stage)
+// Init initializes the OpenTofu working directory for the specified stage.
+// It runs `tofu init -upgrade -reconfigure` with the provided backend configuration options.
+func (c *TofuClient) Init(ctx context.Context, stage schema.StageConfig, opts TofuInitOpts) error {
+	log.Debug("tofu init", "stage", stage)
 
 	var args []tfexec.InitOption
 	args = append(args, tfexec.Upgrade(true))
@@ -70,10 +70,10 @@ func (c *TerraformClient) Init(ctx context.Context, stage schema.StageConfig, op
 	return tf.Init(ctx, args...)
 }
 
-// Validate validates the Terraform configuration for the specified stage.
-// It runs `terraform validate` and returns the validation output.
-func (c *TerraformClient) Validate(ctx context.Context, stage schema.StageConfig) (*tfjson.ValidateOutput, error) {
-	log.Debug("terraform validate", "stage", stage)
+// Validate validates the OpenTofu configuration for the specified stage.
+// It runs `tofu validate` and returns the validation output.
+func (c *TofuClient) Validate(ctx context.Context, stage schema.StageConfig) (*tfjson.ValidateOutput, error) {
+	log.Debug("tofu validate", "stage", stage)
 	tf, err := c.getTf(stage.Path)
 	if err != nil {
 		return nil, err
@@ -81,10 +81,10 @@ func (c *TerraformClient) Validate(ctx context.Context, stage schema.StageConfig
 	return tf.Validate(ctx)
 }
 
-// Format formats the Terraform configuration files in the specified stage directory.
-// It runs `terraform fmt -recursive`.
-func (c *TerraformClient) Format(ctx context.Context, stage schema.StageConfig) error {
-	log.Debug("terraform fmt", "stage", stage)
+// Format formats the OpenTofu configuration files in the specified stage directory.
+// It runs `tofu fmt -recursive`.
+func (c *TofuClient) Format(ctx context.Context, stage schema.StageConfig) error {
+	log.Debug("tofu fmt", "stage", stage)
 	tf, err := c.getTf(stage.Path)
 	if err != nil {
 		return err
@@ -93,9 +93,9 @@ func (c *TerraformClient) Format(ctx context.Context, stage schema.StageConfig) 
 }
 
 // Plan creates an execution plan for the specified stage.
-// It runs `terraform plan` with the configured input variables and returns whether changes are required.
-func (c *TerraformClient) Plan(ctx context.Context, stage schema.StageConfig) (bool, error) {
-	log.Debug("terraform plan", "stage", stage)
+// It runs `tofu plan` with the configured input variables and returns whether changes are required.
+func (c *TofuClient) Plan(ctx context.Context, stage schema.StageConfig) (bool, error) {
+	log.Debug("tofu plan", "stage", stage)
 	tf, err := c.getTf(stage.Path)
 	if err != nil {
 		return false, err
@@ -112,15 +112,15 @@ func (c *TerraformClient) Plan(ctx context.Context, stage schema.StageConfig) (b
 	return tf.Plan(ctx, vars...)
 }
 
-// Apply applies the Terraform configuration for the specified stage.
-// It runs `terraform apply` with the configured input variables.
-func (c *TerraformClient) Apply(ctx context.Context, stage schema.StageConfig) error {
+// Apply applies the OpenTofu configuration for the specified stage.
+// It runs `tofu apply` with the configured input variables.
+func (c *TofuClient) Apply(ctx context.Context, stage schema.StageConfig) error {
 	if stage.Debug.Break {
 		util.Msgf("Break point at stage %s", stage.Id)
 		return fmt.Errorf("break")
 	}
 
-	log.Debug("terraform apply", "stage", stage)
+	log.Debug("tofu apply", "stage", stage)
 	tf, err := c.getTf(stage.Path)
 	if err != nil {
 		return err
@@ -138,9 +138,9 @@ func (c *TerraformClient) Apply(ctx context.Context, stage schema.StageConfig) e
 	return tf.Apply(ctx, vars...)
 }
 
-// Destroy destroys the Terraform-managed infrastructure for the specified stage.
-// It runs `terraform destroy` with the configured input variables and targets.
-func (c *TerraformClient) Destroy(ctx context.Context, stage schema.StageConfig) error {
+// Destroy destroys the OpenTofu-managed infrastructure for the specified stage.
+// It runs `tofu destroy` with the configured input variables and targets.
+func (c *TofuClient) Destroy(ctx context.Context, stage schema.StageConfig) error {
 	if stage.Debug.Break {
 		util.Msgf("Break point at stage %s", stage.Id)
 		return fmt.Errorf("break")
@@ -151,7 +151,7 @@ func (c *TerraformClient) Destroy(ctx context.Context, stage schema.StageConfig)
 		return nil
 	}
 
-	log.Debug("terraform destroy", "stage", stage)
+	log.Debug("tofu destroy", "stage", stage)
 	tf, err := c.getTf(stage.Path)
 	if err != nil {
 		return err
@@ -187,10 +187,10 @@ func (c *TerraformClient) Destroy(ctx context.Context, stage schema.StageConfig)
 	return tf.Destroy(ctx, vars...)
 }
 
-// Refresh updates the Terraform state for the specified stage.
-// It runs `terraform refresh` with the configured input variables.
-func (c *TerraformClient) Refresh(ctx context.Context, stage schema.StageConfig) error {
-	log.Debug("terraform refresh", "stage", stage)
+// Refresh updates the OpenTofu state for the specified stage.
+// It runs `tofu refresh` with the configured input variables.
+func (c *TofuClient) Refresh(ctx context.Context, stage schema.StageConfig) error {
+	log.Debug("tofu refresh", "stage", stage)
 	tf, err := c.getTf(stage.Path)
 	if err != nil {
 		return err
@@ -207,10 +207,10 @@ func (c *TerraformClient) Refresh(ctx context.Context, stage schema.StageConfig)
 	return tf.Refresh(ctx, vars...)
 }
 
-// Output retrieves the Terraform output for the specified stage directory.
+// Output retrieves the OpenTofu output for the specified stage directory.
 // It returns a map of output variable names to their values in JSON format.
-func (c *TerraformClient) Output(ctx context.Context, stage schema.StageConfig) (map[string][]byte, error) {
-	log.Debug("terraform output", "stage", stage)
+func (c *TofuClient) Output(ctx context.Context, stage schema.StageConfig) (map[string][]byte, error) {
+	log.Debug("tofu output", "stage", stage)
 	tf, err := c.getTf(stage.Path)
 	if err != nil {
 		return nil, err
@@ -231,8 +231,8 @@ func (c *TerraformClient) Output(ctx context.Context, stage schema.StageConfig) 
 	return res, nil
 }
 
-// setStageEnv sets the environment variables for the Terraform process based on the stage configuration.
-func (c *TerraformClient) setStageEnv(tf *tfexec.Terraform, stage schema.StageConfig) {
+// setStageEnv sets the environment variables for the OpenTofu process based on the stage configuration.
+func (c *TofuClient) setStageEnv(tf *tfexec.Terraform, stage schema.StageConfig) {
 	env := util.OsEnvMap()
 
 	if stage.Providers.Kubernetes {
@@ -242,13 +242,13 @@ func (c *TerraformClient) setStageEnv(tf *tfexec.Terraform, stage schema.StageCo
 	}
 
 	if err := tf.SetEnv(env); err != nil {
-		log.Warn("Failed to set terraform environment", "stage", stage, "err", err)
+		log.Warn("Failed to set tofu environment", "stage", stage, "err", err)
 	}
 }
 
 // stageVars generates the input variables for the specified stage based on its configuration.
 // It supports literal values, environment variables, configuration values, secrets, and outputs from other stages.
-func (c *TerraformClient) stageVars(ctx context.Context, stage schema.StageConfig) []*tfexec.VarOption {
+func (c *TofuClient) stageVars(ctx context.Context, stage schema.StageConfig) []*tfexec.VarOption {
 	var vars []*tfexec.VarOption
 
 	outputs := make(map[string]map[string][]byte)
@@ -257,7 +257,7 @@ func (c *TerraformClient) stageVars(ctx context.Context, stage schema.StageConfi
 
 	for k, v := range stage.Vars {
 		if v.Value != "" {
-			log.Debug("Terraform literal input var", "val", v.Value)
+			log.Debug("OpenTofu literal input var", "val", v.Value)
 			vars = append(vars, tfexec.Var(fmt.Sprintf("%s=%s", k, v.Value)))
 		} else if v.Env != "" {
 			val, found := os.LookupEnv(v.Env)
@@ -265,7 +265,7 @@ func (c *TerraformClient) stageVars(ctx context.Context, stage schema.StageConfi
 				log.Info("Stage env input not found", "stage", stage, "env", v.Env)
 			}
 
-			log.Debug("Terraform env input var", "key", v.Env, "val", val)
+			log.Debug("OpenTofu env input var", "key", v.Env, "val", val)
 			vars = append(vars, tfexec.Var(fmt.Sprintf("%s=%s", k, val)))
 		} else if v.Config != "" {
 			val := c.cfg.ConfigString(v.Config)
@@ -274,7 +274,7 @@ func (c *TerraformClient) stageVars(ctx context.Context, stage schema.StageConfi
 				continue
 			}
 
-			log.Debug("Terraform config var", "key", v.Config, "val", val)
+			log.Debug("OpenTofu config var", "key", v.Config, "val", val)
 			vars = append(vars, tfexec.Var(fmt.Sprintf("%s=%s", k, val)))
 		} else if v.Secret != "" {
 			val := c.cfg.SecretString(v.Secret)
@@ -283,7 +283,7 @@ func (c *TerraformClient) stageVars(ctx context.Context, stage schema.StageConfi
 				continue
 			}
 
-			log.Debug("Terraform secret input var", "key", v.Secret, "val", val)
+			log.Debug("OpenTofu secret input var", "key", v.Secret, "val", val)
 			vars = append(vars, tfexec.Var(fmt.Sprintf("%s=%s", k, val)))
 		} else if v.Stage.Name != "" {
 			_, ok := outputs[v.Stage.Name]
@@ -304,7 +304,7 @@ func (c *TerraformClient) stageVars(ctx context.Context, stage schema.StageConfi
 				continue
 			}
 
-			log.Debug("Terraform stage input var", "stage", v.Stage.Name, "output", v.Stage.Output, "key", k, "val", val)
+			log.Debug("OpenTofu stage input var", "stage", v.Stage.Name, "output", v.Stage.Output, "key", k, "val", val)
 			vars = append(vars, tfexec.Var(fmt.Sprintf("%s=%s", k, val)))
 		}
 	}
@@ -312,7 +312,7 @@ func (c *TerraformClient) stageVars(ctx context.Context, stage schema.StageConfi
 	return vars
 }
 
-// parseStageOutputValue parses a specific output value from the Terraform state of another stage.
+// parseStageOutputValue parses a specific output value from the OpenTofu state of another stage.
 // It supports nested keys using dot notation.
 func parseStageOutputValue(o map[string][]byte, key string) (string, error) {
 	before, after, found := strings.Cut(key, ".")
@@ -340,7 +340,7 @@ func targetsToDestroy(ctx context.Context, tf *tfexec.Terraform, stage schema.St
 	hasExcludes := len(stage.Destroy.Exclude) > 0
 
 	if !hasIncludes && !hasExcludes {
-		// nothing specified, default to a normal terraform destroy
+		// nothing specified, default to a normal tofu destroy
 		return nil, true, nil
 	}
 
@@ -359,7 +359,7 @@ func targetsToDestroy(ctx context.Context, tf *tfexec.Terraform, stage schema.St
 
 	var targets []string
 	checkResource := func(res *tfjson.StateResource) {
-		log.Debug("Checking terraform state resource for explicit inclusion/exclusion in destroy operation", "address", res.Address)
+		log.Debug("Checking tofu state resource for explicit inclusion/exclusion in destroy operation", "address", res.Address)
 		compFunc := func(e string) bool {
 			return util.EqualsOrRegexMatchString(e, res.Address, true)
 		}

@@ -14,14 +14,14 @@
 
 package schema
 
-// TerraformConfig represents the configuration for Terraform.
-type TerraformConfig struct {
-	Version string `koanf:"version"` // The version of Terraform to use.
+// TofuConfig represents the configuration for OpenTofu.
+type TofuConfig struct {
+	Version string `koanf:"version"` // The version of OpenTofu to use.
 }
 
-// NewTerraformConfig returns a new TerraformConfig instance with default values.
-func NewTerraformConfig() TerraformConfig {
-	return TerraformConfig{
-		Version: "1.5.7",
+// NewTofuConfig returns a new TofuConfig with default values.
+func NewTofuConfig() TofuConfig {
+	return TofuConfig{
+		Version: "1.11.6",
 	}
 }

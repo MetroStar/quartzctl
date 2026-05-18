@@ -20,33 +20,33 @@ import (
 
 	"github.com/MetroStar/quartzctl/internal/log"
 	"github.com/MetroStar/quartzctl/internal/stages"
-	"github.com/MetroStar/quartzctl/internal/terraform"
+	"github.com/MetroStar/quartzctl/internal/tofu"
 	"github.com/MetroStar/quartzctl/internal/util"
 	"github.com/urfave/cli/v3"
 )
 
-// NewRootTerraformCommand creates the "terraform" root command for the CLI.
-// This command provides subcommands for managing Terraform stages.
+// NewRootTofuCommand creates the "terraform" (aliased as "tofu") root command for the CLI.
+// This command provides subcommands for managing OpenTofu stages.
 //
 // Parameters:
-//   - cmds: TfCommandParams containing the list of Terraform subcommands.
+//   - cmds: TfCommandParams containing the list of OpenTofu subcommands.
 //   - p: *CommandParams containing configuration and runtime parameters.
 //
 // Returns:
-//   - RootCommandResult containing the "terraform" CLI command.
-func NewRootTerraformCommand(cmds TfCommandParams, p *CommandParams) RootCommandResult {
+//   - RootCommandResult containing the "terraform"/"tofu" CLI command.
+func NewRootTofuCommand(cmds TfCommandParams, p *CommandParams) RootCommandResult {
 	slices.SortFunc(cmds.Commands, ByCommandName)
 	return RootCommandResult{
 		Command: &cli.Command{
 			Name:     "terraform",
-			Aliases:  []string{"tf"},
-			Usage:    "Terraform subcommands for individual stages",
+			Aliases:  []string{"tf", "tofu"},
+			Usage:    "OpenTofu subcommands for individual stages",
 			Commands: cmds.Commands,
 		},
 	}
 }
 
-// NewTfInitCommand creates a CLI command for running `terraform init` on a specific stage.
+// NewTfInitCommand creates a CLI command for running `tofu init` on a specific stage.
 //
 // Parameters:
 //   - p: *CommandParams containing configuration and runtime parameters.
@@ -57,7 +57,7 @@ func NewTfInitCommand(p *CommandParams) TfCommandResult {
 	return TfCommandResult{
 		Command: &cli.Command{
 			Name:  "init",
-			Usage: "Run `terraform init` for a specific stage",
+			Usage: "Run `tofu init` for a specific stage",
 			Flags: []cli.Flag{
 				&cli.StringFlag{Name: "stage", Aliases: []string{"s"}, Usage: "Stage name", Required: true},
 			},
@@ -69,7 +69,7 @@ func NewTfInitCommand(p *CommandParams) TfCommandResult {
 	}
 }
 
-// NewTfInitAllCommand creates a CLI command for running `terraform init` on all stages.
+// NewTfInitAllCommand creates a CLI command for running `tofu init` on all stages.
 //
 // Parameters:
 //   - p: *CommandParams containing configuration and runtime parameters.
@@ -80,7 +80,7 @@ func NewTfInitAllCommand(p *CommandParams) TfCommandResult {
 	return TfCommandResult{
 		Command: &cli.Command{
 			Name:  "init-all",
-			Usage: "Run `terraform init` for all stages",
+			Usage: "Run `tofu init` for all stages",
 			Action: func(ctx context.Context, ccmd *cli.Command) error {
 				return TfInitAll(ctx, p)
 			},
@@ -88,7 +88,7 @@ func NewTfInitAllCommand(p *CommandParams) TfCommandResult {
 	}
 }
 
-// NewTfApplyCommand creates a CLI command for running `terraform apply` on a specific stage.
+// NewTfApplyCommand creates a CLI command for running `tofu apply` on a specific stage.
 //
 // Parameters:
 //   - p: *CommandParams containing configuration and runtime parameters.
@@ -99,10 +99,10 @@ func NewTfApplyCommand(p *CommandParams) TfCommandResult {
 	return TfCommandResult{
 		Command: &cli.Command{
 			Name:  "apply",
-			Usage: "Run `terraform apply` for a specific stage",
+			Usage: "Run `tofu apply` for a specific stage",
 			Flags: []cli.Flag{
 				&cli.StringFlag{Name: "stage", Aliases: []string{"s"}, Usage: "Stage name", Required: true},
-				&cli.BoolFlag{Name: "init", Aliases: []string{"i"}, Usage: "Run `terraform init` before applying", Required: false},
+				&cli.BoolFlag{Name: "init", Aliases: []string{"i"}, Usage: "Run `tofu init` before applying", Required: false},
 			},
 			Action: func(ctx context.Context, ccmd *cli.Command) error {
 				stage := ccmd.String("stage")
@@ -119,7 +119,7 @@ func NewTfApplyCommand(p *CommandParams) TfCommandResult {
 	}
 }
 
-// NewTfPlanCommand creates a CLI command for running `terraform plan` on a specific stage.
+// NewTfPlanCommand creates a CLI command for running `tofu plan` on a specific stage.
 //
 // Parameters:
 //   - p: *CommandParams containing configuration and runtime parameters.
@@ -130,10 +130,10 @@ func NewTfPlanCommand(p *CommandParams) TfCommandResult {
 	return TfCommandResult{
 		Command: &cli.Command{
 			Name:  "plan",
-			Usage: "Run `terraform plan` for a specific stage",
+			Usage: "Run `tofu plan` for a specific stage",
 			Flags: []cli.Flag{
 				&cli.StringFlag{Name: "stage", Aliases: []string{"s"}, Usage: "Stage name", Required: true},
-				&cli.BoolFlag{Name: "init", Aliases: []string{"i"}, Usage: "Run `terraform init` before planning", Required: false},
+				&cli.BoolFlag{Name: "init", Aliases: []string{"i"}, Usage: "Run `tofu init` before planning", Required: false},
 			},
 			Action: func(ctx context.Context, ccmd *cli.Command) error {
 				stage := ccmd.String("stage")
@@ -150,7 +150,7 @@ func NewTfPlanCommand(p *CommandParams) TfCommandResult {
 	}
 }
 
-// NewTfDestroyCommand creates a CLI command for running `terraform destroy` on a specific stage.
+// NewTfDestroyCommand creates a CLI command for running `tofu destroy` on a specific stage.
 //
 // Parameters:
 //   - p: *CommandParams containing configuration and runtime parameters.
@@ -161,10 +161,10 @@ func NewTfDestroyCommand(p *CommandParams) TfCommandResult {
 	return TfCommandResult{
 		Command: &cli.Command{
 			Name:  "destroy",
-			Usage: "Run `terraform destroy` for a specific stage",
+			Usage: "Run `tofu destroy` for a specific stage",
 			Flags: []cli.Flag{
 				&cli.StringFlag{Name: "stage", Aliases: []string{"s"}, Usage: "Stage name", Required: true},
-				&cli.BoolFlag{Name: "init", Aliases: []string{"i"}, Usage: "Run `terraform init` before destroying", Required: false},
+				&cli.BoolFlag{Name: "init", Aliases: []string{"i"}, Usage: "Run `tofu init` before destroying", Required: false},
 			},
 			Action: func(ctx context.Context, ccmd *cli.Command) error {
 				stage := ccmd.String("stage")
@@ -181,15 +181,15 @@ func NewTfDestroyCommand(p *CommandParams) TfCommandResult {
 	}
 }
 
-// NewTfOutputCommand creates a CLI command for retrieving Terraform output for a specific stage.
+// NewTfOutputCommand creates a CLI command for retrieving OpenTofu output for a specific stage.
 func NewTfOutputCommand(p *CommandParams) TfCommandResult {
 	return TfCommandResult{
 		Command: &cli.Command{
 			Name:  "output",
-			Usage: "Retrieve Terraform output for a specific stage",
+			Usage: "Retrieve OpenTofu output for a specific stage",
 			Flags: []cli.Flag{
 				&cli.StringFlag{Name: "stage", Aliases: []string{"s"}, Usage: "Stage name", Required: true},
-				&cli.BoolFlag{Name: "init", Aliases: []string{"i"}, Usage: "Run `terraform init` before retrieving output", Required: false},
+				&cli.BoolFlag{Name: "init", Aliases: []string{"i"}, Usage: "Run `tofu init` before retrieving output", Required: false},
 			},
 			Action: func(ctx context.Context, ccmd *cli.Command) error {
 				stage := ccmd.String("stage")
@@ -206,15 +206,15 @@ func NewTfOutputCommand(p *CommandParams) TfCommandResult {
 	}
 }
 
-// NewTfRefreshCommand creates a CLI command for running `terraform refresh` on a specific stage.
+// NewTfRefreshCommand creates a CLI command for running `tofu refresh` on a specific stage.
 func NewTfRefreshCommand(p *CommandParams) TfCommandResult {
 	return TfCommandResult{
 		Command: &cli.Command{
 			Name:  "refresh",
-			Usage: "Run `terraform refresh` for a specific stage",
+			Usage: "Run `tofu refresh` for a specific stage",
 			Flags: []cli.Flag{
 				&cli.StringFlag{Name: "stage", Aliases: []string{"s"}, Usage: "Stage name", Required: true},
-				&cli.BoolFlag{Name: "init", Aliases: []string{"i"}, Usage: "Run `terraform init` before refreshing", Required: false},
+				&cli.BoolFlag{Name: "init", Aliases: []string{"i"}, Usage: "Run `tofu init` before refreshing", Required: false},
 			},
 			Action: func(ctx context.Context, ccmd *cli.Command) error {
 				stage := ccmd.String("stage")
@@ -231,14 +231,14 @@ func NewTfRefreshCommand(p *CommandParams) TfCommandResult {
 	}
 }
 
-// NewTfRefreshAllCommand creates a CLI command for running `terraform refresh` on all stages.
+// NewTfRefreshAllCommand creates a CLI command for running `tofu refresh` on all stages.
 func NewTfRefreshAllCommand(p *CommandParams) TfCommandResult {
 	return TfCommandResult{
 		Command: &cli.Command{
 			Name:  "refresh-all",
-			Usage: "Run `terraform refresh` for all stages",
+			Usage: "Run `tofu refresh` for all stages",
 			Flags: []cli.Flag{
-				&cli.BoolFlag{Name: "init", Aliases: []string{"i"}, Usage: "Run `terraform init` before refreshing all stages", Required: false},
+				&cli.BoolFlag{Name: "init", Aliases: []string{"i"}, Usage: "Run `tofu init` before refreshing all stages", Required: false},
 			},
 			Action: func(ctx context.Context, ccmd *cli.Command) error {
 				init := ccmd.Bool("init")
@@ -254,12 +254,12 @@ func NewTfRefreshAllCommand(p *CommandParams) TfCommandResult {
 	}
 }
 
-// NewTfValidateCommand creates a CLI command for running `terraform validate` on a specific stage.
+// NewTfValidateCommand creates a CLI command for running `tofu validate` on a specific stage.
 func NewTfValidateCommand(p *CommandParams) TfCommandResult {
 	return TfCommandResult{
 		Command: &cli.Command{
 			Name:  "validate",
-			Usage: "Run `terraform validate` for a specific stage",
+			Usage: "Run `tofu validate` for a specific stage",
 			Flags: []cli.Flag{
 				&cli.StringFlag{Name: "stage", Aliases: []string{"s"}, Usage: "Stage name", Required: true},
 			},
@@ -272,12 +272,12 @@ func NewTfValidateCommand(p *CommandParams) TfCommandResult {
 	}
 }
 
-// NewTfFormatCommand creates a CLI command for running `terraform fmt` on a specific stage.
+// NewTfFormatCommand creates a CLI command for running `tofu fmt` on a specific stage.
 func NewTfFormatCommand(p *CommandParams) TfCommandResult {
 	return TfCommandResult{
 		Command: &cli.Command{
 			Name:    "format",
-			Usage:   "Run `terraform fmt` for a specific stage",
+			Usage:   "Run `tofu fmt` for a specific stage",
 			Aliases: []string{"fmt"},
 			Flags: []cli.Flag{
 				&cli.StringFlag{Name: "stage", Aliases: []string{"s"}, Usage: "Stage name", Required: true},
@@ -290,12 +290,12 @@ func NewTfFormatCommand(p *CommandParams) TfCommandResult {
 	}
 }
 
-// NewTfFormatAllCommand creates a CLI command for running `terraform fmt` on all stages.
+// NewTfFormatAllCommand creates a CLI command for running `tofu fmt` on all stages.
 func NewTfFormatAllCommand(p *CommandParams) TfCommandResult {
 	return TfCommandResult{
 		Command: &cli.Command{
 			Name:  "format-all",
-			Usage: "Run `terraform fmt` for all stages",
+			Usage: "Run `tofu fmt` for all stages",
 			Action: func(ctx context.Context, ccmd *cli.Command) error {
 				return TfFormatAll(ctx, p)
 			},
@@ -303,12 +303,12 @@ func NewTfFormatAllCommand(p *CommandParams) TfCommandResult {
 	}
 }
 
-// NewTfVersionCommand creates a CLI command for checking and displaying the Terraform version.
+// NewTfVersionCommand creates a CLI command for checking and displaying the OpenTofu version.
 func NewTfVersionCommand(p *CommandParams) TfCommandResult {
 	return TfCommandResult{
 		Command: &cli.Command{
 			Name:  "version",
-			Usage: "Check and display the Terraform version",
+			Usage: "Check and display the OpenTofu version",
 			Action: func(ctx context.Context, ccmd *cli.Command) error {
 				return TfVersion(ctx, p)
 			},
@@ -316,7 +316,7 @@ func NewTfVersionCommand(p *CommandParams) TfCommandResult {
 	}
 }
 
-// TfInit runs `terraform init` for a specific stage.
+// TfInit runs `tofu init` for a specific stage.
 func TfInit(ctx context.Context, stage string, p *CommandParams) error {
 	return util.RunOnce("tf:init:"+stage, func() error {
 		log.Debug("Entering", "command", "tf:init", "stage", stage)
@@ -324,7 +324,7 @@ func TfInit(ctx context.Context, stage string, p *CommandParams) error {
 
 		util.Hdrf("Init %s", stage)
 
-		client := terraform.Instance(ctx, *p.Settings())
+		client := tofu.Instance(ctx, *p.Settings())
 		err := tfStagePrep(ctx, stage, p)
 		if err != nil {
 			return err
@@ -335,14 +335,14 @@ func TfInit(ctx context.Context, stage string, p *CommandParams) error {
 
 		return wrapChecks(ctx, stage, "init", p, func() error {
 			s := p.Settings().Config.Stages[stage]
-			return client.Init(ctx, s, terraform.TerraformInitOpts{
+			return client.Init(ctx, s, tofu.TofuInitOpts{
 				BackendConfig: b.InitBackendConfig,
 			})
 		})
 	})
 }
 
-// TfInitAll runs `terraform init` for all stages.
+// TfInitAll runs `tofu init` for all stages.
 func TfInitAll(ctx context.Context, p *CommandParams) error {
 	log.Debug("Entering", "command", "tf:initAll")
 	defer log.Debug("Completed", "command", "tf:initAll")
@@ -362,14 +362,14 @@ func TfInitAll(ctx context.Context, p *CommandParams) error {
 	return nil
 }
 
-// TfPlan runs `terraform plan` for a specific stage.
+// TfPlan runs `tofu plan` for a specific stage.
 func TfPlan(ctx context.Context, stage string, p *CommandParams) error {
 	log.Debug("Entering", "command", "tf:plan", "stage", stage)
 	defer log.Debug("Completed", "command", "tf:plan", "stage", stage)
 
 	util.Hdrf("Plan %s", stage)
 
-	client := terraform.Instance(ctx, *p.Settings())
+	client := tofu.Instance(ctx, *p.Settings())
 	err := tfStagePrep(ctx, stage, p)
 	if err != nil {
 		return err
@@ -385,14 +385,14 @@ func TfPlan(ctx context.Context, stage string, p *CommandParams) error {
 	})
 }
 
-// TfApply runs `terraform apply` for a specific stage.
+// TfApply runs `tofu apply` for a specific stage.
 func TfApply(ctx context.Context, stage string, p *CommandParams) error {
 	log.Debug("Entering", "command", "tf:apply", "stage", stage)
 	defer log.Debug("Completed", "command", "tf:apply", "stage", stage)
 
 	util.Hdrf("Apply %s", stage)
 
-	client := terraform.Instance(ctx, *p.Settings())
+	client := tofu.Instance(ctx, *p.Settings())
 	err := tfStagePrep(ctx, stage, p)
 	if err != nil {
 		return err
@@ -404,14 +404,14 @@ func TfApply(ctx context.Context, stage string, p *CommandParams) error {
 	})
 }
 
-// TfDestroy runs `terraform destroy` for a specific stage.
+// TfDestroy runs `tofu destroy` for a specific stage.
 func TfDestroy(ctx context.Context, stage string, p *CommandParams) error {
 	log.Debug("Entering", "command", "tf:destroy", "stage", stage)
 	defer log.Debug("Completed", "command", "tf:destroy", "stage", stage)
 
 	util.Hdrf("Destroy %s", stage)
 
-	client := terraform.Instance(ctx, *p.Settings())
+	client := tofu.Instance(ctx, *p.Settings())
 	err := tfStagePrep(ctx, stage, p)
 	if err != nil {
 		return err
@@ -428,7 +428,7 @@ func TfDestroy(ctx context.Context, stage string, p *CommandParams) error {
 	return client.Destroy(ctx, s)
 }
 
-// TfOutput retrieves the Terraform output for a specific stage.
+// TfOutput retrieves the OpenTofu output for a specific stage.
 func TfOutput(ctx context.Context, stage string, p *CommandParams) error {
 	return util.RunOnce("tf:output:"+stage, func() error {
 		log.Debug("Entering", "command", "tf:output", "stage", stage)
@@ -436,7 +436,7 @@ func TfOutput(ctx context.Context, stage string, p *CommandParams) error {
 
 		util.Hdrf("Output %s", stage)
 
-		client := terraform.Instance(ctx, *p.Settings())
+		client := tofu.Instance(ctx, *p.Settings())
 		s := p.Settings().Config.Stages[stage]
 		err := tfStagePrep(ctx, stage, p)
 		if err != nil {
@@ -456,7 +456,7 @@ func TfOutput(ctx context.Context, stage string, p *CommandParams) error {
 	})
 }
 
-// TfRefresh runs `terraform refresh` for a specific stage.
+// TfRefresh runs `tofu refresh` for a specific stage.
 func TfRefresh(ctx context.Context, stage string, p *CommandParams) error {
 	return util.RunOnce("tf:refresh:"+stage, func() error {
 		log.Debug("Entering", "command", "tf:refresh", "stage", stage)
@@ -464,7 +464,7 @@ func TfRefresh(ctx context.Context, stage string, p *CommandParams) error {
 
 		util.Hdrf("Refresh %s", stage)
 
-		client := terraform.Instance(ctx, *p.Settings())
+		client := tofu.Instance(ctx, *p.Settings())
 		err := tfStagePrep(ctx, stage, p)
 		if err != nil {
 			return err
@@ -473,7 +473,7 @@ func TfRefresh(ctx context.Context, stage string, p *CommandParams) error {
 		s := p.Settings().Config.Stages[stage]
 		err = client.Refresh(ctx, s)
 		if err != nil {
-			log.Info("Error refreshing terraform", "stage", s.Id, "err", err)
+			log.Info("Error refreshing tofu", "stage", s.Id, "err", err)
 			return err
 		}
 
@@ -481,7 +481,7 @@ func TfRefresh(ctx context.Context, stage string, p *CommandParams) error {
 	})
 }
 
-// TfRefreshAll runs `terraform refresh` for all stages.
+// TfRefreshAll runs `tofu refresh` for all stages.
 func TfRefreshAll(ctx context.Context, p *CommandParams) error {
 	log.Debug("Entering", "command", "tf:refreshAll")
 	defer log.Debug("Completed", "command", "tf:refreshAll")
@@ -501,32 +501,32 @@ func TfRefreshAll(ctx context.Context, p *CommandParams) error {
 	return nil
 }
 
-// TfValidate runs `terraform validate` for a specific stage.
+// TfValidate runs `tofu validate` for a specific stage.
 func TfValidate(ctx context.Context, stage string, p *CommandParams) (int, error) {
 	log.Debug("Entering", "command", "tf:validate", "stage", stage)
 	defer log.Debug("Completed", "command", "tf:validate", "stage", stage)
 
 	util.Hdrf("Validate %s", stage)
 
-	client := terraform.Instance(ctx, *p.Settings())
+	client := tofu.Instance(ctx, *p.Settings())
 	s := p.Settings().Config.Stages[stage]
 	v, err := client.Validate(ctx, s)
 	return v.ErrorCount, err
 }
 
-// TfFormat runs `terraform fmt` for a specific stage.
+// TfFormat runs `tofu fmt` for a specific stage.
 func TfFormat(ctx context.Context, stage string, p *CommandParams) error {
 	log.Debug("Entering", "command", "tf:format", "stage", stage)
 	defer log.Debug("Completed", "command", "tf:format", "stage", stage)
 
 	util.Hdrf("Format %s", stage)
 
-	client := terraform.Instance(ctx, *p.Settings())
+	client := tofu.Instance(ctx, *p.Settings())
 	s := p.Settings().Config.Stages[stage]
 	return client.Format(ctx, s)
 }
 
-// TfFormatAll runs `terraform fmt` for all stages.
+// TfFormatAll runs `tofu fmt` for all stages.
 func TfFormatAll(ctx context.Context, p *CommandParams) error {
 	log.Debug("Entering", "command", "tf:formatAll")
 	defer log.Debug("Completed", "command", "tf:formatAll")
@@ -541,25 +541,25 @@ func TfFormatAll(ctx context.Context, p *CommandParams) error {
 	return nil
 }
 
-// TfVersion checks and displays the Terraform version.
+// TfVersion checks and displays the OpenTofu version.
 func TfVersion(ctx context.Context, p *CommandParams) error {
 	log.Debug("Entering", "command", "tf:version")
 	defer log.Debug("Completed", "command", "tf:version")
 
-	log.Debug("Querying Terraform client version...")
+	log.Debug("Querying OpenTofu client version...")
 
-	client := terraform.Instance(ctx, *p.Settings())
+	client := tofu.Instance(ctx, *p.Settings())
 	v, err := client.Version(ctx)
 	if err != nil {
 		return err
 	}
 
-	util.Msgf("Terraform version: %s\n", v)
+	util.Msgf("OpenTofu version: %s\n", v)
 
 	return nil
 }
 
-// TfCreateBackend creates the Terraform state backend.
+// TfCreateBackend creates the OpenTofu state backend.
 func TfCreateBackend(ctx context.Context, p *CommandParams) error {
 	log.Debug("Entering", "internal", "tf:createBackend")
 	defer log.Debug("Completed", "internal", "tf:createBackend")
@@ -570,7 +570,7 @@ func TfCreateBackend(ctx context.Context, p *CommandParams) error {
 	return cp.CreateStateBackend(ctx)
 }
 
-// TfDestroyBackend destroys the Terraform state backend.
+// TfDestroyBackend destroys the OpenTofu state backend.
 func TfDestroyBackend(ctx context.Context, p *CommandParams) error {
 	log.Debug("Entering", "internal", "tf:DestroyBackend")
 	defer log.Debug("Completed", "internal", "tf:DestroyBackend")
@@ -608,7 +608,7 @@ func wrapChecks(ctx context.Context, stage string, event string, p *CommandParam
 	return postCheck(ctx, stage, event, p)
 }
 
-// tfStagePrep prepares the Terraform stage for execution.
+// tfStagePrep prepares the OpenTofu stage for execution.
 func tfStagePrep(ctx context.Context, stage string, p *CommandParams) error {
 	err := util.RunOnce("tf:prep:0", func() error {
 		return p.Settings().WriteJsonConfig(p.Settings().Config.TfVarFilePath(), "settings", true)

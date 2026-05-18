@@ -92,7 +92,7 @@ var RootCommandsModule = fx.Module("rootCmds",
 		NewRootRefreshSecretsCommand,
 		NewRootExportCommand,
 		NewRootRestartCommand,
-		NewRootTerraformCommand,
+		NewRootTofuCommand,
 		NewRootAwsCommand,
 		NewRootInternalCommand,
 	),
@@ -100,21 +100,21 @@ var RootCommandsModule = fx.Module("rootCmds",
 	awsCommandsModule,
 )
 
-// TfCommandParams represents the input parameters for Terraform-related commands.
-// It is used to group Terraform commands for dependency injection.
+// TfCommandParams represents the input parameters for OpenTofu-related commands.
+// It is used to group OpenTofu commands for dependency injection.
 type TfCommandParams struct {
 	fx.In
 	Commands []*cli.Command `group:"tf"`
 }
 
-// TfCommandResult represents the output result for a Terraform command.
-// It is used to group Terraform commands for dependency injection.
+// TfCommandResult represents the output result for an OpenTofu command.
+// It is used to group OpenTofu commands for dependency injection.
 type TfCommandResult struct {
 	fx.Out
 	Command *cli.Command `group:"tf"`
 }
 
-// tfCommandsModule defines the Terraform commands module for dependency injection.
+// tfCommandsModule defines the OpenTofu commands module for dependency injection.
 var tfCommandsModule = fx.Module("tfCmds",
 	fx.Provide(
 		NewTfInitCommand,

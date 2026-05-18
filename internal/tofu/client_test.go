@@ -12,7 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-package terraform
+package tofu
 
 import (
 	"context"
@@ -462,9 +462,9 @@ func setupTestTfClient(t *testing.T) (config.Settings, error) {
 	kc.Set("name", "my-test-cluster")
 	kc.Set("dns.domain", "my-test-cluster.example.com")
 	kc.Set("tmp", tmp)
-	kc.Set("terraform.version", test_version)
-	kc.Set("log.terraform.enabled", true)
-	kc.Set("log.terraform.path", filepath.Join(tmp, "log", "tf.test.log"))
+	kc.Set("tofu.version", test_version)
+	kc.Set("log.tofu.enabled", true)
+	kc.Set("log.tofu.path", filepath.Join(tmp, "log", "tf.test.log"))
 
 	ks := koanf.New(".")
 	ks.Set("foo.bar", "supersecretvalue")

@@ -26,7 +26,7 @@ import (
 	"github.com/MetroStar/quartzctl/internal/config"
 	"github.com/MetroStar/quartzctl/internal/provider"
 	"github.com/MetroStar/quartzctl/internal/stages"
-	"github.com/MetroStar/quartzctl/internal/terraform"
+	"github.com/MetroStar/quartzctl/internal/tofu"
 	"github.com/MetroStar/quartzctl/internal/util"
 	"github.com/knadh/koanf/v2"
 	"github.com/stretchr/testify/assert"
@@ -269,7 +269,7 @@ func TestCmdPrepareAccount(t *testing.T) {
 func defaultTestConfig(t *testing.T) *CommandParams {
 	t.Setenv("SILENT", "1")
 
-	terraform.ResetInstance()
+	tofu.ResetInstance()
 
 	c := filepath.Join("testdata", "config.happy.yaml")
 	s := filepath.Join("testdata", "secrets.happy.yaml")

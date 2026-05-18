@@ -31,7 +31,7 @@ func TestNewTfInitCommand(t *testing.T) {
 	cmd := NewTfInitCommand(p).Command
 
 	assert.Equal(t, "init", cmd.Name)
-	assert.Equal(t, "Run `terraform init` for a specific stage", cmd.Usage)
+	assert.Equal(t, "Run `tofu init` for a specific stage", cmd.Usage)
 	assert.Len(t, cmd.Flags, 1)
 
 	flag := cmd.Flags[0].(*cli.StringFlag)
@@ -46,7 +46,7 @@ func TestNewTfInitAllCommand(t *testing.T) {
 	cmd := NewTfInitAllCommand(p).Command
 
 	assert.Equal(t, "init-all", cmd.Name)
-	assert.Equal(t, "Run `terraform init` for all stages", cmd.Usage)
+	assert.Equal(t, "Run `tofu init` for all stages", cmd.Usage)
 
 	runTestTfCommand(t, cmd)
 }
@@ -56,7 +56,7 @@ func TestNewTfApplyCommand(t *testing.T) {
 	cmd := NewTfApplyCommand(p).Command
 
 	assert.Equal(t, "apply", cmd.Name)
-	assert.Equal(t, "Run `terraform apply` for a specific stage", cmd.Usage)
+	assert.Equal(t, "Run `tofu apply` for a specific stage", cmd.Usage)
 	assert.Len(t, cmd.Flags, 2)
 
 	stageFlag := cmd.Flags[0].(*cli.StringFlag)
@@ -74,7 +74,7 @@ func TestNewTfPlanCommand(t *testing.T) {
 	cmd := NewTfPlanCommand(p).Command
 
 	assert.Equal(t, "plan", cmd.Name)
-	assert.Equal(t, "Run `terraform plan` for a specific stage", cmd.Usage)
+	assert.Equal(t, "Run `tofu plan` for a specific stage", cmd.Usage)
 	assert.Len(t, cmd.Flags, 2)
 
 	stageFlag := cmd.Flags[0].(*cli.StringFlag)
@@ -92,7 +92,7 @@ func TestNewTfDestroyCommand(t *testing.T) {
 	cmd := NewTfDestroyCommand(p).Command
 
 	assert.Equal(t, "destroy", cmd.Name)
-	assert.Equal(t, "Run `terraform destroy` for a specific stage", cmd.Usage)
+	assert.Equal(t, "Run `tofu destroy` for a specific stage", cmd.Usage)
 	assert.Len(t, cmd.Flags, 2)
 
 	stageFlag := cmd.Flags[0].(*cli.StringFlag)
@@ -110,7 +110,7 @@ func TestNewTfOutputCommand(t *testing.T) {
 	cmd := NewTfOutputCommand(p).Command
 
 	assert.Equal(t, "output", cmd.Name)
-	assert.Equal(t, "Retrieve Terraform output for a specific stage", cmd.Usage)
+	assert.Equal(t, "Retrieve OpenTofu output for a specific stage", cmd.Usage)
 	assert.Len(t, cmd.Flags, 2)
 
 	stageFlag := cmd.Flags[0].(*cli.StringFlag)
@@ -128,7 +128,7 @@ func TestNewTfRefreshCommand(t *testing.T) {
 	cmd := NewTfRefreshCommand(p).Command
 
 	assert.Equal(t, "refresh", cmd.Name)
-	assert.Equal(t, "Run `terraform refresh` for a specific stage", cmd.Usage)
+	assert.Equal(t, "Run `tofu refresh` for a specific stage", cmd.Usage)
 	assert.Len(t, cmd.Flags, 2)
 
 	stageFlag := cmd.Flags[0].(*cli.StringFlag)
@@ -146,7 +146,7 @@ func TestNewTfRefreshAllCommand(t *testing.T) {
 	cmd := NewTfRefreshAllCommand(p).Command
 
 	assert.Equal(t, "refresh-all", cmd.Name)
-	assert.Equal(t, "Run `terraform refresh` for all stages", cmd.Usage)
+	assert.Equal(t, "Run `tofu refresh` for all stages", cmd.Usage)
 	assert.Len(t, cmd.Flags, 1)
 
 	initFlag := cmd.Flags[0].(*cli.BoolFlag)
@@ -160,7 +160,7 @@ func TestNewTfValidateCommand(t *testing.T) {
 	cmd := NewTfValidateCommand(p).Command
 
 	assert.Equal(t, "validate", cmd.Name)
-	assert.Equal(t, "Run `terraform validate` for a specific stage", cmd.Usage)
+	assert.Equal(t, "Run `tofu validate` for a specific stage", cmd.Usage)
 	assert.Len(t, cmd.Flags, 1)
 
 	stageFlag := cmd.Flags[0].(*cli.StringFlag)
@@ -175,7 +175,7 @@ func TestNewTfFormatCommand(t *testing.T) {
 	cmd := NewTfFormatCommand(p).Command
 
 	assert.Equal(t, "format", cmd.Name)
-	assert.Equal(t, "Run `terraform fmt` for a specific stage", cmd.Usage)
+	assert.Equal(t, "Run `tofu fmt` for a specific stage", cmd.Usage)
 	assert.Len(t, cmd.Flags, 1)
 
 	stageFlag := cmd.Flags[0].(*cli.StringFlag)
@@ -190,7 +190,7 @@ func TestNewTfFormatAllCommand(t *testing.T) {
 	cmd := NewTfFormatAllCommand(p).Command
 
 	assert.Equal(t, "format-all", cmd.Name)
-	assert.Equal(t, "Run `terraform fmt` for all stages", cmd.Usage)
+	assert.Equal(t, "Run `tofu fmt` for all stages", cmd.Usage)
 
 	runTestTfCommand(t, cmd)
 }
@@ -200,12 +200,12 @@ func TestNewTfVersionCommand(t *testing.T) {
 	cmd := NewTfVersionCommand(p).Command
 
 	assert.Equal(t, "version", cmd.Name)
-	assert.Equal(t, "Check and display the Terraform version", cmd.Usage)
+	assert.Equal(t, "Check and display the OpenTofu version", cmd.Usage)
 
 	runTestTfCommand(t, cmd)
 }
 
-func TestNewRootTerraformCommand(t *testing.T) {
+func TestNewRootTofuCommand(t *testing.T) {
 	p := defaultTestConfig(t)
 	cmds := TfCommandParams{
 		Commands: []*cli.Command{
@@ -213,10 +213,10 @@ func TestNewRootTerraformCommand(t *testing.T) {
 			{Name: "plan"},
 		},
 	}
-	cmd := NewRootTerraformCommand(cmds, p).Command
+	cmd := NewRootTofuCommand(cmds, p).Command
 
 	assert.Equal(t, "terraform", cmd.Name)
-	assert.Equal(t, "Terraform subcommands for individual stages", cmd.Usage)
+	assert.Equal(t, "OpenTofu subcommands for individual stages", cmd.Usage)
 	assert.Len(t, cmd.Commands, 2)
 	assert.Equal(t, "apply", cmd.Commands[0].Name)
 	assert.Equal(t, "plan", cmd.Commands[1].Name)

@@ -37,7 +37,7 @@ type LogConfig struct {
 type LogOptionsConfig struct {
 	Console   ConsoleLogConfig   `koanf:"console"`
 	File      FileLogConfig      `koanf:"file"`
-	Terraform TerraformLogConfig `koanf:"terraform"`
+	Tofu TofuLogConfig `koanf:"tofu"`
 }
 
 // ConsoleLogConfig represents the configuration for console logging.
@@ -52,8 +52,8 @@ type FileLogConfig struct {
 	Level   string `koanf:"level"`
 }
 
-// TerraformLogConfig represents the configuration for Terraform-specific logging.
-type TerraformLogConfig struct {
+// TofuLogConfig represents the configuration for OpenTofu-specific logging.
+type TofuLogConfig struct {
 	Enabled bool   `koanf:"enabled"`
 	Path    string `koanf:"path"`
 	Level   string `koanf:"level"`
@@ -70,7 +70,7 @@ var DefaultLogConfig = LogConfig{
 			Path:    "log/$name.$date.log",
 			Level:   "info",
 		},
-		Terraform: TerraformLogConfig{
+		Tofu: TofuLogConfig{
 			Enabled: false,
 			Path:    "log/$name.$date.tf.log",
 			Level:   "trace",

@@ -80,7 +80,7 @@ func NewRootCleanCommand(p *CommandParams) RootCommandResult {
 }
 
 // Install sets up the Quartz environment by initializing and applying all stages.
-// This includes preparing the account, creating the Terraform backend, and applying configurations.
+// This includes preparing the account, creating the OpenTofu backend, and applying configurations.
 //
 // Parameters:
 //   - ctx: The context for the operation.
@@ -136,11 +136,11 @@ func Install(ctx context.Context, p *CommandParams) error {
 }
 
 // Clean tears down the Quartz environment, including all managed resources and data.
-// This includes refreshing Terraform states, destroying resources, and cleaning up.
+// This includes refreshing OpenTofu states, destroying resources, and cleaning up.
 //
 // Parameters:
 //   - ctx: The context for the operation.
-//   - refresh: A boolean indicating whether to refresh the Terraform state before destruction.
+//   - refresh: A boolean indicating whether to refresh the OpenTofu state before destruction.
 //   - p: *CommandParams containing configuration and runtime parameters.
 //
 // Returns:
@@ -170,20 +170,20 @@ func Clean(ctx context.Context, refresh bool, p *CommandParams) error {
 
 	// Phase 2: Check for blocking AWS resources and clean up if needed
 	// (orphaned EC2 instances, in-use ENIs). If found, run cleanup proactively
-	// to avoid waiting 15+ minutes for Terraform timeout.
+	// to avoid waiting 15+ minutes for OpenTofu timeout.
 	util.Msg("Checking for resources that may block cleanup...")
 	checkStart := time.Now()
 	if hasBlockingResources, err := HasBlockingAWSResources(ctx, p); err != nil {
 		log.Warn("Could not check for blocking resources", "error", err)
 	} else if hasBlockingResources {
 		util.Hdr("AWS Resource Cleanup (proactive)")
-		util.Msg("Detected orphaned resources that would block Terraform. Cleaning up first...")
+		util.Msg("Detected orphaned resources that would block OpenTofu. Cleaning up first...")
 		if cleanupErr := ForceAWSCleanup(ctx, p); cleanupErr != nil {
 			log.Warn("AWS cleanup encountered errors (continuing)", "error", cleanupErr)
 		}
 		stageTiming["aws-cleanup"] = time.Since(checkStart)
 	} else {
-		util.Msg("No blocking resources detected, proceeding with Terraform destroy")
+		util.Msg("No blocking resources detected, proceeding with OpenTofu destroy")
 	}
 
 	stages := p.Settings().Config.StagesOrdered()
@@ -246,7 +246,7 @@ func printCleanupTimingSummary(stageTiming map[string]time.Duration, totalDurati
 //
 // If a retryable error is encountered (e.g., DependencyViolation), it runs AWS CLI cleanup
 // to handle orphaned resources (EC2 instances, ENIs, security groups) before retrying.
-// This is a fallback - primary cleanup is handled by Terraform's Helm pre-delete hooks.
+// This is a fallback - primary cleanup is handled by OpenTofu's Helm pre-delete hooks.
 //
 // Parameters:
 //   - ctx: The context for the operation.
@@ -287,18 +287,18 @@ func TfDestroyWithRetry(ctx context.Context, stage string, p *CommandParams, max
 		// try cleaning up K8s blocking resources first
 		if isHelmReleaseError(errStr) && !k8sCleanupRun {
 			util.Hdr("Running Kubernetes Cleanup (retry)")
-			util.Msg("Terraform encountered a Helm/Kubernetes error. Cleaning up blocking resources...")
+			util.Msg("OpenTofu encountered a Helm/Kubernetes error. Cleaning up blocking resources...")
 			cleanupKubernetesBlockers(ctx)
 			k8sCleanupRun = true
 		}
 
 		// Run AWS CLI cleanup as fallback (only once)
 		// This handles orphaned EC2 instances, ENIs, and security groups that may be
-		// blocking Terraform destroy. The primary cleanup runs via Helm pre-delete hooks,
+		// blocking OpenTofu destroy. The primary cleanup runs via Helm pre-delete hooks,
 		// but those may fail if the cluster is unreachable or has other issues.
 		if !awsCleanupRun {
 			util.Hdr("Running AWS Resource Cleanup (fallback)")
-			util.Msg("Terraform encountered a dependency error. Running AWS CLI cleanup to remove orphaned resources...")
+			util.Msg("OpenTofu encountered a dependency error. Running AWS CLI cleanup to remove orphaned resources...")
 			if cleanupErr := ForceAWSCleanup(ctx, p); cleanupErr != nil {
 				log.Warn("AWS cleanup encountered errors (continuing)", "error", cleanupErr)
 			}

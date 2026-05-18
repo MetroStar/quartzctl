@@ -25,7 +25,7 @@ import (
 
 	"github.com/MetroStar/quartzctl/internal/config/schema"
 	"github.com/MetroStar/quartzctl/internal/util"
-	"github.com/google/go-github/v63/github"
+	"github.com/google/go-github/v72/github"
 )
 
 func TestProviderGithubClientProviderName(t *testing.T) {

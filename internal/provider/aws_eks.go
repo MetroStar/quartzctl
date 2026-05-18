@@ -67,7 +67,7 @@ func (c *AwsClient) generateEksUserToken() (EksToken, error) {
 		return EksToken{}, err
 	}
 
-	t, err := g.GetWithOptions(&token.GetTokenOptions{
+	t, err := g.GetWithOptions(context.Background(), &token.GetTokenOptions{
 		ClusterID: c.id,
 		Region:    c.region,
 	})

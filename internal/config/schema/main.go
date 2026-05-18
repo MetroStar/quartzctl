@@ -44,7 +44,7 @@ type QuartzConfig struct {
 	Alerts       AlertsConfig                            `koanf:"alerts"`
 
 	Kubernetes KubernetesConfig `koanf:"kubernetes"`
-	Terraform  TerraformConfig  `koanf:"terraform"`
+	Tofu  TofuConfig  `koanf:"tofu"`
 
 	StagePaths []string               `koanf:"stage_paths"`
 	Stages     map[string]StageConfig `koanf:"stages"`
@@ -101,7 +101,7 @@ func (c QuartzConfig) KubeconfigPath() string {
 	return p
 }
 
-// TfVarFilePath derives the expected Terraform tfvars path based on optional overrides in QuartzConfig.
+// TfVarFilePath derives the expected OpenTofu tfvars path based on optional overrides in QuartzConfig.
 func (c QuartzConfig) TfVarFilePath() string {
 	p, _ := filepath.Abs(filepath.Join(c.Tmp, "quartz.tfvars.json"))
 	return p
