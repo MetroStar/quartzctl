@@ -29,6 +29,7 @@ type InfrastructureEnvironmentConfig struct {
 type InfrastructureApplicationConfig struct {
 	Disabled                   bool                              `koanf:"disabled"`
 	Description                string                            `koanf:"description"`
+	Public                     bool                              `koanf:"public"`
 	BaseUrl                    string                            `koanf:"base_url"`
 	CallbackUrls               []ApplicationCallbackConfig       `koanf:"callback_urls"`
 	Db                         InfrastructureApplicationDbConfig `koanf:"db"`
@@ -349,6 +350,32 @@ func NewInfrastructureEnvironmentConfig(name string, desc string) Infrastructure
 				CallbackUrls: []ApplicationCallbackConfig{
 					{Path: "/login"},
 				},
+			},
+			"headlamp": {
+				Description: "Headlamp",
+				Public:      true,
+				CallbackUrls: []ApplicationCallbackConfig{
+					{Path: "/oidc-callback"},
+				},
+				Scopes: []string{"openid", "profile", "email"},
+				Keycloak: map[string]interface{}{
+					"mappers": map[string]interface{}{
+						"groups": map[string]interface{}{
+							"protocol":       "openid-connect",
+							"protocolMapper": "oidc-group-membership-mapper",
+							"config": map[string]string{
+								"claim.name":                "groups",
+								"full.path":                 "true",
+								"multivalued":               "true",
+								"id.token.claim":            "true",
+								"access.token.claim":        "true",
+								"userinfo.token.claim":      "true",
+								"introspection.token.claim": "true",
+							},
+						},
+					},
+				},
+				Lookup: NewApplicationLookupConfig("headlamp", "", "", "", "", "headlamp"),
 			},
 		},
 	}
