@@ -37,6 +37,12 @@ func NewMirrorConfig() MirrorConfig {
 				"registry1.dso.mil",
 				"registry.dso.mil",
 				"quay.io",
+				"ghcr.io",
+				"cr.agentgateway.dev",
+				"docker.io",
+				"gcr.io",
+				"public.ecr.aws",
+				"registry.k8s.io",
 			},
 		},
 	}
