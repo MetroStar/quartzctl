@@ -16,7 +16,9 @@ package cmd
 
 import (
 	"context"
+	"fmt"
 	"slices"
+	"strings"
 	"time"
 
 	"github.com/MetroStar/quartzctl/internal/log"
@@ -63,12 +65,10 @@ func NewRootCleanCommand(p *CommandParams) RootCommandResult {
 			Name:  "clean",
 			Usage: "Perform a full cleanup/teardown of the system",
 			Flags: []cli.Flag{
-				&cli.BoolFlag{Name: "refresh", Aliases: []string{"r"}, Usage: "refresh", Value: false},
+				&cli.BoolFlag{Name: "refresh", Aliases: []string{"r"}, Usage: "refresh (always enabled)", Value: true},
 			},
 			Action: func(ctx context.Context, ccmd *cli.Command) error {
-				refresh := ccmd.Bool("refresh")
-
-				err := Clean(ctx, refresh, p)
+				err := Clean(ctx, p)
 				if err != nil {
 					return err
 				}
@@ -137,15 +137,16 @@ func Install(ctx context.Context, p *CommandParams) error {
 
 // Clean tears down the Quartz environment, including all managed resources and data.
 // This includes refreshing OpenTofu states, destroying resources, and cleaning up.
+// Errors during individual stage destroys are collected and reported but do not
+// abort remaining stages, ensuring maximum cleanup even with partial failures.
 //
 // Parameters:
 //   - ctx: The context for the operation.
-//   - refresh: A boolean indicating whether to refresh the OpenTofu state before destruction.
 //   - p: *CommandParams containing configuration and runtime parameters.
 //
 // Returns:
 //   - error: An error if the cleanup fails, otherwise nil.
-func Clean(ctx context.Context, refresh bool, p *CommandParams) error {
+func Clean(ctx context.Context, p *CommandParams) error {
 	log.Debug("Entering", "command", "clean")
 	defer log.Debug("Completed", "command", "clean")
 
@@ -159,60 +160,34 @@ func Clean(ctx context.Context, refresh bool, p *CommandParams) error {
 
 	cleanupStart := time.Now()
 	stageTiming := make(map[string]time.Duration)
-
-	// Phase 1: Always clean up Kubernetes blocking resources first
-	// This removes webhooks, API services, and finalizers that would block Helm uninstalls.
-	// We do this BEFORE any AWS cleanup to ensure the cluster is still healthy.
-	util.Hdr("Kubernetes Cleanup (preparation)")
-	k8sStart := time.Now()
-	cleanupKubernetesBlockers(ctx)
-	stageTiming["k8s-cleanup"] = time.Since(k8sStart)
-
-	// Phase 2: Check for blocking AWS resources and clean up if needed
-	// (orphaned EC2 instances, in-use ENIs). If found, run cleanup proactively
-	// to avoid waiting 15+ minutes for OpenTofu timeout.
-	util.Msg("Checking for resources that may block cleanup...")
-	checkStart := time.Now()
-	if hasBlockingResources, err := HasBlockingAWSResources(ctx, p); err != nil {
-		log.Warn("Could not check for blocking resources", "error", err)
-	} else if hasBlockingResources {
-		util.Hdr("AWS Resource Cleanup (proactive)")
-		util.Msg("Detected orphaned resources that would block OpenTofu. Cleaning up first...")
-		if cleanupErr := ForceAWSCleanup(ctx, p); cleanupErr != nil {
-			log.Warn("AWS cleanup encountered errors (continuing)", "error", cleanupErr)
-		}
-		stageTiming["aws-cleanup"] = time.Since(checkStart)
-	} else {
-		util.Msg("No blocking resources detected, proceeding with OpenTofu destroy")
-	}
+	var destroyErrors []error
 
 	stages := p.Settings().Config.StagesOrdered()
 
-	// refresh each stage in case local state is out of sync
+	// Initialize and refresh each stage before destruction
 	initStart := time.Now()
 	for _, s := range stages {
 		err = TfInit(ctx, s.Id, p)
 		if err != nil {
-			return err
+			log.Warn("Init failed for stage, will attempt destroy anyway", "stage", s.Id, "error", err)
 		}
-		if refresh {
-			err = TfRefresh(ctx, s.Id, p)
-			if err != nil {
-				return err
-			}
+		// Always refresh state before destroy to detect drift
+		err = TfRefresh(ctx, s.Id, p)
+		if err != nil {
+			log.Warn("Refresh failed for stage", "stage", s.Id, "error", err)
 		}
 	}
 	stageTiming["init-refresh"] = time.Since(initStart)
 
-	// destroy stages in reverse order with retry logic for transient failures
+	// Destroy stages in reverse order, collecting errors instead of aborting
 	slices.Reverse(stages)
 	for _, s := range stages {
 		stageStart := time.Now()
-		err = TfDestroyWithRetry(ctx, s.Id, p, 3, 60*time.Second)
+		err = TfDestroyWithRetry(ctx, s.Id, p, 2, 30*time.Second)
 		stageTiming["destroy-"+s.Id] = time.Since(stageStart)
 		if err != nil {
-			printCleanupTimingSummary(stageTiming, time.Since(cleanupStart))
-			return err
+			log.Warn("Stage destroy failed, continuing with remaining stages", "stage", s.Id, "error", err)
+			destroyErrors = append(destroyErrors, fmt.Errorf("stage %s: %w", s.Id, err))
 		}
 	}
 
@@ -220,16 +195,27 @@ func Clean(ctx context.Context, refresh bool, p *CommandParams) error {
 	err = TfDestroyBackend(ctx, p)
 	stageTiming["destroy-backend"] = time.Since(backendStart)
 	if err != nil {
-		printCleanupTimingSummary(stageTiming, time.Since(cleanupStart))
-		return err
+		destroyErrors = append(destroyErrors, fmt.Errorf("backend: %w", err))
 	}
 
 	cleanupFinalStart := time.Now()
 	err = Cleanup(ctx, p)
 	stageTiming["cleanup-final"] = time.Since(cleanupFinalStart)
+	if err != nil {
+		destroyErrors = append(destroyErrors, fmt.Errorf("cleanup: %w", err))
+	}
 
 	printCleanupTimingSummary(stageTiming, time.Since(cleanupStart))
-	return err
+
+	if len(destroyErrors) > 0 {
+		util.Hdr("Destroy Errors")
+		for _, e := range destroyErrors {
+			util.Msgf("  ✗ %v", e)
+		}
+		return fmt.Errorf("%d stage(s) failed to destroy cleanly", len(destroyErrors))
+	}
+
+	return nil
 }
 
 // printCleanupTimingSummary outputs timing information for each phase of the cleanup.
@@ -241,12 +227,10 @@ func printCleanupTimingSummary(stageTiming map[string]time.Duration, totalDurati
 	util.Msgf("  %-25s %v", "TOTAL:", totalDuration.Round(time.Second))
 }
 
-// TfDestroyWithRetry attempts to destroy a stage with retry logic for transient failures
-// such as AWS resource dependency violations that may resolve after ENI cleanup completes.
-//
-// If a retryable error is encountered (e.g., DependencyViolation), it runs AWS CLI cleanup
-// to handle orphaned resources (EC2 instances, ENIs, security groups) before retrying.
-// This is a fallback - primary cleanup is handled by OpenTofu's Helm pre-delete hooks.
+// TfDestroyWithRetry attempts to destroy a stage with retry logic for transient failures.
+// It retries on known transient errors (dependency violations, timeouts) with a simple
+// delay between attempts. Cleanup of blocking resources is handled by Helm pre-delete
+// hooks running in-cluster.
 //
 // Parameters:
 //   - ctx: The context for the operation.
@@ -259,8 +243,6 @@ func printCleanupTimingSummary(stageTiming map[string]time.Duration, totalDurati
 //   - error: An error if all attempts fail, otherwise nil.
 func TfDestroyWithRetry(ctx context.Context, stage string, p *CommandParams, maxRetries int, retryDelay time.Duration) error {
 	var lastErr error
-	awsCleanupRun := false
-	k8sCleanupRun := false
 
 	for attempt := 0; attempt <= maxRetries; attempt++ {
 		if attempt > 0 {
@@ -282,28 +264,6 @@ func TfDestroyWithRetry(ctx context.Context, stage string, p *CommandParams, max
 		}
 
 		log.Warn("Retryable error during destroy", "stage", stage, "attempt", attempt, "error", lastErr)
-
-		// If it's a Helm release error (cluster unreachable, webhooks, etc.),
-		// try cleaning up K8s blocking resources first
-		if isHelmReleaseError(errStr) && !k8sCleanupRun {
-			util.Hdr("Running Kubernetes Cleanup (retry)")
-			util.Msg("OpenTofu encountered a Helm/Kubernetes error. Cleaning up blocking resources...")
-			cleanupKubernetesBlockers(ctx)
-			k8sCleanupRun = true
-		}
-
-		// Run AWS CLI cleanup as fallback (only once)
-		// This handles orphaned EC2 instances, ENIs, and security groups that may be
-		// blocking OpenTofu destroy. The primary cleanup runs via Helm pre-delete hooks,
-		// but those may fail if the cluster is unreachable or has other issues.
-		if !awsCleanupRun {
-			util.Hdr("Running AWS Resource Cleanup (fallback)")
-			util.Msg("OpenTofu encountered a dependency error. Running AWS CLI cleanup to remove orphaned resources...")
-			if cleanupErr := ForceAWSCleanup(ctx, p); cleanupErr != nil {
-				log.Warn("AWS cleanup encountered errors (continuing)", "error", cleanupErr)
-			}
-			awsCleanupRun = true
-		}
 	}
 
 	return lastErr
@@ -317,7 +277,6 @@ func isRetryableDestroyError(errStr string) bool {
 		"is currently in use",
 		"NetworkInterfaceInUse",
 		"InvalidGroup.InUse",
-		// Helm release errors that occur when cluster is unreachable
 		"failed to delete release",
 		"Kubernetes cluster unreachable",
 		"connection refused",
@@ -325,38 +284,7 @@ func isRetryableDestroyError(errStr string) bool {
 		"i/o timeout",
 	}
 	for _, pattern := range retryablePatterns {
-		if len(errStr) > 0 && contains(errStr, pattern) {
-			return true
-		}
-	}
-	return false
-}
-
-// isHelmReleaseError checks if the error is specifically a Helm release failure
-// (cluster unreachable, release already gone, etc.)
-func isHelmReleaseError(errStr string) bool {
-	helmPatterns := []string{
-		"failed to delete release",
-		"release: not found",
-		"Kubernetes cluster unreachable",
-		"no endpoints available",
-	}
-	for _, pattern := range helmPatterns {
-		if len(errStr) > 0 && contains(errStr, pattern) {
-			return true
-		}
-	}
-	return false
-}
-
-// contains checks if a string contains a substring (case-insensitive would be better but keeping simple)
-func contains(s, substr string) bool {
-	return len(s) >= len(substr) && (s == substr || len(s) > 0 && findSubstring(s, substr))
-}
-
-func findSubstring(s, substr string) bool {
-	for i := 0; i <= len(s)-len(substr); i++ {
-		if s[i:i+len(substr)] == substr {
+		if len(errStr) > 0 && strings.Contains(errStr, pattern) {
 			return true
 		}
 	}
