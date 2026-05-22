@@ -59,7 +59,7 @@ tmp: %s
 		"dns.domain": "mytest.example.com",
 
 		// defaults
-		"tofu.version": "1.11.6",
+		"tofu.version": "1.12.0",
 	}
 	for k, v := range expected {
 		a := actual.Get(k)
@@ -144,7 +144,7 @@ auth:
 		actual.Config.Providers.Cloud != "local" ||
 		actual.Config.Tmp != tmp ||
 		actual.Config.Project != "testproject" ||
-		actual.Config.Tofu.Version != "1.11.6" {
+		actual.Config.Tofu.Version != "1.12.0" {
 		t.Errorf("mismatched config value found, expected %s, found %v", cfgContent, actual.Config)
 	}
 

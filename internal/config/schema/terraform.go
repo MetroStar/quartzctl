@@ -22,6 +22,6 @@ type TofuConfig struct {
 // NewTofuConfig returns a new TofuConfig with default values.
 func NewTofuConfig() TofuConfig {
 	return TofuConfig{
-		Version: "1.11.6",
+		Version: "1.12.0",
 	}
 }
