@@ -66,6 +66,7 @@ type KubernetesProviderClient interface {
 	GetDaemonSetStatus(ctx context.Context, kind schema.GroupVersionResource, ns string, name string) (int64, int64, error)
 	CleanupStuckTerminatingPods(ctx context.Context, timeout time.Duration) ([]string, error)
 	ListVirtualServices(ctx context.Context) ([]VirtualServiceInfo, error)
+	PrepareForDestroy(ctx context.Context) error
 }
 
 // KubernetesClient is the implementation of the Kubernetes provider client.
@@ -934,4 +935,154 @@ func (r KubernetesProviderCheckResult) ToTable() ([]string, []ProviderCheckResul
 	}
 
 	return headers, rows
+}
+
+// PrepareForDestroy removes LoadBalancer Services (so the LB controller cleans up
+// NLBs and security groups), removes finalizers from Flux CRDs, and patches stuck
+// namespaces to enable clean deletion during destroy. This must run before tofu
+// destroy so that namespace deletions are not blocked by orphaned custom resources
+// with finalizers, and VPC deletion is not blocked by orphaned security groups.
+func (c KubernetesClient) PrepareForDestroy(ctx context.Context) error {
+	log.Debug("Entering", "internal", "prepareForDestroy")
+	defer log.Debug("Completed", "internal", "prepareForDestroy")
+
+	clientset, err := c.api.ClientSet()
+	if err != nil {
+		return fmt.Errorf("failed to get clientset: %w", err)
+	}
+
+	// Phase 1: Delete all LoadBalancer Services so the LB controller (still running)
+	// can clean up NLBs and their security groups before we destroy the controller.
+	if err := c.deleteLoadBalancerServices(ctx, clientset); err != nil {
+		log.Warn("Error during LoadBalancer cleanup (continuing)", "err", err)
+	}
+
+	dyn, err := c.api.DynamicClient()
+	if err != nil {
+		return fmt.Errorf("failed to get dynamic client: %w", err)
+	}
+
+	// Flux CRD types that commonly have finalizers blocking namespace deletion
+	fluxCRDs := []schema.GroupVersionResource{
+		{Group: "helm.toolkit.fluxcd.io", Version: "v2", Resource: "helmreleases"},
+		{Group: "source.toolkit.fluxcd.io", Version: "v1", Resource: "gitrepositories"},
+		{Group: "source.toolkit.fluxcd.io", Version: "v1", Resource: "helmrepositories"},
+		{Group: "source.toolkit.fluxcd.io", Version: "v1", Resource: "helmcharts"},
+		{Group: "kustomize.toolkit.fluxcd.io", Version: "v1", Resource: "kustomizations"},
+		{Group: "notification.toolkit.fluxcd.io", Version: "v1beta3", Resource: "alerts"},
+		{Group: "notification.toolkit.fluxcd.io", Version: "v1", Resource: "receivers"},
+		{Group: "notification.toolkit.fluxcd.io", Version: "v1beta3", Resource: "providers"},
+	}
+
+	var totalCleaned int
+	for _, gvr := range fluxCRDs {
+		list, err := dyn.Resource(gvr).Namespace("").List(ctx, metav1.ListOptions{})
+		if err != nil {
+			// CRD might not exist (not installed), skip
+			log.Debug("Skipping CRD (not found or inaccessible)", "resource", gvr.Resource, "group", gvr.Group)
+			continue
+		}
+
+		for _, item := range list.Items {
+			if len(item.GetFinalizers()) == 0 {
+				continue
+			}
+
+			item.SetFinalizers(nil)
+			_, err := dyn.Resource(gvr).Namespace(item.GetNamespace()).Update(ctx, &item, metav1.UpdateOptions{})
+			if err != nil {
+				log.Warn("Failed to remove finalizers", "resource", gvr.Resource, "namespace", item.GetNamespace(), "name", item.GetName(), "err", err)
+				continue
+			}
+			totalCleaned++
+			log.Debug("Removed finalizers", "resource", gvr.Resource, "namespace", item.GetNamespace(), "name", item.GetName())
+		}
+	}
+
+	if totalCleaned > 0 {
+		util.Printf("Removed finalizers from %d Flux resource(s)", totalCleaned)
+	}
+
+	// Phase 3: Patch stuck namespaces (remove kubernetes finalizer to unblock deletion)
+	namespaces, err := clientset.CoreV1().Namespaces().List(ctx, metav1.ListOptions{})
+	if err != nil {
+		return fmt.Errorf("failed to list namespaces: %w", err)
+	}
+
+	for _, ns := range namespaces.Items {
+		if ns.DeletionTimestamp == nil || len(ns.Spec.Finalizers) == 0 {
+			continue
+		}
+		// Namespace is stuck in Terminating — remove spec finalizers
+		ns.Spec.Finalizers = nil
+		_, err := clientset.CoreV1().Namespaces().Finalize(ctx, &ns, metav1.UpdateOptions{})
+		if err != nil {
+			log.Warn("Failed to patch stuck namespace", "namespace", ns.Name, "err", err)
+			continue
+		}
+		util.Printf("Patched stuck namespace: %s", ns.Name)
+	}
+
+	return nil
+}
+
+// deleteLoadBalancerServices deletes all Services of type LoadBalancer and waits
+// for the AWS LB controller to reconcile (remove NLBs and security groups).
+func (c KubernetesClient) deleteLoadBalancerServices(ctx context.Context, clientset kubernetes.Interface) error {
+	services, err := clientset.CoreV1().Services("").List(ctx, metav1.ListOptions{})
+	if err != nil {
+		return fmt.Errorf("failed to list services: %w", err)
+	}
+
+	var lbServices []corev1.Service
+	for _, svc := range services.Items {
+		if svc.Spec.Type == corev1.ServiceTypeLoadBalancer {
+			lbServices = append(lbServices, svc)
+		}
+	}
+
+	if len(lbServices) == 0 {
+		log.Debug("No LoadBalancer services found")
+		return nil
+	}
+
+	util.Printf("Deleting %d LoadBalancer service(s) for LB controller cleanup...", len(lbServices))
+	for _, svc := range lbServices {
+		log.Debug("Deleting LoadBalancer service", "namespace", svc.Namespace, "name", svc.Name)
+		err := clientset.CoreV1().Services(svc.Namespace).Delete(ctx, svc.Name, metav1.DeleteOptions{})
+		if err != nil {
+			log.Warn("Failed to delete LoadBalancer service", "namespace", svc.Namespace, "name", svc.Name, "err", err)
+			continue
+		}
+		util.Printf("  Deleted %s/%s", svc.Namespace, svc.Name)
+	}
+
+	// Wait for services to be fully removed (finalizer cleared by LB controller = SGs cleaned up)
+	util.Printf("Waiting for LB controller to clean up cloud resources...")
+	timeout := 5 * time.Minute
+	poll := 5 * time.Second
+	deadline := time.Now().Add(timeout)
+
+	for time.Now().Before(deadline) {
+		allGone := true
+		for _, svc := range lbServices {
+			_, err := clientset.CoreV1().Services(svc.Namespace).Get(ctx, svc.Name, metav1.GetOptions{})
+			if err == nil {
+				allGone = false
+				break
+			}
+		}
+		if allGone {
+			util.Printf("All LoadBalancer services cleaned up successfully")
+			return nil
+		}
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		case <-time.After(poll):
+		}
+	}
+
+	log.Warn("Timed out waiting for LoadBalancer service cleanup (continuing)")
+	return nil
 }

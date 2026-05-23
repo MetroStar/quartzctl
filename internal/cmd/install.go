@@ -179,6 +179,20 @@ func Clean(ctx context.Context, p *CommandParams) error {
 	}
 	stageTiming["init-refresh"] = time.Since(initStart)
 
+	// K8s preparation: remove Flux finalizers and patch stuck namespaces
+	// so tofu destroy doesn't block on namespace deletion
+	k8sCleanStart := time.Now()
+	kube, err := p.Provider().Kubernetes(ctx)
+	if err != nil {
+		log.Warn("Could not connect to Kubernetes for pre-destroy cleanup", "error", err)
+	} else {
+		err = kube.PrepareForDestroy(ctx)
+		if err != nil {
+			log.Warn("K8s pre-destroy cleanup failed (non-fatal)", "error", err)
+		}
+	}
+	stageTiming["k8s-prep"] = time.Since(k8sCleanStart)
+
 	// Destroy stages in reverse order, collecting errors instead of aborting
 	slices.Reverse(stages)
 	for _, s := range stages {
