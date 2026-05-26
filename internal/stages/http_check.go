@@ -35,7 +35,7 @@ type HttpStageCheck schema.StageChecksHttpConfig
 // It validates the response status code and content based on the check configuration.
 func (c HttpStageCheck) Run(ctx context.Context, cfg schema.QuartzConfig) error {
 	tr := &http.Transport{
-		TLSClientConfig: &tls.Config{InsecureSkipVerify: c.Verify}, // #nosec G402
+		TLSClientConfig: &tls.Config{InsecureSkipVerify: c.Insecure}, // #nosec G402
 	}
 	client := &http.Client{Transport: tr}
 

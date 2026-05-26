@@ -71,7 +71,7 @@ type StageChecksHttpConfig struct {
 	App         string                       `koanf:"app"`
 	StatusCodes []int                        `koanf:"status_codes"`
 	Content     StageChecksHttpContentConfig `koanf:"content"`
-	Verify      bool                         `koanf:"verify"`
+	Insecure    bool                         `koanf:"insecure"`
 	Retry       StageChecksRetryConfig       `koanf:"retry"`
 }
 
