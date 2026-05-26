@@ -163,7 +163,7 @@ func NewInfrastructureEnvironmentConfig(name string, desc string) Infrastructure
 				DefaultPath:                "/applications",
 				Scopes:                     []string{"argocd"},
 				AccessTokenLifespanSeconds: 60 * 60 * 12, // 12 hrs
-				Lookup:                     NewApplicationLookupConfig("argocd", "argocd-initial-admin-secret", "admin", "", "password", "argocd-argocd"),
+				Lookup:                     NewApplicationLookupConfig("argocd", "argocd-initial-admin-secret", "admin", "", "password", "argocd"),
 				Keycloak: map[string]interface{}{
 					"mappers": map[string]interface{}{
 						"username": map[string]interface{}{
@@ -253,7 +253,7 @@ func NewInfrastructureEnvironmentConfig(name string, desc string) Infrastructure
 					Enabled: true,
 					Admin:   true,
 				},
-				Lookup: NewApplicationLookupConfig("sonarqube", "quartz-quartz-bigbang-sonarqube", "", "username", "password", "sonarqube-sonarqube"),
+				Lookup: NewApplicationLookupConfig("sonarqube", "quartz-quartz-bigbang-sonarqube", "", "username", "password", "sonarqube"),
 			},
 			"jenkins": {
 				Description: "Jenkins",
@@ -317,7 +317,7 @@ func NewInfrastructureEnvironmentConfig(name string, desc string) Infrastructure
 				CallbackUrls: []ApplicationCallbackConfig{
 					{Path: "/openId_auth"},
 				},
-				Lookup: NewApplicationLookupConfig("neuvector", "", "", "", "", "neuvector-neuvector"),
+				Lookup: NewApplicationLookupConfig("neuvector", "", "", "", "", "neuvector"),
 				Keycloak: map[string]interface{}{
 					"mappers": map[string]interface{}{
 						"realm roles": map[string]interface{}{
@@ -343,7 +343,7 @@ func NewInfrastructureEnvironmentConfig(name string, desc string) Infrastructure
 				CallbackUrls: []ApplicationCallbackConfig{
 					{Path: "/login/generic_oauth"},
 				},
-				Lookup: NewApplicationLookupConfig("monitoring", "monitoring-grafana", "", "admin-user", "admin-password", "monitoring-grafana-grafana"),
+				Lookup: NewApplicationLookupConfig("monitoring", "monitoring-grafana", "", "admin-user", "admin-password", "grafana"),
 			},
 			"tempo": {
 				Description: "Tempo",
