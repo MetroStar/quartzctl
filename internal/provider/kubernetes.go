@@ -39,6 +39,7 @@ import (
 	"k8s.io/cli-runtime/pkg/genericclioptions"
 	"k8s.io/cli-runtime/pkg/printers"
 	"k8s.io/cli-runtime/pkg/resource"
+	"k8s.io/client-go/dynamic"
 	"k8s.io/client-go/kubernetes"
 	"k8s.io/client-go/rest"
 	"k8s.io/client-go/restmapper"
@@ -938,10 +939,11 @@ func (r KubernetesProviderCheckResult) ToTable() ([]string, []ProviderCheckResul
 }
 
 // PrepareForDestroy removes LoadBalancer Services (so the LB controller cleans up
-// NLBs and security groups), removes finalizers from Flux CRDs, and patches stuck
-// namespaces to enable clean deletion during destroy. This must run before tofu
-// destroy so that namespace deletions are not blocked by orphaned custom resources
-// with finalizers, and VPC deletion is not blocked by orphaned security groups.
+// NLBs and security groups), drains Karpenter-managed nodes, removes finalizers
+// from Flux CRDs, and patches stuck namespaces to enable clean deletion during
+// destroy. This must run before tofu destroy so that namespace deletions are not
+// blocked by orphaned custom resources with finalizers, and VPC deletion is not
+// blocked by orphaned security groups or ENIs from Karpenter nodes.
 func (c KubernetesClient) PrepareForDestroy(ctx context.Context) error {
 	log.Debug("Entering", "internal", "prepareForDestroy")
 	defer log.Debug("Completed", "internal", "prepareForDestroy")
@@ -960,6 +962,13 @@ func (c KubernetesClient) PrepareForDestroy(ctx context.Context) error {
 	dyn, err := c.api.DynamicClient()
 	if err != nil {
 		return fmt.Errorf("failed to get dynamic client: %w", err)
+	}
+
+	// Phase 2: Drain Karpenter-managed nodes by deleting NodeClaims.
+	// Karpenter reconciles the deletion by terminating the EC2 instances,
+	// preventing orphaned ENIs from blocking subnet/SG teardown.
+	if err := c.drainKarpenterNodes(ctx, dyn); err != nil {
+		log.Warn("Error during Karpenter node drain (continuing)", "err", err)
 	}
 
 	// Flux CRD types that commonly have finalizers blocking namespace deletion
@@ -1084,5 +1093,78 @@ func (c KubernetesClient) deleteLoadBalancerServices(ctx context.Context, client
 	}
 
 	log.Warn("Timed out waiting for LoadBalancer service cleanup (continuing)")
+	return nil
+}
+
+// drainKarpenterNodes deletes all Karpenter NodePool and NodeClaim resources,
+// triggering Karpenter to terminate the underlying EC2 instances. This prevents
+// orphaned ENIs from blocking VPC subnet and security group deletion during destroy.
+func (c KubernetesClient) drainKarpenterNodes(ctx context.Context, dyn dynamic.Interface) error {
+	nodeClaimGVR := schema.GroupVersionResource{
+		Group: "karpenter.sh", Version: "v1", Resource: "nodeclaims",
+	}
+	nodePoolGVR := schema.GroupVersionResource{
+		Group: "karpenter.sh", Version: "v1", Resource: "nodepools",
+	}
+
+	// Delete NodePools first to prevent Karpenter from replacing terminated nodes
+	pools, err := dyn.Resource(nodePoolGVR).List(ctx, metav1.ListOptions{})
+	if err != nil {
+		log.Debug("Karpenter NodePool CRD not found (skipping)", "err", err)
+		return nil
+	}
+
+	for _, pool := range pools.Items {
+		log.Debug("Deleting NodePool", "name", pool.GetName())
+		err := dyn.Resource(nodePoolGVR).Delete(ctx, pool.GetName(), metav1.DeleteOptions{})
+		if err != nil {
+			log.Warn("Failed to delete NodePool", "name", pool.GetName(), "err", err)
+		}
+	}
+
+	if len(pools.Items) > 0 {
+		util.Printf("Deleted %d Karpenter NodePool(s)", len(pools.Items))
+	}
+
+	// Delete all NodeClaims to trigger instance termination
+	claims, err := dyn.Resource(nodeClaimGVR).List(ctx, metav1.ListOptions{})
+	if err != nil {
+		return nil
+	}
+
+	if len(claims.Items) == 0 {
+		log.Debug("No Karpenter NodeClaims found")
+		return nil
+	}
+
+	util.Printf("Draining %d Karpenter-managed node(s)...", len(claims.Items))
+	for _, claim := range claims.Items {
+		log.Debug("Deleting NodeClaim", "name", claim.GetName())
+		err := dyn.Resource(nodeClaimGVR).Delete(ctx, claim.GetName(), metav1.DeleteOptions{})
+		if err != nil {
+			log.Warn("Failed to delete NodeClaim", "name", claim.GetName(), "err", err)
+		}
+	}
+
+	// Wait for NodeClaims to be fully removed (instances terminated)
+	timeout := 5 * time.Minute
+	poll := 10 * time.Second
+	deadline := time.Now().Add(timeout)
+
+	for time.Now().Before(deadline) {
+		remaining, err := dyn.Resource(nodeClaimGVR).List(ctx, metav1.ListOptions{})
+		if err != nil || len(remaining.Items) == 0 {
+			util.Printf("All Karpenter nodes terminated successfully")
+			return nil
+		}
+		log.Debug("Waiting for Karpenter nodes to terminate", "remaining", len(remaining.Items))
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		case <-time.After(poll):
+		}
+	}
+
+	log.Warn("Timed out waiting for Karpenter node termination (continuing)")
 	return nil
 }
