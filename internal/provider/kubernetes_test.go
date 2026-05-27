@@ -863,7 +863,27 @@ func TestProviderKubernetesClientListVirtualServices(t *testing.T) {
 
 func TestProviderKubernetesClientListVirtualServicesNotFound(t *testing.T) {
 	// Test when VirtualService CRD doesn't exist
+	// Clear the shared cache so a prior test's lookup doesn't leak in
+	defaultCache.mutex.Lock()
+	defaultCache.kinds = map[string]k8sSchema.GroupVersionResource{}
+	defaultCache.mutex.Unlock()
+
 	api := NewKubernetesApiMock()
+	// Remove VirtualService from discovery resources so LookupKind fails
+	api.resources = []*metav1.APIResourceList{
+		{
+			GroupVersion: "external-secrets.io/v1beta1",
+			APIResources: []metav1.APIResource{
+				{Name: "externalsecrets", Namespaced: true, Kind: "ExternalSecret"},
+			},
+		},
+		{
+			GroupVersion: "apps/v1",
+			APIResources: []metav1.APIResource{
+				{Name: "deployments", Namespaced: true, Kind: "Deployment"},
+			},
+		},
+	}
 	cfg := schema.QuartzConfig{}
 	kubeconfig := KubeconfigInfo{}
 

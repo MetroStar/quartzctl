@@ -17,6 +17,7 @@ package provider
 import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
+	"k8s.io/apimachinery/pkg/runtime/schema"
 	"k8s.io/client-go/discovery"
 	fakeDiscoveryClient "k8s.io/client-go/discovery/fake"
 	"k8s.io/client-go/dynamic"
@@ -90,7 +91,25 @@ func (api KubernetesApiMock) ClientSet() (kubernetes.Interface, error) {
 
 // DynamicClient returns a fake dynamic client populated with the mock dynamic objects.
 func (api KubernetesApiMock) DynamicClient() (dynamic.Interface, error) {
-	return fakeDynamicClient.NewSimpleDynamicClient(runtime.NewScheme(), api.dynamicObjects...), api.err
+	scheme := runtime.NewScheme()
+	// Register list kinds for all CRDs that PrepareForDestroy may query.
+	// The fake dynamic client panics on List() if the GVR isn't registered.
+	gvrToListKind := map[schema.GroupVersionResource]string{
+		{Group: "helm.toolkit.fluxcd.io", Version: "v2", Resource: "helmreleases"}:              "HelmReleaseList",
+		{Group: "source.toolkit.fluxcd.io", Version: "v1", Resource: "gitrepositories"}:         "GitRepositoryList",
+		{Group: "source.toolkit.fluxcd.io", Version: "v1", Resource: "helmrepositories"}:        "HelmRepositoryList",
+		{Group: "source.toolkit.fluxcd.io", Version: "v1", Resource: "helmcharts"}:              "HelmChartList",
+		{Group: "kustomize.toolkit.fluxcd.io", Version: "v1", Resource: "kustomizations"}:       "KustomizationList",
+		{Group: "notification.toolkit.fluxcd.io", Version: "v1beta3", Resource: "alerts"}:       "AlertList",
+		{Group: "notification.toolkit.fluxcd.io", Version: "v1", Resource: "receivers"}:         "ReceiverList",
+		{Group: "notification.toolkit.fluxcd.io", Version: "v1beta3", Resource: "providers"}:    "ProviderList",
+		{Group: "karpenter.sh", Version: "v1", Resource: "nodeclaims"}:                          "NodeClaimList",
+		{Group: "karpenter.sh", Version: "v1", Resource: "nodepools"}:                           "NodePoolList",
+		{Group: "external-secrets.io", Version: "v1beta1", Resource: "externalsecrets"}:         "ExternalSecretList",
+		{Group: "apps", Version: "v1", Resource: "deployments"}:                                 "DeploymentList",
+		{Group: "networking.istio.io", Version: "v1beta1", Resource: "virtualservices"}:          "VirtualServiceList",
+	}
+	return fakeDynamicClient.NewSimpleDynamicClientWithCustomListKinds(scheme, gvrToListKind, api.dynamicObjects...), api.err
 }
 
 // DiscoveryClient returns a fake discovery client populated with the mock API resources.
