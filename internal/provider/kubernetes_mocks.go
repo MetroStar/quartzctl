@@ -15,7 +15,10 @@
 package provider
 
 import (
+	"strings"
+
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/runtime/schema"
 	"k8s.io/client-go/discovery"
@@ -109,6 +112,24 @@ func (api KubernetesApiMock) DynamicClient() (dynamic.Interface, error) {
 		{Group: "apps", Version: "v1", Resource: "deployments"}:                                 "DeploymentList",
 		{Group: "networking.istio.io", Version: "v1beta1", Resource: "virtualservices"}:          "VirtualServiceList",
 	}
+
+	// Auto-register GVRs from dynamic objects so tests don't need to manually
+	// extend the hardcoded map above for every test resource type.
+	for _, obj := range api.dynamicObjects {
+		if u, ok := obj.(*unstructured.Unstructured); ok {
+			gv, err := schema.ParseGroupVersion(u.GetAPIVersion())
+			if err == nil {
+				kind := u.GetKind()
+				// Pluralize kind naively (lowercase + "s") for resource name
+				res := strings.ToLower(kind) + "s"
+				gvr := schema.GroupVersionResource{Group: gv.Group, Version: gv.Version, Resource: res}
+				if _, exists := gvrToListKind[gvr]; !exists {
+					gvrToListKind[gvr] = kind + "List"
+				}
+			}
+		}
+	}
+
 	return fakeDynamicClient.NewSimpleDynamicClientWithCustomListKinds(scheme, gvrToListKind, api.dynamicObjects...), api.err
 }
 

@@ -61,7 +61,13 @@ func (c KubernetesStageCheck) Run(ctx context.Context, _ schema.QuartzConfig) er
 		}
 	}
 
-	if c.src.Wait == nil || !*(c.src.Wait) {
+	// Default to waiting when a state is specified — the whole point of declaring
+	// a state check is to block until the resource reaches that state.
+	shouldWait := c.src.State != "" // wait if state is declared
+	if c.src.Wait != nil {
+		shouldWait = *c.src.Wait // explicit override
+	}
+	if !shouldWait {
 		return nil
 	}
 
