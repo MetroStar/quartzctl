@@ -21,8 +21,10 @@ import (
 	"fmt"
 	"io"
 	"math"
+	"net"
 	"net/http"
 	"strings"
+	"time"
 
 	"github.com/MetroStar/quartzctl/internal/config/schema"
 	"github.com/MetroStar/quartzctl/internal/log"
@@ -34,8 +36,30 @@ type HttpStageCheck schema.StageChecksHttpConfig
 // Run executes the HTTP stage check by sending a GET request to the specified URL.
 // It validates the response status code and content based on the check configuration.
 func (c HttpStageCheck) Run(ctx context.Context, cfg schema.QuartzConfig) error {
+	// Use a custom DNS resolver to avoid systemd-resolved (127.0.0.53) negative
+	// caching issues. When the HTTP check starts before DNS records propagate, the
+	// local stub resolver caches NXDOMAIN responses and blocks retries from
+	// succeeding even after the record exists. Using the VPC resolver (169.254.169.253)
+	// with a short timeout avoids this problem on AWS; falls back to Google DNS.
+	resolver := &net.Resolver{
+		PreferGo: true,
+		Dial: func(ctx context.Context, network, address string) (net.Conn, error) {
+			d := net.Dialer{Timeout: 5 * time.Second}
+			// Try VPC resolver first (works on any AWS instance), fall back to Google DNS
+			conn, err := d.DialContext(ctx, "udp", "169.254.169.253:53")
+			if err != nil {
+				conn, err = d.DialContext(ctx, "udp", "8.8.8.8:53")
+			}
+			return conn, err
+		},
+	}
+
 	tr := &http.Transport{
 		TLSClientConfig: &tls.Config{InsecureSkipVerify: c.Insecure}, // #nosec G402
+		DialContext: (&net.Dialer{
+			Timeout:  10 * time.Second,
+			Resolver: resolver,
+		}).DialContext,
 	}
 	client := &http.Client{Transport: tr}
 
