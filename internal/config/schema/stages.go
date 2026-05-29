@@ -41,6 +41,7 @@ type StageChecksConfig struct {
 	Kubernetes []StageChecksKubernetesConfig `koanf:"kubernetes"`
 	DaemonSet  []StageChecksDaemonSetConfig  `koanf:"daemonset"`
 	State      []StageChecksStateConfig      `koanf:"state"`
+	Oidc       []StageChecksOidcConfig       `koanf:"oidc"`
 	Order      int                           `koanf:"order"`
 }
 
@@ -118,6 +119,16 @@ type StageChecksDaemonSetConfig struct {
 type StageChecksRetryConfig struct {
 	Limit       int `koanf:"limit"`
 	WaitSeconds int `koanf:"wait_seconds"`
+}
+
+// StageChecksOidcConfig represents the configuration for OIDC validation checks.
+type StageChecksOidcConfig struct {
+	App          string                 `koanf:"app"`
+	ClientID     string                 `koanf:"client_id"`
+	ClientSecret string                 `koanf:"client_secret"`
+	TokenURL     string                 `koanf:"token_url"`
+	SecretPath   string                 `koanf:"secret_path"`
+	Retry        StageChecksRetryConfig `koanf:"retry"`
 }
 
 // StageDestroyConfig represents the configuration for destroying resources in a stage.

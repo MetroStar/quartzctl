@@ -279,5 +279,17 @@ func appendChecks(r []StageCheck, s schema.StageChecksConfig, providerFactory pr
 		r = append(r, NewStateStageCheck(isc, providerFactory))
 	}
 
+	for _, oc := range s.Oidc {
+		ioc := oc
+		r = append(r, OidcStageCheck{
+			App:          ioc.App,
+			ClientID:     ioc.ClientID,
+			ClientSecret: ioc.ClientSecret,
+			TokenURL:     ioc.TokenURL,
+			SecretPath:   ioc.SecretPath,
+			Retry:        ioc.Retry,
+		})
+	}
+
 	return r
 }

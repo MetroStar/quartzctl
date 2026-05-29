@@ -377,6 +377,13 @@ func NewInfrastructureEnvironmentConfig(name string, desc string) Infrastructure
 				},
 				Lookup: NewApplicationLookupConfig("headlamp", "", "", "", "", "headlamp"),
 			},
+			"open-webui": {
+				Description: "Open WebUI",
+				CallbackUrls: []ApplicationCallbackConfig{
+					{Path: "/oauth/oidc/callback"},
+				},
+				Lookup: NewApplicationLookupConfig("open-webui", "", "", "", "", "open-webui"),
+			},
 		},
 	}
 }
