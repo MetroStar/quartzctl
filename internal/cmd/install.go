@@ -160,7 +160,7 @@ func Install(ctx context.Context, p *CommandParams, resumeFrom string) error {
 			return err
 		}
 
-		err = TfApplyWithRetry(ctx, s.Id, p, 2, 30*time.Second)
+		err = TfApplyWithRetry(ctx, s.Id, p, 1, 30*time.Second)
 		if err != nil {
 			return err
 		}
@@ -416,6 +416,7 @@ func TfDestroyWithRetry(ctx context.Context, stage string, p *CommandParams, max
 }
 
 // isRetryableDestroyError checks if an error is likely transient and worth retrying.
+// Release lifecycle is managed by Flux remediation; quartzctl retries only infra transients.
 func isRetryableDestroyError(errStr string) bool {
 	retryablePatterns := []string{
 		"DependencyViolation",
@@ -423,7 +424,6 @@ func isRetryableDestroyError(errStr string) bool {
 		"is currently in use",
 		"NetworkInterfaceInUse",
 		"InvalidGroup.InUse",
-		"failed to delete release",
 		"Kubernetes cluster unreachable",
 		"connection refused",
 		"no endpoints available",
@@ -478,6 +478,8 @@ func TfApplyWithRetry(ctx context.Context, stage string, p *CommandParams, maxRe
 }
 
 // isRetryableApplyError checks if an apply error is likely transient and worth retrying.
+// Application-level lifecycle errors (MissingRollbackTarget, upgrade retries) are handled
+// declaratively by Flux remediation in the chart; quartzctl only retries infra transients.
 func isRetryableApplyError(errStr string) bool {
 	retryablePatterns := []string{
 		"Error acquiring the state lock",
@@ -487,14 +489,11 @@ func isRetryableApplyError(errStr string) bool {
 		"no endpoints available",
 		"i/o timeout",
 		"timeout while waiting for state to become",
-		"error creating",
 		"TooManyRequestsException",
 		"Throttling",
 		"RequestLimitExceeded",
 		"ServiceUnavailable",
 		"context deadline exceeded",
-		"MissingRollbackTarget",
-		"upgrade retries exhausted",
 	}
 	for _, pattern := range retryablePatterns {
 		if len(errStr) > 0 && strings.Contains(errStr, pattern) {
