@@ -289,6 +289,56 @@ func (c *TofuClient) ForceUnlock(ctx context.Context, stage schema.StageConfig, 
 	return tf.ForceUnlock(ctx, lockID)
 }
 
+// StateClear removes all resources from the state for a service-dependent stage
+// whose provider endpoint is unreachable. This allows clean to proceed without
+// needing to contact the dead service.
+func (c *TofuClient) StateClear(ctx context.Context, stage schema.StageConfig) error {
+	log.Info("Clearing state for unreachable service-dependent stage", "stage", stage.Id)
+	tf, err := c.getTf(stage.Path)
+	if err != nil {
+		return err
+	}
+	c.setStageEnv(tf, stage)
+
+	// Get current state to find resource addresses
+	state, err := tf.Show(ctx)
+	if err != nil {
+		return fmt.Errorf("failed to show state: %w", err)
+	}
+
+	if state == nil || state.Values == nil || state.Values.RootModule == nil {
+		log.Info("State already empty", "stage", stage.Id)
+		return nil
+	}
+
+	// Collect all resource addresses from state
+	var addresses []string
+	var collectAddresses func(mod *tfjson.StateModule)
+	collectAddresses = func(mod *tfjson.StateModule) {
+		for _, res := range mod.Resources {
+			addresses = append(addresses, res.Address)
+		}
+		for _, child := range mod.ChildModules {
+			collectAddresses(child)
+		}
+	}
+	collectAddresses(state.Values.RootModule)
+
+	if len(addresses) == 0 {
+		log.Info("No resources in state", "stage", stage.Id)
+		return nil
+	}
+
+	log.Info("Removing resources from state", "stage", stage.Id, "count", len(addresses))
+	for _, addr := range addresses {
+		if err := tf.StateRm(ctx, addr); err != nil {
+			log.Warn("Failed to remove resource from state (may already be gone)", "address", addr, "error", err)
+		}
+	}
+
+	return nil
+}
+
 // ExtractLockID extracts the lock ID from a state lock error message.
 // Returns the lock ID and true if found, or empty string and false if not.
 func ExtractLockID(errMsg string) (string, bool) {

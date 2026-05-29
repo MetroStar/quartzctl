@@ -315,23 +315,31 @@ func Clean(ctx context.Context, p *CommandParams) error {
 
 	stages := p.Settings().Config.StagesOrdered()
 
-	// Initialize and refresh each stage before destruction
+	// Initialize and refresh each stage before destruction.
+	// Uses TfRefreshWithUnlock for automatic state lock recovery, and
+	// skips refresh for service-dependent stages when their provider endpoint is unreachable.
 	initStart := time.Now()
 	for _, s := range stages {
 		err = TfInit(ctx, s.Id, p)
 		if err != nil {
 			log.Warn("Init failed for stage, will attempt destroy anyway", "stage", s.Id, "error", err)
 		}
-		// Always refresh state before destroy to detect drift
-		err = TfRefresh(ctx, s.Id, p)
+		// Skip refresh for service-dependent stages if their service is unreachable.
+		// These stages (sonarqube, keycloak) require their respective services running
+		// for the provider to connect. During clean, services may already be gone.
+		if isServiceDependentStage(s.Id) {
+			log.Info("Skipping refresh for service-dependent stage (will use -refresh=false on destroy)", "stage", s.Id)
+			continue
+		}
+		err = TfRefreshWithUnlock(ctx, s.Id, p)
 		if err != nil {
 			log.Warn("Refresh failed for stage", "stage", s.Id, "error", err)
 		}
 	}
 	stageTiming["init-refresh"] = time.Since(initStart)
 
-	// K8s preparation: remove Flux finalizers and patch stuck namespaces
-	// so tofu destroy doesn't block on namespace deletion
+	// K8s preparation: remove Flux finalizers, patch stuck namespaces,
+	// and clean up resources that would block destroy
 	k8sCleanStart := time.Now()
 	kube, err := p.Provider().Kubernetes(ctx)
 	if err != nil {
@@ -344,15 +352,44 @@ func Clean(ctx context.Context, p *CommandParams) error {
 	}
 	stageTiming["k8s-prep"] = time.Since(k8sCleanStart)
 
-	// Destroy stages in reverse order, collecting errors instead of aborting
+	// Destroy stages in reverse order, collecting errors instead of aborting.
+	// Service-dependent stages are destroyed with -refresh=false since their
+	// provider endpoints are unreachable. Empty states are auto-skipped by tofu.
 	slices.Reverse(stages)
-	for _, s := range stages {
+	for i, s := range stages {
 		stageStart := time.Now()
+
+		// For service-dependent stages, the provider can't connect so destroy
+		// would fail on provider initialization. Remove resources from state instead.
+		if isServiceDependentStage(s.Id) {
+			util.Hdrf("Destroy %s (service-dependent — clearing state)", s.Id)
+			client := tofu.Instance(ctx, *p.Settings())
+			stateErr := client.StateClear(ctx, s)
+			stageTiming["destroy-"+s.Id] = time.Since(stageStart)
+			if stateErr != nil {
+				log.Warn("Failed to clear state for service-dependent stage", "stage", s.Id, "error", stateErr)
+				destroyErrors = append(destroyErrors, fmt.Errorf("stage %s: %w", s.Id, stateErr))
+			}
+			continue
+		}
+
 		err = TfDestroyWithRetry(ctx, s.Id, p, 2, 30*time.Second)
 		stageTiming["destroy-"+s.Id] = time.Since(stageStart)
 		if err != nil {
 			log.Warn("Stage destroy failed, continuing with remaining stages", "stage", s.Id, "error", err)
 			destroyErrors = append(destroyErrors, fmt.Errorf("stage %s: %w", s.Id, err))
+		}
+
+		// Inter-stage K8s cleanup: patch newly-stuck finalizers, delete orphaned
+		// webhooks, and force-delete Terminating pods between stage destroys.
+		// This catches issues that emerge AFTER a stage is destroyed (e.g., LB
+		// controller destroyed in stage 11 leaves services with stuck finalizers).
+		if kube != nil && i < len(stages)-1 {
+			interStart := time.Now()
+			if cleanErr := kube.InterStageCleanup(ctx); cleanErr != nil {
+				log.Warn("Inter-stage K8s cleanup failed (non-fatal)", "error", cleanErr)
+			}
+			stageTiming["k8s-inter-"+s.Id] = time.Since(interStart)
 		}
 	}
 
@@ -381,6 +418,19 @@ func Clean(ctx context.Context, p *CommandParams) error {
 	}
 
 	return nil
+}
+
+// isServiceDependentStage returns true for stages that require an external service
+// endpoint to be reachable for their provider to initialize (e.g., sonarqube needs
+// the SonarQube server, keycloak needs the Keycloak server).
+func isServiceDependentStage(stageID string) bool {
+	serviceDependentStages := []string{"sonarqube", "keycloak"}
+	for _, s := range serviceDependentStages {
+		if strings.Contains(stageID, s) {
+			return true
+		}
+	}
+	return false
 }
 
 // printCleanupTimingSummary outputs timing information for each phase of the cleanup.
@@ -421,8 +471,22 @@ func TfDestroyWithRetry(ctx context.Context, stage string, p *CommandParams, max
 			return nil
 		}
 
-		// Check if this is a retryable error
 		errStr := lastErr.Error()
+
+		// Attempt automatic state lock recovery
+		if strings.Contains(errStr, "Error acquiring the state lock") || strings.Contains(errStr, "state blob is already locked") {
+			if lockID, ok := tofu.ExtractLockID(errStr); ok {
+				client := tofu.Instance(ctx, *p.Settings())
+				s := p.Settings().Config.Stages[stage]
+				if unlockErr := client.ForceUnlock(ctx, s, lockID); unlockErr != nil {
+					log.Warn("Force-unlock failed", "stage", stage, "lockID", lockID, "error", unlockErr)
+				} else {
+					util.Msgf("Successfully force-unlocked state for stage %s (lock ID: %s)", stage, lockID)
+				}
+			}
+		}
+
+		// Check if this is a retryable error
 		if !isRetryableDestroyError(errStr) {
 			log.Warn("Non-retryable error during destroy", "stage", stage, "error", lastErr)
 			return lastErr
@@ -447,6 +511,8 @@ func isRetryableDestroyError(errStr string) bool {
 		"connection refused",
 		"no endpoints available",
 		"i/o timeout",
+		"Error acquiring the state lock",
+		"state blob is already locked",
 	}
 	for _, pattern := range retryablePatterns {
 		if len(errStr) > 0 && strings.Contains(errStr, pattern) {

@@ -68,6 +68,7 @@ type KubernetesProviderClient interface {
 	CleanupStuckTerminatingPods(ctx context.Context, timeout time.Duration) ([]string, error)
 	ListVirtualServices(ctx context.Context) ([]VirtualServiceInfo, error)
 	PrepareForDestroy(ctx context.Context) error
+	InterStageCleanup(ctx context.Context) error
 }
 
 // KubernetesClient is the implementation of the Kubernetes provider client.
@@ -1091,6 +1092,122 @@ func (c KubernetesClient) PrepareForDestroy(ctx context.Context) error {
 	}
 
 	log.Info("PrepareForDestroy verification complete")
+	return nil
+}
+
+// InterStageCleanup performs lightweight K8s cleanup between stage destroys.
+// It catches issues that emerge after a stage is destroyed (e.g., orphaned webhooks,
+// stuck finalizers on services whose controller was just destroyed).
+func (c KubernetesClient) InterStageCleanup(ctx context.Context) error {
+	log.Debug("Entering", "internal", "interStageCleanup")
+	defer log.Debug("Completed", "internal", "interStageCleanup")
+
+	clientset, err := c.api.ClientSet()
+	if err != nil {
+		return fmt.Errorf("failed to get clientset: %w", err)
+	}
+
+	// 1. Delete orphaned ValidatingWebhookConfigurations whose service is gone
+	vwcs, err := clientset.AdmissionregistrationV1().ValidatingWebhookConfigurations().List(ctx, metav1.ListOptions{})
+	if err == nil {
+		for _, vwc := range vwcs.Items {
+			for _, wh := range vwc.Webhooks {
+				if wh.ClientConfig.Service != nil {
+					_, svcErr := clientset.CoreV1().Services(wh.ClientConfig.Service.Namespace).Get(ctx, wh.ClientConfig.Service.Name, metav1.GetOptions{})
+					if svcErr != nil {
+						log.Info("Deleting orphaned ValidatingWebhookConfiguration (service gone)", "name", vwc.Name)
+						_ = clientset.AdmissionregistrationV1().ValidatingWebhookConfigurations().Delete(ctx, vwc.Name, metav1.DeleteOptions{})
+						break
+					}
+				}
+			}
+		}
+	}
+
+	// 2. Delete orphaned MutatingWebhookConfigurations whose service is gone
+	mwcs, err := clientset.AdmissionregistrationV1().MutatingWebhookConfigurations().List(ctx, metav1.ListOptions{})
+	if err == nil {
+		for _, mwc := range mwcs.Items {
+			for _, wh := range mwc.Webhooks {
+				if wh.ClientConfig.Service != nil {
+					_, svcErr := clientset.CoreV1().Services(wh.ClientConfig.Service.Namespace).Get(ctx, wh.ClientConfig.Service.Name, metav1.GetOptions{})
+					if svcErr != nil {
+						log.Info("Deleting orphaned MutatingWebhookConfiguration (service gone)", "name", mwc.Name)
+						_ = clientset.AdmissionregistrationV1().MutatingWebhookConfigurations().Delete(ctx, mwc.Name, metav1.DeleteOptions{})
+						break
+					}
+				}
+			}
+		}
+	}
+
+	// 3. Patch finalizers on LoadBalancer services whose controller is dead
+	services, err := clientset.CoreV1().Services("").List(ctx, metav1.ListOptions{})
+	if err == nil {
+		for _, svc := range services.Items {
+			if svc.Spec.Type != corev1.ServiceTypeLoadBalancer {
+				continue
+			}
+			if len(svc.Finalizers) == 0 {
+				continue
+			}
+			// Check if LB controller is running
+			controllerPods, _ := clientset.CoreV1().Pods("kube-system").List(ctx, metav1.ListOptions{
+				LabelSelector: "app.kubernetes.io/name=aws-load-balancer-controller",
+			})
+			controllerAlive := false
+			if controllerPods != nil {
+				for _, p := range controllerPods.Items {
+					if p.Status.Phase == corev1.PodRunning {
+						controllerAlive = true
+						break
+					}
+				}
+			}
+			if !controllerAlive {
+				svc.Finalizers = nil
+				_, patchErr := clientset.CoreV1().Services(svc.Namespace).Update(ctx, &svc, metav1.UpdateOptions{})
+				if patchErr == nil {
+					log.Info("Stripped finalizers from LB service (controller dead)", "service", svc.Namespace+"/"+svc.Name)
+				}
+			}
+		}
+	}
+
+	// 4. Force-delete pods stuck in Terminating
+	pods, err := clientset.CoreV1().Pods("").List(ctx, metav1.ListOptions{})
+	if err == nil {
+		zero := int64(0)
+		for _, pod := range pods.Items {
+			if pod.Namespace == "kube-system" {
+				continue
+			}
+			if pod.DeletionTimestamp != nil {
+				_ = clientset.CoreV1().Pods(pod.Namespace).Delete(ctx, pod.Name, metav1.DeleteOptions{
+					GracePeriodSeconds: &zero,
+				})
+			}
+		}
+	}
+
+	// 5. Patch stuck Terminating namespaces
+	namespaces, err := clientset.CoreV1().Namespaces().List(ctx, metav1.ListOptions{})
+	if err == nil {
+		for _, ns := range namespaces.Items {
+			if ns.Status.Phase != corev1.NamespaceTerminating {
+				continue
+			}
+			if len(ns.Spec.Finalizers) == 0 {
+				continue
+			}
+			ns.Spec.Finalizers = nil
+			_, patchErr := clientset.CoreV1().Namespaces().Finalize(ctx, &ns, metav1.UpdateOptions{})
+			if patchErr == nil {
+				log.Info("Patched stuck namespace during inter-stage cleanup", "namespace", ns.Name)
+			}
+		}
+	}
+
 	return nil
 }
 

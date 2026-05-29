@@ -17,6 +17,7 @@ package cmd
 import (
 	"context"
 	"slices"
+	"strings"
 	"time"
 
 	"github.com/MetroStar/quartzctl/internal/log"
@@ -484,6 +485,48 @@ func TfRefresh(ctx context.Context, stage string, p *CommandParams) error {
 
 		return nil
 	})
+}
+
+// TfRefreshWithUnlock runs `tofu refresh` for a stage with automatic state lock recovery.
+// If a stale lock is detected, it force-unlocks and retries once.
+func TfRefreshWithUnlock(ctx context.Context, stage string, p *CommandParams) error {
+	log.Debug("Entering", "command", "tf:refreshWithUnlock", "stage", stage)
+	defer log.Debug("Completed", "command", "tf:refreshWithUnlock", "stage", stage)
+
+	util.Hdrf("Refresh %s", stage)
+
+	client := tofu.Instance(ctx, *p.Settings())
+	err := tfStagePrep(ctx, stage, p)
+	if err != nil {
+		return err
+	}
+
+	s := p.Settings().Config.Stages[stage]
+	err = client.Refresh(ctx, s)
+	if err == nil {
+		return nil
+	}
+
+	errStr := err.Error()
+	if strings.Contains(errStr, "Error acquiring the state lock") || strings.Contains(errStr, "state blob is already locked") {
+		if lockID, ok := tofu.ExtractLockID(errStr); ok {
+			if unlockErr := client.ForceUnlock(ctx, s, lockID); unlockErr != nil {
+				log.Warn("Force-unlock failed during refresh", "stage", stage, "lockID", lockID, "error", unlockErr)
+			} else {
+				util.Msgf("Successfully force-unlocked state for stage %s (lock ID: %s)", stage, lockID)
+				// Retry refresh after unlock
+				retryErr := client.Refresh(ctx, s)
+				if retryErr == nil {
+					return nil
+				}
+				log.Warn("Refresh still failed after force-unlock", "stage", stage, "error", retryErr)
+				return retryErr
+			}
+		}
+	}
+
+	log.Info("Error refreshing tofu", "stage", s.Id, "err", err)
+	return err
 }
 
 // TfRefreshAll runs `tofu refresh` for all stages.
