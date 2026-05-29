@@ -189,7 +189,7 @@ func setDefaults(k *koanf.Koanf) {
 
 	err := k.Load(structs.Provider(schema.QuartzConfig{
 		Project:      "quartz",
-		Chart:        schema.ChartConfig{Path: filepath.Join(pwd, "base")},
+		Chart:        schema.ChartConfig{Path: filepath.Join(pwd, "chart")},
 		Providers:    providers,
 		Tofu:    schema.NewTofuConfig(),
 		Auth:         schema.DefaultAuthConfig(),
