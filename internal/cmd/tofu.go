@@ -17,6 +17,7 @@ package cmd
 import (
 	"context"
 	"slices"
+	"time"
 
 	"github.com/MetroStar/quartzctl/internal/log"
 	"github.com/MetroStar/quartzctl/internal/stages"
@@ -390,6 +391,7 @@ func TfApply(ctx context.Context, stage string, p *CommandParams) error {
 	log.Debug("Entering", "command", "tf:apply", "stage", stage)
 	defer log.Debug("Completed", "command", "tf:apply", "stage", stage)
 
+	stageStart := time.Now()
 	util.Hdrf("Apply %s", stage)
 
 	client := tofu.Instance(ctx, *p.Settings())
@@ -398,10 +400,13 @@ func TfApply(ctx context.Context, stage string, p *CommandParams) error {
 		return err
 	}
 
-	return wrapChecks(ctx, stage, "apply", p, func() error {
+	err = wrapChecks(ctx, stage, "apply", p, func() error {
 		s := p.Settings().Config.Stages[stage]
-		return client.Apply(ctx, s)
+		return client.Apply(ctx, s, tofu.TofuApplyOpts{AllowDeferral: p.allowDeferral})
 	})
+
+	util.Msgf("Stage %s completed in %v", stage, time.Since(stageStart).Round(time.Second))
+	return err
 }
 
 // TfDestroy runs `tofu destroy` for a specific stage.

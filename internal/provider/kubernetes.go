@@ -718,6 +718,72 @@ func (c KubernetesClient) CleanupStuckTerminatingPods(ctx context.Context, timeo
 	return cleaned, nil
 }
 
+// PodHealthStatus represents the health state of pods matching a selector.
+type PodHealthStatus struct {
+	TotalPods     int
+	ReadyPods     int
+	CrashLooping  []string // Pod names in CrashLoopBackOff
+	ImagePullErr  []string // Pod names with ImagePullBackOff/ErrImagePull
+	InitErrors    []string // Pod names stuck in Init
+	PendingPods   []string // Pod names in Pending state
+}
+
+// IsHealthy returns true if no pods are in a terminal error state.
+func (s PodHealthStatus) IsHealthy() bool {
+	return len(s.CrashLooping) == 0 && len(s.ImagePullErr) == 0 && len(s.InitErrors) == 0
+}
+
+// CheckPodHealth checks the health of pods matching the given app label in a namespace.
+// If namespace is empty, checks all namespaces. Returns a PodHealthStatus summary.
+func (c KubernetesClient) CheckPodHealth(ctx context.Context, namespace string, appLabel string) (PodHealthStatus, error) {
+	clientset, err := c.api.ClientSet()
+	if err != nil {
+		return PodHealthStatus{}, err
+	}
+
+	listOpts := metav1.ListOptions{
+		LabelSelector: fmt.Sprintf("app.kubernetes.io/name=%s", appLabel),
+	}
+
+	pods, err := clientset.CoreV1().Pods(namespace).List(ctx, listOpts)
+	if err != nil {
+		return PodHealthStatus{}, err
+	}
+
+	status := PodHealthStatus{TotalPods: len(pods.Items)}
+	for _, pod := range pods.Items {
+		podName := fmt.Sprintf("%s/%s", pod.Namespace, pod.Name)
+
+		if pod.Status.Phase == corev1.PodRunning {
+			// Check container statuses for crash loops
+			for _, cs := range pod.Status.ContainerStatuses {
+				if cs.Ready {
+					status.ReadyPods++
+					continue
+				}
+				if cs.State.Waiting != nil {
+					switch cs.State.Waiting.Reason {
+					case "CrashLoopBackOff":
+						status.CrashLooping = append(status.CrashLooping, podName)
+					case "ImagePullBackOff", "ErrImagePull":
+						status.ImagePullErr = append(status.ImagePullErr, podName)
+					}
+				}
+			}
+		} else if pod.Status.Phase == corev1.PodPending {
+			status.PendingPods = append(status.PendingPods, podName)
+			// Check init container statuses
+			for _, cs := range pod.Status.InitContainerStatuses {
+				if cs.State.Waiting != nil && cs.State.Waiting.Reason == "CrashLoopBackOff" {
+					status.InitErrors = append(status.InitErrors, podName)
+				}
+			}
+		}
+	}
+
+	return status, nil
+}
+
 // ForEachDynamicResources iterates over all dynamic resources of a specific kind and namespace.
 func (c KubernetesClient) ForEachDynamicResources(ctx context.Context, kind schema.GroupVersionResource, ns string, onEachItem func(unstructured.Unstructured)) error {
 	dyn, err := c.api.DynamicClient()

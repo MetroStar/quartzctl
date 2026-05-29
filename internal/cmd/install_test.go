@@ -51,7 +51,7 @@ func TestNewRootCleanCommand(t *testing.T) {
 func TestCmdInstall(t *testing.T) {
 	p := defaultTestConfig(t)
 
-	err := Install(context.Background(), p)
+	err := Install(context.Background(), p, "")
 	if err != nil {
 		t.Errorf("unexpected error in cmd Install, %v", err)
 	}

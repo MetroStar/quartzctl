@@ -120,6 +120,12 @@ func RunChecks(ctx context.Context, cfg schema.QuartzConfig, stage string, event
 			i := 1
 			ro := sc.RetryOpts()
 			for i <= ro.Limit {
+				// Respect context cancellation to allow graceful shutdown
+				if ctx.Err() != nil {
+					cr.Error = ctx.Err()
+					break
+				}
+
 				cr.Error = sc.Run(ctx, cfg)
 				if cr.Error == nil || i == ro.Limit {
 					break
@@ -146,7 +152,12 @@ func RunChecks(ctx context.Context, cfg schema.QuartzConfig, stage string, event
 						waitTime = min(baseWait*factor, maxWait)
 					}
 
-					time.Sleep(time.Duration(waitTime) * time.Second)
+					select {
+					case <-ctx.Done():
+						cr.Error = ctx.Err()
+						break
+					case <-time.After(time.Duration(waitTime) * time.Second):
+					}
 				}
 
 				i = i + 1

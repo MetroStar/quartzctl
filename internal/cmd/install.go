@@ -16,12 +16,15 @@ package cmd
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"slices"
 	"strings"
 	"time"
 
+	"github.com/MetroStar/quartzctl/internal/config/schema"
 	"github.com/MetroStar/quartzctl/internal/log"
+	"github.com/MetroStar/quartzctl/internal/tofu"
 	"github.com/MetroStar/quartzctl/internal/util"
 	"github.com/urfave/cli/v3"
 )
@@ -39,8 +42,15 @@ func NewRootInstallCommand(p *CommandParams) RootCommandResult {
 		Command: &cli.Command{
 			Name:  "install",
 			Usage: "Perform a full install/update of the system",
+			Flags: []cli.Flag{
+				&cli.StringFlag{Name: "resume-from", Aliases: []string{"r"}, Usage: "Resume installation from a specific stage ID (skips earlier stages)"},
+				&cli.BoolFlag{Name: "allow-deferral", Usage: "Enable OpenTofu deferred actions for resources that cannot be fully resolved in one pass"},
+			},
 			Action: func(ctx context.Context, ccmd *cli.Command) error {
-				err := Install(ctx, p)
+				resumeFrom := ccmd.String("resume-from")
+				allowDeferral := ccmd.Bool("allow-deferral")
+				p.allowDeferral = allowDeferral
+				err := Install(ctx, p, resumeFrom)
 				if err != nil {
 					return err
 				}
@@ -88,7 +98,7 @@ func NewRootCleanCommand(p *CommandParams) RootCommandResult {
 //
 // Returns:
 //   - error: An error if the installation fails, otherwise nil.
-func Install(ctx context.Context, p *CommandParams) error {
+func Install(ctx context.Context, p *CommandParams, resumeFrom string) error {
 	log.Debug("Entering", "command", "install")
 	defer log.Debug("Completed", "command", "install")
 
@@ -97,6 +107,12 @@ func Install(ctx context.Context, p *CommandParams) error {
 	err := Confirm(ctx, "Would you like to install Quartz cluster?", p)
 	if err != nil {
 		// just means the user said no
+		return err
+	}
+
+	// Preflight validation: check IAM credentials and cloud connectivity
+	err = Preflight(ctx, p)
+	if err != nil {
 		return err
 	}
 
@@ -110,15 +126,44 @@ func Install(ctx context.Context, p *CommandParams) error {
 		return err
 	}
 
-	for _, s := range p.Settings().Config.StagesOrdered() {
-		err = TfInit(ctx, s.Id, p)
-		if err != nil {
-			return err
-		}
+	stages := p.Settings().Config.StagesOrdered()
 
-		err = TfApply(ctx, s.Id, p)
-		if err != nil {
-			return err
+	// If --resume-from is specified, skip stages until we reach the target
+	if resumeFrom != "" {
+		found := false
+		for i, s := range stages {
+			if strings.EqualFold(s.Id, resumeFrom) {
+				stages = stages[i:]
+				found = true
+				util.Msgf("Resuming installation from stage: %s", resumeFrom)
+				break
+			}
+		}
+		if !found {
+			return fmt.Errorf("stage %q not found; available stages: %s", resumeFrom, stageIds(p.Settings().Config.StagesOrdered()))
+		}
+	}
+
+	// Group stages by order for parallel execution within the same order level
+	stageGroups := groupStagesByOrder(stages)
+	for _, group := range stageGroups {
+		if len(group) == 1 {
+			// Single stage in this order - run sequentially
+			s := group[0]
+			err = TfInit(ctx, s.Id, p)
+			if err != nil {
+				return err
+			}
+			err = TfApplyWithRetry(ctx, s.Id, p, 2, 30*time.Second)
+			if err != nil {
+				return err
+			}
+		} else {
+			// Multiple stages at the same order - run in parallel
+			err = applyStagesParallel(ctx, group, p)
+			if err != nil {
+				return err
+			}
 		}
 	}
 
@@ -132,6 +177,112 @@ func Install(ctx context.Context, p *CommandParams) error {
 		return err
 	}
 
+	return nil
+}
+
+// stageIds returns a comma-separated list of stage IDs for error messages.
+func stageIds(stages []schema.StageConfig) string {
+	ids := make([]string, len(stages))
+	for i, s := range stages {
+		ids[i] = s.Id
+	}
+	return strings.Join(ids, ", ")
+}
+
+// groupStagesByOrder groups stages by their Order field, preserving sort order.
+// Stages with the same order can run in parallel.
+func groupStagesByOrder(stages []schema.StageConfig) [][]schema.StageConfig {
+	if len(stages) == 0 {
+		return nil
+	}
+
+	var groups [][]schema.StageConfig
+	var current []schema.StageConfig
+	currentOrder := stages[0].Order
+
+	for _, s := range stages {
+		if s.Order != currentOrder {
+			groups = append(groups, current)
+			current = nil
+			currentOrder = s.Order
+		}
+		current = append(current, s)
+	}
+	if len(current) > 0 {
+		groups = append(groups, current)
+	}
+
+	return groups
+}
+
+// applyStagesParallel runs init+apply for multiple stages concurrently.
+// Returns the first error encountered (all stages are attempted).
+func applyStagesParallel(ctx context.Context, stages []schema.StageConfig, p *CommandParams) error {
+	ids := make([]string, len(stages))
+	for i, s := range stages {
+		ids[i] = s.Id
+	}
+	util.Msgf("Running stages in parallel: %s", strings.Join(ids, ", "))
+
+	type result struct {
+		stageId string
+		err     error
+	}
+
+	ch := make(chan result, len(stages))
+	for _, s := range stages {
+		go func(s schema.StageConfig) {
+			var stageErr error
+			stageErr = TfInit(ctx, s.Id, p)
+			if stageErr == nil {
+				stageErr = TfApplyWithRetry(ctx, s.Id, p, 2, 30*time.Second)
+			}
+			ch <- result{stageId: s.Id, err: stageErr}
+		}(s)
+	}
+
+	var errs []error
+	for range stages {
+		r := <-ch
+		if r.err != nil {
+			errs = append(errs, fmt.Errorf("stage %s: %w", r.stageId, r.err))
+		}
+	}
+
+	if len(errs) > 0 {
+		return fmt.Errorf("parallel stage execution failed: %w", errors.Join(errs...))
+	}
+	return nil
+}
+
+// Preflight validates cloud credentials and connectivity before starting the install.
+// Fails fast if IAM credentials are invalid or the cloud provider is unreachable.
+func Preflight(ctx context.Context, p *CommandParams) error {
+	util.Hdr("Preflight Checks")
+
+	cp, err := p.Provider().Cloud(ctx)
+	if err != nil {
+		return fmt.Errorf("preflight: failed to initialize cloud provider: %w", err)
+	}
+
+	result := cp.CheckAccess(ctx)
+	headers, rows := result.ToTable()
+
+	// Check for any failing rows
+	for _, row := range rows {
+		if row.Error != nil {
+			return fmt.Errorf("preflight: cloud access check failed: %w", row.Error)
+		}
+	}
+
+	// Print identity summary
+	if len(rows) > 0 && len(headers) == len(rows[0].Data) {
+		for i, h := range headers {
+			util.Msgf("  %-15s %s", h+":", rows[0].Data[i])
+		}
+	}
+
+	util.Msg("  Preflight checks passed")
 	return nil
 }
 
@@ -296,6 +447,77 @@ func isRetryableDestroyError(errStr string) bool {
 		"connection refused",
 		"no endpoints available",
 		"i/o timeout",
+	}
+	for _, pattern := range retryablePatterns {
+		if len(errStr) > 0 && strings.Contains(errStr, pattern) {
+			return true
+		}
+	}
+	return false
+}
+
+// TfApplyWithRetry attempts to apply a stage with retry logic for transient failures.
+// It retries on known transient errors (state locks, timeouts, API throttling) with
+// exponential backoff between attempts.
+func TfApplyWithRetry(ctx context.Context, stage string, p *CommandParams, maxRetries int, retryDelay time.Duration) error {
+	var lastErr error
+
+	for attempt := 0; attempt <= maxRetries; attempt++ {
+		if attempt > 0 {
+			// Exponential backoff: retryDelay * 2^(attempt-1)
+			backoff := retryDelay * time.Duration(1<<(attempt-1))
+			log.Info("Retrying apply after transient failure", "stage", stage, "attempt", attempt, "maxRetries", maxRetries)
+			util.Msgf("Waiting %v before retry %d/%d for stage %s...", backoff, attempt, maxRetries, stage)
+			time.Sleep(backoff)
+		}
+
+		lastErr = TfApply(ctx, stage, p)
+		if lastErr == nil {
+			return nil
+		}
+
+		errStr := lastErr.Error()
+
+		// Attempt automatic state lock recovery
+		if strings.Contains(errStr, "Error acquiring the state lock") || strings.Contains(errStr, "state blob is already locked") {
+			if lockID, ok := tofu.ExtractLockID(errStr); ok {
+				client := tofu.Instance(ctx, *p.Settings())
+				s := p.Settings().Config.Stages[stage]
+				if unlockErr := client.ForceUnlock(ctx, s, lockID); unlockErr != nil {
+					log.Warn("Force-unlock failed", "stage", stage, "lockID", lockID, "error", unlockErr)
+				} else {
+					util.Msgf("Successfully force-unlocked state for stage %s (lock ID: %s)", stage, lockID)
+				}
+			}
+		}
+
+		if !isRetryableApplyError(errStr) {
+			log.Warn("Non-retryable error during apply", "stage", stage, "error", lastErr)
+			return lastErr
+		}
+
+		log.Warn("Retryable error during apply", "stage", stage, "attempt", attempt, "error", lastErr)
+	}
+
+	return lastErr
+}
+
+// isRetryableApplyError checks if an apply error is likely transient and worth retrying.
+func isRetryableApplyError(errStr string) bool {
+	retryablePatterns := []string{
+		"Error acquiring the state lock",
+		"state blob is already locked",
+		"Kubernetes cluster unreachable",
+		"connection refused",
+		"no endpoints available",
+		"i/o timeout",
+		"timeout while waiting for state to become",
+		"error creating",
+		"TooManyRequestsException",
+		"Throttling",
+		"RequestLimitExceeded",
+		"ServiceUnavailable",
+		"context deadline exceeded",
 	}
 	for _, pattern := range retryablePatterns {
 		if len(errStr) > 0 && strings.Contains(errStr, pattern) {

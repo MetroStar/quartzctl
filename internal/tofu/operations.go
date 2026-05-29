@@ -19,6 +19,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"os"
+	"path/filepath"
 	"slices"
 	"strings"
 
@@ -112,9 +113,14 @@ func (c *TofuClient) Plan(ctx context.Context, stage schema.StageConfig) (bool, 
 	return tf.Plan(ctx, vars...)
 }
 
+// TofuApplyOpts contains options for Apply operations.
+type TofuApplyOpts struct {
+	AllowDeferral bool // Enable OpenTofu deferred actions (-allow-deferral)
+}
+
 // Apply applies the OpenTofu configuration for the specified stage.
 // It runs `tofu apply` with the configured input variables.
-func (c *TofuClient) Apply(ctx context.Context, stage schema.StageConfig) error {
+func (c *TofuClient) Apply(ctx context.Context, stage schema.StageConfig, opts ...TofuApplyOpts) error {
 	if stage.Debug.Break {
 		util.Msgf("Break point at stage %s", stage.Id)
 		return fmt.Errorf("break")
@@ -133,6 +139,12 @@ func (c *TofuClient) Apply(ctx context.Context, stage schema.StageConfig) error 
 	if !stage.OverrideVars {
 		vars = append(vars, tfexec.VarFile(c.cfg.Config.TfVarFilePath()))
 	}
+
+	// Apply deferred actions flag if requested
+	if len(opts) > 0 && opts[0].AllowDeferral {
+		vars = append(vars, tfexec.AllowDeferral(true))
+	}
+
 	c.setStageEnv(tf, stage)
 
 	return tf.Apply(ctx, vars...)
@@ -241,9 +253,64 @@ func (c *TofuClient) setStageEnv(tf *tfexec.Terraform, stage schema.StageConfig)
 		})
 	}
 
+	// Enable provider/module plugin caching to avoid re-downloading for every stage
+	pluginCacheDir := c.pluginCacheDir()
+	if pluginCacheDir != "" {
+		env = util.MergeMaps(env, map[string]string{
+			"TF_PLUGIN_CACHE_DIR": pluginCacheDir,
+		})
+	}
+
 	if err := tf.SetEnv(env); err != nil {
 		log.Warn("Failed to set tofu environment", "stage", stage, "err", err)
 	}
+}
+
+// pluginCacheDir returns the path to the provider plugin cache directory,
+// creating it if necessary. Returns empty string on failure.
+func (c *TofuClient) pluginCacheDir() string {
+	dir := filepath.Join(c.cfg.Config.Tmp, "plugin-cache")
+	if err := os.MkdirAll(dir, 0750); err != nil {
+		log.Warn("Failed to create plugin cache directory", "path", dir, "err", err)
+		return ""
+	}
+	return dir
+}
+
+// ForceUnlock attempts to force-unlock a state lock for the specified stage.
+// It extracts the lock ID from the error message and calls `tofu force-unlock`.
+func (c *TofuClient) ForceUnlock(ctx context.Context, stage schema.StageConfig, lockID string) error {
+	log.Warn("Attempting force-unlock of state", "stage", stage.Id, "lockID", lockID)
+	tf, err := c.getTf(stage.Path)
+	if err != nil {
+		return err
+	}
+	c.setStageEnv(tf, stage)
+	return tf.ForceUnlock(ctx, lockID)
+}
+
+// ExtractLockID extracts the lock ID from a state lock error message.
+// Returns the lock ID and true if found, or empty string and false if not.
+func ExtractLockID(errMsg string) (string, bool) {
+	// Lock errors contain "ID:" followed by the lock ID
+	const marker = "ID:"
+	idx := strings.Index(errMsg, marker)
+	if idx < 0 {
+		return "", false
+	}
+	rest := errMsg[idx+len(marker):]
+	// Trim leading whitespace
+	rest = strings.TrimSpace(rest)
+	// Lock ID ends at newline or whitespace
+	end := strings.IndexAny(rest, " \t\n\r")
+	if end < 0 {
+		end = len(rest)
+	}
+	lockID := rest[:end]
+	if lockID == "" {
+		return "", false
+	}
+	return lockID, true
 }
 
 // stageVars generates the input variables for the specified stage based on its configuration.

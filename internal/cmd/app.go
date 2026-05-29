@@ -17,8 +17,12 @@ package cmd
 import (
 	"context"
 	"errors"
+	"os"
+	"os/signal"
 	"sync"
+	"syscall"
 
+	"github.com/MetroStar/quartzctl/internal/log"
 	"github.com/urfave/cli/v3"
 	"go.uber.org/fx"
 )
@@ -45,6 +49,20 @@ func NewAppService(app *cli.Command, sd fx.Shutdowner) *AppService {
 func (svc *AppService) Start(args []string) error {
 	done := make(chan error)                                // Channel to signal when the application is done.
 	ctx, cancel := context.WithCancel(context.Background()) // Context to manage cancellation.
+
+	// Trap SIGINT/SIGTERM for graceful shutdown - cancels context so in-flight
+	// tofu operations can release state locks and exit cleanly.
+	sigCh := make(chan os.Signal, 1)
+	signal.Notify(sigCh, syscall.SIGINT, syscall.SIGTERM)
+	go func() {
+		sig := <-sigCh
+		log.Warn("Received signal, initiating graceful shutdown", "signal", sig)
+		cancel()
+		// Second signal forces immediate exit
+		sig = <-sigCh
+		log.Warn("Received second signal, forcing exit", "signal", sig)
+		os.Exit(1)
+	}()
 
 	svc.wg.Add(1)
 	go func() {
