@@ -16,7 +16,10 @@ package cmd
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
+	"os"
+	"path/filepath"
 	"slices"
 	"strings"
 	"time"
@@ -143,7 +146,15 @@ func Install(ctx context.Context, p *CommandParams, resumeFrom string) error {
 		}
 	}
 
+	// Load checkpoint to detect previously completed stages
+	cp := loadCheckpoint(p)
+
 	for _, s := range stages {
+		if cp.isCompleted(s.Id) {
+			util.Msgf("Stage %s already completed, skipping (use --resume-from to override)", s.Id)
+			continue
+		}
+
 		err = TfInit(ctx, s.Id, p)
 		if err != nil {
 			return err
@@ -153,7 +164,13 @@ func Install(ctx context.Context, p *CommandParams, resumeFrom string) error {
 		if err != nil {
 			return err
 		}
+
+		cp.markCompleted(s.Id)
+		cp.save(p)
 	}
+
+	// Clear checkpoint on successful completion
+	cp.clear(p)
 
 	err = RefreshSecrets(ctx, p)
 	if err != nil {
@@ -268,28 +285,39 @@ func Clean(ctx context.Context, p *CommandParams) error {
 	}
 	stageTiming["k8s-prep"] = time.Since(k8sCleanStart)
 
-	// Destroy stages in reverse order, collecting errors instead of aborting.
-	slices.Reverse(stages)
-	for i, s := range stages {
-		stageStart := time.Now()
-
-		err = TfDestroyWithRetry(ctx, s.Id, p, 2, 30*time.Second)
-		stageTiming["destroy-"+s.Id] = time.Since(stageStart)
-		if err != nil {
-			log.Warn("Stage destroy failed, continuing with remaining stages", "stage", s.Id, "error", err)
-			destroyErrors = append(destroyErrors, fmt.Errorf("stage %s: %w", s.Id, err))
+	// Destroy stages in parallel where possible. Stages are grouped into
+	// "destroy waves" based on reverse dependencies: stages with no dependents
+	// can be destroyed first (highest order numbers), then their dependencies.
+	destroyWaves := buildDestroyWaves(stages)
+	for waveIdx, wave := range destroyWaves {
+		if len(wave) == 1 {
+			// Single stage — no parallelism needed
+			s := wave[0]
+			stageStart := time.Now()
+			err = TfDestroyWithRetry(ctx, s.Id, p, 2, 30*time.Second)
+			stageTiming["destroy-"+s.Id] = time.Since(stageStart)
+			if err != nil {
+				log.Warn("Stage destroy failed, continuing with remaining stages", "stage", s.Id, "error", err)
+				destroyErrors = append(destroyErrors, fmt.Errorf("stage %s: %w", s.Id, err))
+			}
+		} else {
+			// Multiple independent stages — destroy in parallel
+			util.Msgf("Destroying %d stages in parallel (wave %d/%d): %s", len(wave), waveIdx+1, len(destroyWaves), stageIds(wave))
+			waveStart := time.Now()
+			waveErrors := parallelDestroy(ctx, wave, p)
+			for _, s := range wave {
+				stageTiming["destroy-"+s.Id] = time.Since(waveStart)
+			}
+			destroyErrors = append(destroyErrors, waveErrors...)
 		}
 
-		// Inter-stage K8s cleanup: patch newly-stuck finalizers, delete orphaned
-		// webhooks, and force-delete Terminating pods between stage destroys.
-		// This catches issues that emerge AFTER a stage is destroyed (e.g., LB
-		// controller destroyed in stage 11 leaves services with stuck finalizers).
-		if kube != nil && i < len(stages)-1 {
+		// Inter-wave K8s cleanup
+		if kube != nil && waveIdx < len(destroyWaves)-1 {
 			interStart := time.Now()
 			if cleanErr := kube.InterStageCleanup(ctx); cleanErr != nil {
 				log.Warn("Inter-stage K8s cleanup failed (non-fatal)", "error", cleanErr)
 			}
-			stageTiming["k8s-inter-"+s.Id] = time.Since(interStart)
+			stageTiming[fmt.Sprintf("k8s-inter-wave-%d", waveIdx)] = time.Since(interStart)
 		}
 	}
 
@@ -370,17 +398,9 @@ func TfDestroyWithRetry(ctx context.Context, stage string, p *CommandParams, max
 
 		errStr := lastErr.Error()
 
-		// Attempt automatic state lock recovery
+		// Attempt automatic stale lock recovery
 		if strings.Contains(errStr, "Error acquiring the state lock") || strings.Contains(errStr, "state blob is already locked") {
-			if lockID, ok := tofu.ExtractLockID(errStr); ok {
-				client := tofu.Instance(ctx, *p.Settings())
-				s := p.Settings().Config.Stages[stage]
-				if unlockErr := client.ForceUnlock(ctx, s, lockID); unlockErr != nil {
-					log.Warn("Force-unlock failed", "stage", stage, "lockID", lockID, "error", unlockErr)
-				} else {
-					util.Msgf("Successfully force-unlocked state for stage %s (lock ID: %s)", stage, lockID)
-				}
-			}
+			recoverStaleLock(ctx, stage, p, errStr)
 		}
 
 		// Check if this is a retryable error
@@ -441,17 +461,9 @@ func TfApplyWithRetry(ctx context.Context, stage string, p *CommandParams, maxRe
 
 		errStr := lastErr.Error()
 
-		// Attempt automatic state lock recovery
+		// Attempt automatic stale lock recovery
 		if strings.Contains(errStr, "Error acquiring the state lock") || strings.Contains(errStr, "state blob is already locked") {
-			if lockID, ok := tofu.ExtractLockID(errStr); ok {
-				client := tofu.Instance(ctx, *p.Settings())
-				s := p.Settings().Config.Stages[stage]
-				if unlockErr := client.ForceUnlock(ctx, s, lockID); unlockErr != nil {
-					log.Warn("Force-unlock failed", "stage", stage, "lockID", lockID, "error", unlockErr)
-				} else {
-					util.Msgf("Successfully force-unlocked state for stage %s (lock ID: %s)", stage, lockID)
-				}
-			}
+			recoverStaleLock(ctx, stage, p, errStr)
 		}
 
 		if !isRetryableApplyError(errStr) {
@@ -481,6 +493,8 @@ func isRetryableApplyError(errStr string) bool {
 		"RequestLimitExceeded",
 		"ServiceUnavailable",
 		"context deadline exceeded",
+		"MissingRollbackTarget",
+		"upgrade retries exhausted",
 	}
 	for _, pattern := range retryablePatterns {
 		if len(errStr) > 0 && strings.Contains(errStr, pattern) {
@@ -488,4 +502,145 @@ func isRetryableApplyError(errStr string) bool {
 		}
 	}
 	return false
+}
+
+// recoverStaleLock examines a state lock error, extracts the lock ID,
+// and force-unlocks it. During retry loops, locks are always from our own
+// prior failed attempt — no age check needed.
+// Returns true if the lock was successfully recovered.
+func recoverStaleLock(ctx context.Context, stage string, p *CommandParams, errStr string) bool {
+	lockID, ok := tofu.ExtractLockID(errStr)
+	if !ok {
+		return false
+	}
+
+	log.Warn("State lock detected, force-unlocking", "stage", stage, "lockID", lockID)
+
+	client := tofu.Instance(ctx, *p.Settings())
+	s := p.Settings().Config.Stages[stage]
+	if unlockErr := client.ForceUnlock(ctx, s, lockID); unlockErr != nil {
+		log.Warn("Force-unlock failed", "stage", stage, "lockID", lockID, "error", unlockErr)
+		return false
+	}
+
+	util.Msgf("Successfully force-unlocked state for stage %s (lock ID: %s)", stage, lockID)
+	return true
+}
+
+// buildDestroyWaves groups stages into waves for parallel destruction.
+// Stages in the same wave have no dependency relationships between them.
+// Waves are ordered so that dependents are destroyed before their dependencies
+// (highest-order stages first).
+func buildDestroyWaves(stages []schema.StageConfig) [][]schema.StageConfig {
+	// Build a set of stage IDs for quick lookup
+	stageMap := make(map[string]schema.StageConfig)
+	for _, s := range stages {
+		stageMap[s.Id] = s
+	}
+
+	// Group stages by order (stages with the same order are independent)
+	orderGroups := make(map[int][]schema.StageConfig)
+	var orders []int
+	for _, s := range stages {
+		if _, exists := orderGroups[s.Order]; !exists {
+			orders = append(orders, s.Order)
+		}
+		orderGroups[s.Order] = append(orderGroups[s.Order], s)
+	}
+
+	// Sort orders descending (highest first = destroy dependents before dependencies)
+	slices.Sort(orders)
+	slices.Reverse(orders)
+
+	var waves [][]schema.StageConfig
+	for _, order := range orders {
+		waves = append(waves, orderGroups[order])
+	}
+
+	return waves
+}
+
+// parallelDestroy destroys multiple independent stages concurrently.
+// Returns a slice of errors from any stages that failed.
+func parallelDestroy(ctx context.Context, stages []schema.StageConfig, p *CommandParams) []error {
+	type result struct {
+		stageId string
+		err     error
+	}
+
+	results := make(chan result, len(stages))
+
+	for _, s := range stages {
+		go func(stage schema.StageConfig) {
+			err := TfDestroyWithRetry(ctx, stage.Id, p, 2, 30*time.Second)
+			results <- result{stageId: stage.Id, err: err}
+		}(s)
+	}
+
+	var errs []error
+	for range stages {
+		r := <-results
+		if r.err != nil {
+			log.Warn("Stage destroy failed in parallel wave", "stage", r.stageId, "error", r.err)
+			errs = append(errs, fmt.Errorf("stage %s: %w", r.stageId, r.err))
+		}
+	}
+
+	return errs
+}
+
+// checkpoint tracks which stages have completed successfully during an install.
+// On re-entry after a failure, completed stages are skipped for idempotent behavior.
+const checkpointFileName = "install-checkpoint.json"
+
+type checkpoint struct {
+	Stages map[string]time.Time `json:"stages"`
+}
+
+func checkpointPath(p *CommandParams) string {
+	return filepath.Join(p.Settings().Config.Tmp, checkpointFileName)
+}
+
+func loadCheckpoint(p *CommandParams) *checkpoint {
+	cp := &checkpoint{Stages: make(map[string]time.Time)}
+	data, err := os.ReadFile(checkpointPath(p))
+	if err != nil {
+		return cp
+	}
+	if err := json.Unmarshal(data, cp); err != nil {
+		log.Warn("Corrupt checkpoint file, starting fresh", "error", err)
+		return &checkpoint{Stages: make(map[string]time.Time)}
+	}
+	if len(cp.Stages) > 0 {
+		util.Msgf("Found install checkpoint with %d completed stage(s)", len(cp.Stages))
+	}
+	return cp
+}
+
+func (cp *checkpoint) isCompleted(stageId string) bool {
+	_, ok := cp.Stages[stageId]
+	return ok
+}
+
+func (cp *checkpoint) markCompleted(stageId string) {
+	cp.Stages[stageId] = time.Now()
+}
+
+func (cp *checkpoint) save(p *CommandParams) {
+	data, err := json.MarshalIndent(cp, "", "  ")
+	if err != nil {
+		log.Warn("Failed to marshal checkpoint", "error", err)
+		return
+	}
+	if err := os.MkdirAll(filepath.Dir(checkpointPath(p)), 0750); err != nil {
+		log.Warn("Failed to create checkpoint directory", "error", err)
+		return
+	}
+	if err := os.WriteFile(checkpointPath(p), data, 0600); err != nil {
+		log.Warn("Failed to write checkpoint", "error", err)
+	}
+}
+
+func (cp *checkpoint) clear(p *CommandParams) {
+	os.Remove(checkpointPath(p))
 }
