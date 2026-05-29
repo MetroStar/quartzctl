@@ -16,7 +16,6 @@ package cmd
 
 import (
 	"context"
-	"errors"
 	"fmt"
 	"slices"
 	"strings"
@@ -144,26 +143,15 @@ func Install(ctx context.Context, p *CommandParams, resumeFrom string) error {
 		}
 	}
 
-	// Group stages by order for parallel execution within the same order level
-	stageGroups := groupStagesByOrder(stages)
-	for _, group := range stageGroups {
-		if len(group) == 1 {
-			// Single stage in this order - run sequentially
-			s := group[0]
-			err = TfInit(ctx, s.Id, p)
-			if err != nil {
-				return err
-			}
-			err = TfApplyWithRetry(ctx, s.Id, p, 2, 30*time.Second)
-			if err != nil {
-				return err
-			}
-		} else {
-			// Multiple stages at the same order - run in parallel
-			err = applyStagesParallel(ctx, group, p)
-			if err != nil {
-				return err
-			}
+	for _, s := range stages {
+		err = TfInit(ctx, s.Id, p)
+		if err != nil {
+			return err
+		}
+
+		err = TfApplyWithRetry(ctx, s.Id, p, 2, 30*time.Second)
+		if err != nil {
+			return err
 		}
 	}
 
@@ -189,71 +177,7 @@ func stageIds(stages []schema.StageConfig) string {
 	return strings.Join(ids, ", ")
 }
 
-// groupStagesByOrder groups stages by their Order field, preserving sort order.
-// Stages with the same order can run in parallel.
-func groupStagesByOrder(stages []schema.StageConfig) [][]schema.StageConfig {
-	if len(stages) == 0 {
-		return nil
-	}
 
-	var groups [][]schema.StageConfig
-	var current []schema.StageConfig
-	currentOrder := stages[0].Order
-
-	for _, s := range stages {
-		if s.Order != currentOrder {
-			groups = append(groups, current)
-			current = nil
-			currentOrder = s.Order
-		}
-		current = append(current, s)
-	}
-	if len(current) > 0 {
-		groups = append(groups, current)
-	}
-
-	return groups
-}
-
-// applyStagesParallel runs init+apply for multiple stages concurrently.
-// Returns the first error encountered (all stages are attempted).
-func applyStagesParallel(ctx context.Context, stages []schema.StageConfig, p *CommandParams) error {
-	ids := make([]string, len(stages))
-	for i, s := range stages {
-		ids[i] = s.Id
-	}
-	util.Msgf("Running stages in parallel: %s", strings.Join(ids, ", "))
-
-	type result struct {
-		stageId string
-		err     error
-	}
-
-	ch := make(chan result, len(stages))
-	for _, s := range stages {
-		go func(s schema.StageConfig) {
-			var stageErr error
-			stageErr = TfInit(ctx, s.Id, p)
-			if stageErr == nil {
-				stageErr = TfApplyWithRetry(ctx, s.Id, p, 2, 30*time.Second)
-			}
-			ch <- result{stageId: s.Id, err: stageErr}
-		}(s)
-	}
-
-	var errs []error
-	for range stages {
-		r := <-ch
-		if r.err != nil {
-			errs = append(errs, fmt.Errorf("stage %s: %w", r.stageId, r.err))
-		}
-	}
-
-	if len(errs) > 0 {
-		return fmt.Errorf("parallel stage execution failed: %w", errors.Join(errs...))
-	}
-	return nil
-}
 
 // Preflight validates cloud credentials and connectivity before starting the install.
 // Fails fast if IAM credentials are invalid or the cloud provider is unreachable.
@@ -316,20 +240,12 @@ func Clean(ctx context.Context, p *CommandParams) error {
 	stages := p.Settings().Config.StagesOrdered()
 
 	// Initialize and refresh each stage before destruction.
-	// Uses TfRefreshWithUnlock for automatic state lock recovery, and
-	// skips refresh for service-dependent stages when their provider endpoint is unreachable.
+	// Uses TfRefreshWithUnlock for automatic state lock recovery.
 	initStart := time.Now()
 	for _, s := range stages {
 		err = TfInit(ctx, s.Id, p)
 		if err != nil {
 			log.Warn("Init failed for stage, will attempt destroy anyway", "stage", s.Id, "error", err)
-		}
-		// Skip refresh for service-dependent stages if their service is unreachable.
-		// These stages (sonarqube, keycloak) require their respective services running
-		// for the provider to connect. During clean, services may already be gone.
-		if isServiceDependentStage(s.Id) {
-			log.Info("Skipping refresh for service-dependent stage (will use -refresh=false on destroy)", "stage", s.Id)
-			continue
 		}
 		err = TfRefreshWithUnlock(ctx, s.Id, p)
 		if err != nil {
@@ -353,25 +269,9 @@ func Clean(ctx context.Context, p *CommandParams) error {
 	stageTiming["k8s-prep"] = time.Since(k8sCleanStart)
 
 	// Destroy stages in reverse order, collecting errors instead of aborting.
-	// Service-dependent stages are destroyed with -refresh=false since their
-	// provider endpoints are unreachable. Empty states are auto-skipped by tofu.
 	slices.Reverse(stages)
 	for i, s := range stages {
 		stageStart := time.Now()
-
-		// For service-dependent stages, the provider can't connect so destroy
-		// would fail on provider initialization. Remove resources from state instead.
-		if isServiceDependentStage(s.Id) {
-			util.Hdrf("Destroy %s (service-dependent — clearing state)", s.Id)
-			client := tofu.Instance(ctx, *p.Settings())
-			stateErr := client.StateClear(ctx, s)
-			stageTiming["destroy-"+s.Id] = time.Since(stageStart)
-			if stateErr != nil {
-				log.Warn("Failed to clear state for service-dependent stage", "stage", s.Id, "error", stateErr)
-				destroyErrors = append(destroyErrors, fmt.Errorf("stage %s: %w", s.Id, stateErr))
-			}
-			continue
-		}
 
 		err = TfDestroyWithRetry(ctx, s.Id, p, 2, 30*time.Second)
 		stageTiming["destroy-"+s.Id] = time.Since(stageStart)
@@ -393,11 +293,20 @@ func Clean(ctx context.Context, p *CommandParams) error {
 		}
 	}
 
-	backendStart := time.Now()
-	err = TfDestroyBackend(ctx, p)
-	stageTiming["destroy-backend"] = time.Since(backendStart)
-	if err != nil {
-		destroyErrors = append(destroyErrors, fmt.Errorf("backend: %w", err))
+	// Only destroy the state backend if ALL stage destroys succeeded.
+	// If any stage failed, the backend must remain intact so operators can
+	// re-run clean or use tofu commands to recover. Destroying the backend
+	// with failed stages makes the orphaned resources irrecoverable via tofu.
+	if len(destroyErrors) == 0 {
+		backendStart := time.Now()
+		err = TfDestroyBackend(ctx, p)
+		stageTiming["destroy-backend"] = time.Since(backendStart)
+		if err != nil {
+			destroyErrors = append(destroyErrors, fmt.Errorf("backend: %w", err))
+		}
+	} else {
+		util.Msgf("⚠️  Skipping backend destruction — %d stage(s) failed. Re-run 'quartz clean' to retry.", len(destroyErrors))
+		util.Msg("   The state backend is preserved so tofu can still manage remaining resources.")
 	}
 
 	cleanupFinalStart := time.Now()
@@ -420,18 +329,6 @@ func Clean(ctx context.Context, p *CommandParams) error {
 	return nil
 }
 
-// isServiceDependentStage returns true for stages that require an external service
-// endpoint to be reachable for their provider to initialize (e.g., sonarqube needs
-// the SonarQube server, keycloak needs the Keycloak server).
-func isServiceDependentStage(stageID string) bool {
-	serviceDependentStages := []string{"sonarqube", "keycloak"}
-	for _, s := range serviceDependentStages {
-		if strings.Contains(stageID, s) {
-			return true
-		}
-	}
-	return false
-}
 
 // printCleanupTimingSummary outputs timing information for each phase of the cleanup.
 func printCleanupTimingSummary(stageTiming map[string]time.Duration, totalDuration time.Duration) {
