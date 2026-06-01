@@ -400,7 +400,7 @@ func (c *TofuClient) stageVars(ctx context.Context, stage schema.StageConfig) []
 				continue
 			}
 
-			log.Debug("OpenTofu secret input var", "key", v.Secret, "val", val)
+			log.Debug("OpenTofu secret input var", "key", v.Secret, "val", "[REDACTED]")
 			vars = append(vars, tfexec.Var(fmt.Sprintf("%s=%s", k, val)))
 		} else if v.Stage.Name != "" {
 			_, ok := outputs[v.Stage.Name]
