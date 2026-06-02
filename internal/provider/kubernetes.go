@@ -68,6 +68,7 @@ type KubernetesProviderClient interface {
 	GetDaemonSetStatus(ctx context.Context, kind schema.GroupVersionResource, ns string, name string) (int64, int64, error)
 	CleanupStuckTerminatingPods(ctx context.Context, timeout time.Duration) ([]string, error)
 	ReapOrphanedAdmissionWebhooks(ctx context.Context) ([]string, error)
+	ScrubStuckHelmReleaseSecrets(ctx context.Context) ([]string, error)
 	ListVirtualServices(ctx context.Context) ([]VirtualServiceInfo, error)
 	PrepareForDestroy(ctx context.Context) error
 	InterStageCleanup(ctx context.Context) error
@@ -792,6 +793,65 @@ func (c KubernetesClient) ReapOrphanedAdmissionWebhooks(ctx context.Context) ([]
 	return reaped, nil
 }
 
+// ScrubStuckHelmReleaseSecrets deletes Helm v3 release-record Secrets that are
+// stuck in a non-terminal status (uninstalling, pending-install,
+// pending-upgrade, pending-rollback). Helm stores one Secret per release
+// revision (type "helm.sh/release.v1") and refuses to start a new operation
+// while the latest revision is in one of these transient states, failing with
+// "another operation (install/upgrade/rollback) is in progress". This happens
+// when a destroy is interrupted or a controller dies mid-uninstall, and it
+// deadlocks any subsequent re-install of that release.
+//
+// Only transient-status records are removed; "deployed", "failed", and
+// "superseded" revisions are left intact so release history and rollback
+// targets are preserved. Returns the namespace/name of each scrubbed secret.
+func (c KubernetesClient) ScrubStuckHelmReleaseSecrets(ctx context.Context) ([]string, error) {
+	clientset, err := c.api.ClientSet()
+	if err != nil {
+		return nil, err
+	}
+
+	stuckStatuses := map[string]bool{
+		"uninstalling":     true,
+		"pending-install":  true,
+		"pending-upgrade":  true,
+		"pending-rollback": true,
+	}
+
+	// Helm release records are Secrets labelled owner=helm; the per-revision
+	// status is exposed as the "status" label so we can filter server-side.
+	secrets, err := clientset.CoreV1().Secrets("").List(ctx, metav1.ListOptions{
+		LabelSelector: "owner=helm",
+	})
+	if err != nil {
+		return nil, err
+	}
+
+	var scrubbed []string
+	for _, s := range secrets.Items {
+		if s.Type != "helm.sh/release.v1" {
+			continue
+		}
+		if !stuckStatuses[s.Labels["status"]] {
+			continue
+		}
+
+		log.Info("Scrubbing stuck Helm release secret",
+			"namespace", s.Namespace,
+			"name", s.Name,
+			"release", s.Labels["name"],
+			"status", s.Labels["status"])
+
+		if dErr := clientset.CoreV1().Secrets(s.Namespace).Delete(ctx, s.Name, metav1.DeleteOptions{}); dErr != nil {
+			log.Warn("Failed to delete stuck Helm release secret", "namespace", s.Namespace, "name", s.Name, "err", dErr)
+			continue
+		}
+		scrubbed = append(scrubbed, fmt.Sprintf("%s/%s", s.Namespace, s.Name))
+	}
+
+	return scrubbed, nil
+}
+
 type PodHealthStatus struct {
 	TotalPods     int
 	ReadyPods     int
@@ -1183,6 +1243,16 @@ func (c KubernetesClient) InterStageCleanup(ctx context.Context) error {
 	// backing service is gone (shared with the install-time safety net).
 	if _, err := c.ReapOrphanedAdmissionWebhooks(ctx); err != nil {
 		log.Debug("Orphaned webhook reaping during inter-stage cleanup failed (non-fatal)", "err", err)
+	}
+
+	// 2. Delete Helm release secrets stuck in a transient state (uninstalling/
+	// pending-*). When a stage destroy is interrupted or a controller dies
+	// mid-uninstall, Helm leaves its release record secret in a non-terminal
+	// status; the next operation then aborts with "another operation is in
+	// progress", deadlocking re-install of that release. Scrubbing only the
+	// stuck records lets Helm recover without touching healthy deployments.
+	if _, err := c.ScrubStuckHelmReleaseSecrets(ctx); err != nil {
+		log.Debug("Stuck helm release secret scrub during inter-stage cleanup failed (non-fatal)", "err", err)
 	}
 
 	// 3. Patch finalizers on LoadBalancer services whose controller is dead

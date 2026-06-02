@@ -1342,3 +1342,55 @@ func TestProviderKubernetesClientReapOrphanedAdmissionWebhooks(t *testing.T) {
 		t.Errorf("live-validating (backed by an existing service) must not be reaped")
 	}
 }
+
+func TestProviderKubernetesClientScrubStuckHelmReleaseSecrets(t *testing.T) {
+	helmSecret := func(ns, name, release, status string) *corev1.Secret {
+		return &corev1.Secret{
+			ObjectMeta: metav1.ObjectMeta{
+				Namespace: ns,
+				Name:      name,
+				Labels:    map[string]string{"owner": "helm", "name": release, "status": status},
+			},
+			Type: "helm.sh/release.v1",
+		}
+	}
+
+	// Stuck records that must be scrubbed.
+	stuckUninstalling := helmSecret("quartz", "sh.helm.release.v1.foo.v3", "foo", "uninstalling")
+	stuckPending := helmSecret("quartz", "sh.helm.release.v1.bar.v1", "bar", "pending-install")
+	// Healthy records that must be preserved.
+	deployed := helmSecret("quartz", "sh.helm.release.v1.foo.v2", "foo", "deployed")
+	superseded := helmSecret("quartz", "sh.helm.release.v1.foo.v1", "foo", "superseded")
+	// A non-helm secret that shares the owner label must be ignored (wrong type).
+	notHelm := &corev1.Secret{
+		ObjectMeta: metav1.ObjectMeta{
+			Namespace: "quartz", Name: "random",
+			Labels: map[string]string{"owner": "helm", "status": "uninstalling"},
+		},
+		Type: "Opaque",
+	}
+
+	api := NewKubernetesApiMock().WithClientObjects(stuckUninstalling, stuckPending, deployed, superseded, notHelm)
+	c, err := NewKubernetesClient(api, KubeconfigInfo{}, schema.QuartzConfig{})
+	if err != nil {
+		t.Fatalf("unexpected error from kubernetes client constructor, %v", err)
+	}
+
+	scrubbed, err := c.ScrubStuckHelmReleaseSecrets(context.Background())
+	if err != nil {
+		t.Fatalf("unexpected error from ScrubStuckHelmReleaseSecrets, %v", err)
+	}
+
+	got := map[string]bool{}
+	for _, r := range scrubbed {
+		got[r] = true
+	}
+	if len(scrubbed) != 2 ||
+		!got["quartz/sh.helm.release.v1.foo.v3"] ||
+		!got["quartz/sh.helm.release.v1.bar.v1"] {
+		t.Fatalf("expected to scrub the two stuck helm release secrets, got %v", scrubbed)
+	}
+	if got["quartz/sh.helm.release.v1.foo.v2"] || got["quartz/sh.helm.release.v1.foo.v1"] || got["quartz/random"] {
+		t.Errorf("healthy/non-helm secrets must not be scrubbed, got %v", scrubbed)
+	}
+}
