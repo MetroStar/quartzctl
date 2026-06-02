@@ -351,8 +351,11 @@ func Confirm(ctx context.Context, msg string, p *CommandParams) error {
 	log.Debug("Entering", "internal", "confirm")
 	defer log.Debug("Completed", "internal", "confirm")
 
-	cp, _ := p.Provider().Cloud(ctx)
-	cp.PrintConfig()
+	if cp, err := p.Provider().Cloud(ctx); err != nil {
+		log.Warn("Could not load cloud provider config for confirmation prompt", "error", err)
+	} else if cp != nil {
+		cp.PrintConfig()
+	}
 
 	util.Msgf("Domain: %s\n", p.Settings().Config.Dns.Domain)
 
