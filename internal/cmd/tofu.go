@@ -636,9 +636,62 @@ func preCheck(ctx context.Context, stage string, event string, p *CommandParams)
 }
 
 // postCheck runs post-checks for a specific stage and event.
+//
+// While the post-checks run (and potentially retry for several minutes waiting
+// on resources to become ready), a background safety net periodically reaps
+// orphaned admission webhooks whose backing service has disappeared. This
+// auto-heals the class of deadlock where an admission controller (e.g. Kyverno)
+// is uninstalled mid-reconcile but its dynamically-created, failurePolicy: Fail
+// webhook configurations are left behind, blocking ALL admission cluster-wide —
+// which would otherwise hang a stage's post-install checks (e.g. waiting for the
+// istio-cni-node daemonset) until the retry limit is exhausted.
 func postCheck(ctx context.Context, stage string, event string, p *CommandParams) error {
+	stopReaper := startWebhookReaper(ctx, p)
+	defer stopReaper()
+
 	_, err := stages.RunPostChecks(ctx, p.Settings().Config, *p.Provider(), stage, event, checkOpts)
 	return err
+}
+
+// startWebhookReaper launches a background goroutine that periodically reaps
+// orphaned admission webhooks (those whose backing service is gone) until the
+// returned stop function is called. It is a no-op safety net when the cluster
+// is not reachable. The returned function blocks until the goroutine exits.
+func startWebhookReaper(ctx context.Context, p *CommandParams) func() {
+	kube, err := p.Provider().Kubernetes(ctx)
+	if err != nil {
+		// Cluster not reachable (e.g. pre-cluster stages) — nothing to guard.
+		return func() {}
+	}
+
+	reaperCtx, cancel := context.WithCancel(ctx)
+	done := make(chan struct{})
+
+	go func() {
+		defer close(done)
+		ticker := time.NewTicker(30 * time.Second)
+		defer ticker.Stop()
+		for {
+			select {
+			case <-reaperCtx.Done():
+				return
+			case <-ticker.C:
+				reaped, rErr := kube.ReapOrphanedAdmissionWebhooks(reaperCtx)
+				if rErr != nil {
+					log.Debug("Webhook reaper safety net failed (non-fatal)", "err", rErr)
+					continue
+				}
+				if len(reaped) > 0 {
+					util.Msgf("Reaped %d orphaned admission webhook(s) blocking cluster admission: %v", len(reaped), reaped)
+				}
+			}
+		}
+	}()
+
+	return func() {
+		cancel()
+		<-done
+	}
 }
 
 // wrapChecks wraps the execution of a function with pre-checks and post-checks.

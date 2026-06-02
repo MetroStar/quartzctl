@@ -27,6 +27,7 @@ import (
 
 	"github.com/MetroStar/quartzctl/internal/config/schema"
 	"github.com/MetroStar/quartzctl/internal/util"
+	admissionregistrationv1 "k8s.io/api/admissionregistration/v1"
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
@@ -1280,5 +1281,64 @@ func TestProviderKubernetesClientExportEmpty(t *testing.T) {
 	}
 	if len(result) != 0 {
 		t.Errorf("expected empty result for empty objects list, got %d entries", len(result))
+	}
+}
+
+func TestProviderKubernetesClientReapOrphanedAdmissionWebhooks(t *testing.T) {
+	svcRef := func(ns, name string) *admissionregistrationv1.ServiceReference {
+		return &admissionregistrationv1.ServiceReference{Namespace: ns, Name: name}
+	}
+
+	// A live service backing one webhook; the other webhooks reference services
+	// that do not exist and must be reaped.
+	liveSvc := &corev1.Service{
+		ObjectMeta: metav1.ObjectMeta{Namespace: "kyverno", Name: "kyverno-svc"},
+	}
+
+	orphanVwc := &admissionregistrationv1.ValidatingWebhookConfiguration{
+		ObjectMeta: metav1.ObjectMeta{Name: "orphan-validating"},
+		Webhooks: []admissionregistrationv1.ValidatingWebhook{{
+			Name:         "v.orphan.svc",
+			ClientConfig: admissionregistrationv1.WebhookClientConfig{Service: svcRef("gone-ns", "gone-svc")},
+		}},
+	}
+	liveVwc := &admissionregistrationv1.ValidatingWebhookConfiguration{
+		ObjectMeta: metav1.ObjectMeta{Name: "live-validating"},
+		Webhooks: []admissionregistrationv1.ValidatingWebhook{{
+			Name:         "v.live.svc",
+			ClientConfig: admissionregistrationv1.WebhookClientConfig{Service: svcRef("kyverno", "kyverno-svc")},
+		}},
+	}
+	orphanMwc := &admissionregistrationv1.MutatingWebhookConfiguration{
+		ObjectMeta: metav1.ObjectMeta{Name: "orphan-mutating"},
+		Webhooks: []admissionregistrationv1.MutatingWebhook{{
+			Name:         "m.orphan.svc",
+			ClientConfig: admissionregistrationv1.WebhookClientConfig{Service: svcRef("gone-ns", "gone-svc")},
+		}},
+	}
+
+	api := NewKubernetesApiMock().WithClientObjects(liveSvc, orphanVwc, liveVwc, orphanMwc)
+	cfg := schema.QuartzConfig{}
+	c, err := NewKubernetesClient(api, KubeconfigInfo{}, cfg)
+	if err != nil {
+		t.Fatalf("unexpected error from kubernetes client constructor, %v", err)
+	}
+
+	reaped, err := c.ReapOrphanedAdmissionWebhooks(context.Background())
+	if err != nil {
+		t.Fatalf("unexpected error from ReapOrphanedAdmissionWebhooks, %v", err)
+	}
+
+	// Only the two webhooks whose backing service is gone should be reaped; the
+	// webhook backed by the live service must be left untouched.
+	got := map[string]bool{}
+	for _, r := range reaped {
+		got[r] = true
+	}
+	if len(reaped) != 2 || !got["validating/orphan-validating"] || !got["mutating/orphan-mutating"] {
+		t.Fatalf("expected to reap [validating/orphan-validating mutating/orphan-mutating], got %v", reaped)
+	}
+	if got["validating/live-validating"] {
+		t.Errorf("live-validating (backed by an existing service) must not be reaped")
 	}
 }

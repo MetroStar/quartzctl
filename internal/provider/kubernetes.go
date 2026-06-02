@@ -32,6 +32,7 @@ import (
 
 	authv1 "k8s.io/api/authentication/v1"
 	corev1 "k8s.io/api/core/v1"
+	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
@@ -66,6 +67,7 @@ type KubernetesProviderClient interface {
 	Restart(ctx context.Context, kind schema.GroupVersionResource, ns string, name string) error
 	GetDaemonSetStatus(ctx context.Context, kind schema.GroupVersionResource, ns string, name string) (int64, int64, error)
 	CleanupStuckTerminatingPods(ctx context.Context, timeout time.Duration) ([]string, error)
+	ReapOrphanedAdmissionWebhooks(ctx context.Context) ([]string, error)
 	ListVirtualServices(ctx context.Context) ([]VirtualServiceInfo, error)
 	PrepareForDestroy(ctx context.Context) error
 	InterStageCleanup(ctx context.Context) error
@@ -719,7 +721,77 @@ func (c KubernetesClient) CleanupStuckTerminatingPods(ctx context.Context, timeo
 	return cleaned, nil
 }
 
-// PodHealthStatus represents the health state of pods matching a selector.
+// ReapOrphanedAdmissionWebhooks deletes Validating/MutatingWebhookConfigurations
+// whose backing Service no longer exists. Such "dangling" webhooks are a common
+// failure mode for admission controllers (e.g. Kyverno, cert-manager) that create
+// their webhook configurations dynamically at runtime: when the controller's Helm
+// release is uninstalled, the Deployment/Service/namespace are removed but the
+// cluster-scoped webhook configurations are left behind. With failurePolicy: Fail,
+// every admission call then targets a dead service and fails, deadlocking ALL
+// resource creation cluster-wide (no new pods, no Helm reconciles, even the
+// controller cannot be reinstalled).
+//
+// A webhook is only reaped when its backing Service returns NotFound — i.e. the
+// operator is already gone, so there is no live policy enforcement to preserve.
+// Transient API errors are ignored so a brief apiserver hiccup never removes a
+// healthy webhook. Returns the names of the webhook configurations that were
+// removed.
+func (c KubernetesClient) ReapOrphanedAdmissionWebhooks(ctx context.Context) ([]string, error) {
+	clientset, err := c.api.ClientSet()
+	if err != nil {
+		return nil, err
+	}
+
+	var reaped []string
+
+	// serviceGone reports whether the referenced service is confirmed absent.
+	// It returns false on transient errors to avoid reaping a healthy webhook.
+	serviceGone := func(ns, name string) bool {
+		_, gErr := clientset.CoreV1().Services(ns).Get(ctx, name, metav1.GetOptions{})
+		return apierrors.IsNotFound(gErr)
+	}
+
+	// Validating webhooks
+	if vwcs, lErr := clientset.AdmissionregistrationV1().ValidatingWebhookConfigurations().List(ctx, metav1.ListOptions{}); lErr == nil {
+		for _, vwc := range vwcs.Items {
+			for _, wh := range vwc.Webhooks {
+				if wh.ClientConfig.Service != nil && serviceGone(wh.ClientConfig.Service.Namespace, wh.ClientConfig.Service.Name) {
+					log.Info("Reaping orphaned ValidatingWebhookConfiguration (backing service gone)",
+						"name", vwc.Name,
+						"service", fmt.Sprintf("%s/%s", wh.ClientConfig.Service.Namespace, wh.ClientConfig.Service.Name))
+					if dErr := clientset.AdmissionregistrationV1().ValidatingWebhookConfigurations().Delete(ctx, vwc.Name, metav1.DeleteOptions{}); dErr == nil {
+						reaped = append(reaped, "validating/"+vwc.Name)
+					} else {
+						log.Warn("Failed to delete orphaned ValidatingWebhookConfiguration", "name", vwc.Name, "err", dErr)
+					}
+					break
+				}
+			}
+		}
+	}
+
+	// Mutating webhooks
+	if mwcs, lErr := clientset.AdmissionregistrationV1().MutatingWebhookConfigurations().List(ctx, metav1.ListOptions{}); lErr == nil {
+		for _, mwc := range mwcs.Items {
+			for _, wh := range mwc.Webhooks {
+				if wh.ClientConfig.Service != nil && serviceGone(wh.ClientConfig.Service.Namespace, wh.ClientConfig.Service.Name) {
+					log.Info("Reaping orphaned MutatingWebhookConfiguration (backing service gone)",
+						"name", mwc.Name,
+						"service", fmt.Sprintf("%s/%s", wh.ClientConfig.Service.Namespace, wh.ClientConfig.Service.Name))
+					if dErr := clientset.AdmissionregistrationV1().MutatingWebhookConfigurations().Delete(ctx, mwc.Name, metav1.DeleteOptions{}); dErr == nil {
+						reaped = append(reaped, "mutating/"+mwc.Name)
+					} else {
+						log.Warn("Failed to delete orphaned MutatingWebhookConfiguration", "name", mwc.Name, "err", dErr)
+					}
+					break
+				}
+			}
+		}
+	}
+
+	return reaped, nil
+}
+
 type PodHealthStatus struct {
 	TotalPods     int
 	ReadyPods     int
@@ -1107,38 +1179,10 @@ func (c KubernetesClient) InterStageCleanup(ctx context.Context) error {
 		return fmt.Errorf("failed to get clientset: %w", err)
 	}
 
-	// 1. Delete orphaned ValidatingWebhookConfigurations whose service is gone
-	vwcs, err := clientset.AdmissionregistrationV1().ValidatingWebhookConfigurations().List(ctx, metav1.ListOptions{})
-	if err == nil {
-		for _, vwc := range vwcs.Items {
-			for _, wh := range vwc.Webhooks {
-				if wh.ClientConfig.Service != nil {
-					_, svcErr := clientset.CoreV1().Services(wh.ClientConfig.Service.Namespace).Get(ctx, wh.ClientConfig.Service.Name, metav1.GetOptions{})
-					if svcErr != nil {
-						log.Info("Deleting orphaned ValidatingWebhookConfiguration (service gone)", "name", vwc.Name)
-						_ = clientset.AdmissionregistrationV1().ValidatingWebhookConfigurations().Delete(ctx, vwc.Name, metav1.DeleteOptions{})
-						break
-					}
-				}
-			}
-		}
-	}
-
-	// 2. Delete orphaned MutatingWebhookConfigurations whose service is gone
-	mwcs, err := clientset.AdmissionregistrationV1().MutatingWebhookConfigurations().List(ctx, metav1.ListOptions{})
-	if err == nil {
-		for _, mwc := range mwcs.Items {
-			for _, wh := range mwc.Webhooks {
-				if wh.ClientConfig.Service != nil {
-					_, svcErr := clientset.CoreV1().Services(wh.ClientConfig.Service.Namespace).Get(ctx, wh.ClientConfig.Service.Name, metav1.GetOptions{})
-					if svcErr != nil {
-						log.Info("Deleting orphaned MutatingWebhookConfiguration (service gone)", "name", mwc.Name)
-						_ = clientset.AdmissionregistrationV1().MutatingWebhookConfigurations().Delete(ctx, mwc.Name, metav1.DeleteOptions{})
-						break
-					}
-				}
-			}
-		}
+	// 1. Delete orphaned Validating/MutatingWebhookConfigurations whose
+	// backing service is gone (shared with the install-time safety net).
+	if _, err := c.ReapOrphanedAdmissionWebhooks(ctx); err != nil {
+		log.Debug("Orphaned webhook reaping during inter-stage cleanup failed (non-fatal)", "err", err)
 	}
 
 	// 3. Patch finalizers on LoadBalancer services whose controller is dead
