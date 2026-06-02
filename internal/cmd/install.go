@@ -179,6 +179,26 @@ func Install(ctx context.Context, p *CommandParams, resumeFrom string) error {
 
 		err = TfApplyWithRetry(ctx, s.Id, p, 1, 30*time.Second)
 		if err != nil {
+			// The core stage bootstraps the umbrella Helm release once and then
+			// hands ownership to Flux, which re-renders from git and stamps the
+			// release version with the git revision (e.g. "1.0.0+<sha>"). Any
+			// later apply against a live, Flux-managed cluster sees the bare
+			// bootstrap chart "1.0.0" versus Flux's "1.0.0+<sha>" and the Helm
+			// provider aborts at plan time with "Planned version is different
+			// from configured version". This is expected and NOT a failure:
+			// Flux already owns the release, so the bootstrap apply is a no-op
+			// (re-applying it would prune Flux's entire rendered stack). Treat
+			// the stage as satisfied so the install converges instead of
+			// aborting. A genuinely fresh install never hits this branch because
+			// Flux has not yet adopted the release.
+			if isFluxOwnedReleaseDrift(err) {
+				log.Debug("Apply reported Flux-owned release version drift; treating stage as complete",
+					"stage", s.Id, "error", err)
+				util.Msgf("Stage %s is owned by Flux (release already adopted), skipping bootstrap apply", s.Id)
+				cp.markCompleted(s.Id)
+				cp.save(p)
+				continue
+			}
 			return err
 		}
 
