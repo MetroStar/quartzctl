@@ -761,7 +761,10 @@ func (c KubernetesClient) ClusterProgressSnapshot(ctx context.Context) (ClusterP
 	}
 
 	// HelmRelease readiness (Flux). Absent CRD / no releases yet is not an error.
-	if gvr, lkErr := c.LookupKind(ctx, "helmreleases"); lkErr == nil {
+	// Use the "HelmRelease" kind token (not the "helmreleases" resource name):
+	// the kind form resolves reliably through the discovery RESTMapper, matching
+	// the path used by stage checks, whereas the bare plural can fail to map.
+	if gvr, lkErr := c.LookupKind(ctx, "HelmRelease"); lkErr == nil {
 		ferr := c.ForEachDynamicResources(ctx, gvr, "", func(item unstructured.Unstructured) {
 			progress.HelmReleasesTotal++
 			conds, found, _ := unstructured.NestedSlice(item.Object, "status", "conditions")

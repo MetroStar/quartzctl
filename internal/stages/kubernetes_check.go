@@ -71,8 +71,13 @@ func (c KubernetesStageCheck) Run(ctx context.Context, _ schema.QuartzConfig) er
 		return nil
 	}
 
-	if c.src.Name == "" || c.src.Namespace == "" {
-		return errors.New("name and namespace required for check")
+	// Name is always required to identify the resource. Namespace is optional:
+	// cluster-scoped kinds (CustomResourceDefinition, Namespace, ClusterRole,
+	// etc.) legitimately have no namespace, so requiring one here wrongly
+	// rejects valid checks. For namespaced kinds, an omitted namespace surfaces
+	// naturally as a wait error rather than being pre-validated here.
+	if c.src.Name == "" {
+		return errors.New("name required for check")
 	}
 
 	return kube.WaitConditionState(ctx, kind, c.src.Namespace, c.src.Name, c.src.State, c.src.Timeout)
