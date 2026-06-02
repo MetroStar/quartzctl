@@ -1343,6 +1343,81 @@ func TestProviderKubernetesClientReapOrphanedAdmissionWebhooks(t *testing.T) {
 	}
 }
 
+func TestPodUnhealthy(t *testing.T) {
+	waiting := func(reason string) corev1.Pod {
+		return corev1.Pod{
+			Status: corev1.PodStatus{
+				Phase: corev1.PodPending,
+				ContainerStatuses: []corev1.ContainerStatus{{
+					State: corev1.ContainerState{Waiting: &corev1.ContainerStateWaiting{Reason: reason}},
+				}},
+			},
+		}
+	}
+
+	now := metav1.Now()
+	tests := []struct {
+		name string
+		pod  corev1.Pod
+		want bool
+	}{
+		{name: "running healthy", pod: corev1.Pod{Status: corev1.PodStatus{Phase: corev1.PodRunning}}, want: false},
+		{name: "succeeded", pod: corev1.Pod{Status: corev1.PodStatus{Phase: corev1.PodSucceeded}}, want: false},
+		{name: "pending no failure", pod: corev1.Pod{Status: corev1.PodStatus{Phase: corev1.PodPending}}, want: false},
+		{name: "crashloop", pod: waiting("CrashLoopBackOff"), want: true},
+		{name: "imagepull", pod: waiting("ImagePullBackOff"), want: true},
+		{name: "config error", pod: waiting("CreateContainerConfigError"), want: true},
+		{name: "benign waiting (ContainerCreating)", pod: waiting("ContainerCreating"), want: false},
+		{name: "failed phase", pod: corev1.Pod{Status: corev1.PodStatus{Phase: corev1.PodFailed}}, want: true},
+		{
+			name: "running but container wedged",
+			pod: corev1.Pod{Status: corev1.PodStatus{
+				Phase: corev1.PodRunning,
+				ContainerStatuses: []corev1.ContainerStatus{{
+					State: corev1.ContainerState{Waiting: &corev1.ContainerStateWaiting{Reason: "CrashLoopBackOff"}},
+				}},
+			}},
+			want: true,
+		},
+		{
+			name: "terminating ignored",
+			pod: corev1.Pod{
+				ObjectMeta: metav1.ObjectMeta{DeletionTimestamp: &now},
+				Status:     corev1.PodStatus{Phase: corev1.PodFailed},
+			},
+			want: false,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := podUnhealthy(tt.pod); got != tt.want {
+				t.Errorf("podUnhealthy() = %v, want %v", got, tt.want)
+			}
+		})
+	}
+}
+
+func TestClusterProgressSummary(t *testing.T) {
+	p := ClusterProgress{
+		HelmReleasesReady:     10,
+		HelmReleasesTotal:     34,
+		UnhealthyPods:         []string{"quartz/epyon-0"},
+		TerminatingNamespaces: []string{"cert-manager"},
+	}
+	got := p.Summary()
+	if !strings.Contains(got, "10/34 ready") ||
+		!strings.Contains(got, "1 unhealthy pod") ||
+		!strings.Contains(got, "terminating ns: cert-manager") {
+		t.Errorf("unexpected summary: %q", got)
+	}
+
+	clean := ClusterProgress{HelmReleasesReady: 34, HelmReleasesTotal: 34}
+	if got := clean.Summary(); got != "HelmReleases 34/34 ready" {
+		t.Errorf("unexpected clean summary: %q", got)
+	}
+}
+
 func TestProviderKubernetesClientScrubStuckHelmReleaseSecrets(t *testing.T) {
 	helmSecret := func(ns, name, release, status string) *corev1.Secret {
 		return &corev1.Secret{

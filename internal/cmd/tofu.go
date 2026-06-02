@@ -17,6 +17,7 @@ package cmd
 import (
 	"context"
 	"fmt"
+	"os"
 	"slices"
 	"strings"
 	"time"
@@ -781,6 +782,9 @@ func postCheck(ctx context.Context, stage string, event string, p *CommandParams
 	stopReaper := startWebhookReaper(ctx, p)
 	defer stopReaper()
 
+	stopProgress := startProgressReporter(ctx, p)
+	defer stopProgress()
+
 	_, err := stages.RunPostChecks(ctx, p.Settings().Config, *p.Provider(), stage, event, checkOpts)
 	return err
 }
@@ -816,6 +820,83 @@ func startWebhookReaper(ctx context.Context, p *CommandParams) func() {
 				if len(reaped) > 0 {
 					util.Msgf("Reaped %d orphaned admission webhook(s) blocking cluster admission: %v", len(reaped), reaped)
 				}
+			}
+		}
+	}()
+
+	return func() {
+		cancel()
+		<-done
+	}
+}
+
+// progressReportInterval returns the cadence for the install progress reporter.
+// Defaults to 30s; override with QUARTZ_PROGRESS_INTERVAL (e.g. "15s", "1m").
+func progressReportInterval() time.Duration {
+	const def = 30 * time.Second
+	if v := os.Getenv("QUARTZ_PROGRESS_INTERVAL"); v != "" {
+		if d, err := time.ParseDuration(v); err == nil && d > 0 {
+			return d
+		}
+	}
+	return def
+}
+
+// startProgressReporter launches a background goroutine that periodically logs a
+// concise summary of cluster health (HelmRelease readiness, terminating
+// namespaces, unhealthy pods) while a stage's post-install checks run. This
+// gives users visibility into a deploying cluster instead of staring at a
+// seemingly-idle install for minutes. It is a no-op when the cluster is not yet
+// reachable (e.g. pre-cluster stages) or when disabled via QUARTZ_PROGRESS=off.
+// The returned function blocks until the goroutine exits.
+func startProgressReporter(ctx context.Context, p *CommandParams) func() {
+	if strings.EqualFold(os.Getenv("QUARTZ_PROGRESS"), "off") {
+		return func() {}
+	}
+
+	kube, err := p.Provider().Kubernetes(ctx)
+	if err != nil {
+		// Cluster not reachable yet — nothing to report.
+		return func() {}
+	}
+
+	reportCtx, cancel := context.WithCancel(ctx)
+	done := make(chan struct{})
+
+	go func() {
+		defer close(done)
+		interval := progressReportInterval()
+		ticker := time.NewTicker(interval)
+		defer ticker.Stop()
+
+		var lastSummary string
+		report := func() {
+			snap, sErr := kube.ClusterProgressSnapshot(reportCtx)
+			if sErr != nil {
+				log.Debug("Progress reporter snapshot failed (non-fatal)", "err", sErr)
+				return
+			}
+			summary := snap.Summary()
+			// Avoid spamming identical lines when nothing has changed.
+			if summary == lastSummary {
+				return
+			}
+			lastSummary = summary
+			util.Msgf("Cluster progress: %s", summary)
+			if len(snap.NotReadyReleases) > 0 {
+				log.Debug("Not-ready HelmReleases", "releases", snap.NotReadyReleases)
+			}
+		}
+
+		// Emit an initial reading promptly so users see status without waiting
+		// a full interval.
+		report()
+		for {
+			select {
+			case <-reportCtx.Done():
+				return
+			case <-ticker.C:
+				report()
 			}
 		}
 	}()

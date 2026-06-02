@@ -69,6 +69,7 @@ type KubernetesProviderClient interface {
 	CleanupStuckTerminatingPods(ctx context.Context, timeout time.Duration) ([]string, error)
 	ReapOrphanedAdmissionWebhooks(ctx context.Context) ([]string, error)
 	ScrubStuckHelmReleaseSecrets(ctx context.Context) ([]string, error)
+	ClusterProgressSnapshot(ctx context.Context) (ClusterProgress, error)
 	ListVirtualServices(ctx context.Context) ([]VirtualServiceInfo, error)
 	PrepareForDestroy(ctx context.Context) error
 	InterStageCleanup(ctx context.Context) error
@@ -722,6 +723,143 @@ func (c KubernetesClient) CleanupStuckTerminatingPods(ctx context.Context, timeo
 	return cleaned, nil
 }
 
+// ClusterProgress is a point-in-time snapshot of cluster health used to give
+// users visibility into a deploying Quartz cluster. It surfaces the signals
+// that otherwise only become apparent minutes into a stalled install.
+type ClusterProgress struct {
+	HelmReleasesReady     int
+	HelmReleasesTotal     int
+	NotReadyReleases      []string
+	TerminatingNamespaces []string
+	UnhealthyPods         []string
+}
+
+// Summary renders a concise one-line health summary suitable for periodic
+// logging during an install.
+func (p ClusterProgress) Summary() string {
+	parts := []string{fmt.Sprintf("HelmReleases %d/%d ready", p.HelmReleasesReady, p.HelmReleasesTotal)}
+	if n := len(p.UnhealthyPods); n > 0 {
+		parts = append(parts, fmt.Sprintf("%d unhealthy pod(s)", n))
+	}
+	if n := len(p.TerminatingNamespaces); n > 0 {
+		parts = append(parts, fmt.Sprintf("terminating ns: %s", strings.Join(p.TerminatingNamespaces, ",")))
+	}
+	return strings.Join(parts, " | ")
+}
+
+// ClusterProgressSnapshot collects a lightweight health snapshot of the cluster:
+// HelmRelease readiness, namespaces stuck Terminating, and unhealthy pods. It is
+// read-only and best-effort — individual collection failures degrade gracefully
+// rather than returning an error, so it is safe to call repeatedly from a
+// background reporter while a cluster is still coming up.
+func (c KubernetesClient) ClusterProgressSnapshot(ctx context.Context) (ClusterProgress, error) {
+	var progress ClusterProgress
+
+	clientset, err := c.api.ClientSet()
+	if err != nil {
+		return progress, err
+	}
+
+	// HelmRelease readiness (Flux). Absent CRD / no releases yet is not an error.
+	if gvr, lkErr := c.LookupKind(ctx, "helmreleases"); lkErr == nil {
+		ferr := c.ForEachDynamicResources(ctx, gvr, "", func(item unstructured.Unstructured) {
+			progress.HelmReleasesTotal++
+			conds, found, _ := unstructured.NestedSlice(item.Object, "status", "conditions")
+			ready := false
+			if found {
+				for _, cond := range conds {
+					m, ok := cond.(map[string]interface{})
+					if !ok {
+						continue
+					}
+					if m["type"] == "Ready" && m["status"] == "True" {
+						ready = true
+						break
+					}
+				}
+			}
+			if ready {
+				progress.HelmReleasesReady++
+			} else {
+				progress.NotReadyReleases = append(progress.NotReadyReleases,
+					fmt.Sprintf("%s/%s", item.GetNamespace(), item.GetName()))
+			}
+		})
+		if ferr != nil {
+			log.Debug("Progress snapshot: listing HelmReleases failed (non-fatal)", "err", ferr)
+		}
+	}
+
+	// Namespaces stuck Terminating (a teardown/prune signal).
+	if nsList, nsErr := clientset.CoreV1().Namespaces().List(ctx, metav1.ListOptions{}); nsErr == nil {
+		for _, ns := range nsList.Items {
+			if ns.Status.Phase == corev1.NamespaceTerminating {
+				progress.TerminatingNamespaces = append(progress.TerminatingNamespaces, ns.Name)
+			}
+		}
+	} else {
+		log.Debug("Progress snapshot: listing namespaces failed (non-fatal)", "err", nsErr)
+	}
+
+	// Unhealthy pods: not Running/Succeeded, or stuck in a failing waiting state.
+	if pods, podErr := clientset.CoreV1().Pods("").List(ctx, metav1.ListOptions{}); podErr == nil {
+		for _, pod := range pods.Items {
+			if podUnhealthy(pod) {
+				progress.UnhealthyPods = append(progress.UnhealthyPods,
+					fmt.Sprintf("%s/%s", pod.Namespace, pod.Name))
+			}
+		}
+	} else {
+		log.Debug("Progress snapshot: listing pods failed (non-fatal)", "err", podErr)
+	}
+
+	return progress, nil
+}
+
+// podUnhealthy reports whether a pod is in a state worth surfacing to the user.
+// Pods that are terminating as part of normal node lifecycle are ignored.
+func podUnhealthy(pod corev1.Pod) bool {
+	if pod.DeletionTimestamp != nil {
+		// Terminating pods are transient churn, not an install blocker.
+		return false
+	}
+	switch pod.Status.Phase {
+	case corev1.PodSucceeded, corev1.PodRunning:
+		// Running pods can still be unhealthy if a container is wedged waiting.
+		for _, cs := range pod.Status.ContainerStatuses {
+			if cs.State.Waiting != nil && isFailingWaitReason(cs.State.Waiting.Reason) {
+				return true
+			}
+		}
+		return false
+	default:
+		// Pending pods are normal briefly; flag only failing waiting reasons.
+		for _, cs := range pod.Status.ContainerStatuses {
+			if cs.State.Waiting != nil && isFailingWaitReason(cs.State.Waiting.Reason) {
+				return true
+			}
+		}
+		for _, cs := range pod.Status.InitContainerStatuses {
+			if cs.State.Waiting != nil && isFailingWaitReason(cs.State.Waiting.Reason) {
+				return true
+			}
+		}
+		return pod.Status.Phase == corev1.PodFailed
+	}
+}
+
+// isFailingWaitReason reports whether a container waiting reason indicates a
+// genuine failure rather than normal startup churn.
+func isFailingWaitReason(reason string) bool {
+	switch reason {
+	case "CrashLoopBackOff", "ImagePullBackOff", "ErrImagePull",
+		"CreateContainerConfigError", "CreateContainerError", "InvalidImageName":
+		return true
+	default:
+		return false
+	}
+}
+
 // ReapOrphanedAdmissionWebhooks deletes Validating/MutatingWebhookConfigurations
 // whose backing Service no longer exists. Such "dangling" webhooks are a common
 // failure mode for admission controllers (e.g. Kyverno, cert-manager) that create
@@ -853,12 +991,12 @@ func (c KubernetesClient) ScrubStuckHelmReleaseSecrets(ctx context.Context) ([]s
 }
 
 type PodHealthStatus struct {
-	TotalPods     int
-	ReadyPods     int
-	CrashLooping  []string // Pod names in CrashLoopBackOff
-	ImagePullErr  []string // Pod names with ImagePullBackOff/ErrImagePull
-	InitErrors    []string // Pod names stuck in Init
-	PendingPods   []string // Pod names in Pending state
+	TotalPods    int
+	ReadyPods    int
+	CrashLooping []string // Pod names in CrashLoopBackOff
+	ImagePullErr []string // Pod names with ImagePullBackOff/ErrImagePull
+	InitErrors   []string // Pod names stuck in Init
+	PendingPods  []string // Pod names in Pending state
 }
 
 // IsHealthy returns true if no pods are in a terminal error state.
@@ -1439,9 +1577,9 @@ func (c KubernetesClient) evictAllPods(ctx context.Context, clientset kubernetes
 	}
 
 	systemNamespaces := map[string]bool{
-		"kube-system": true,
+		"kube-system":     true,
 		"kube-node-lease": true,
-		"kube-public": true,
+		"kube-public":     true,
 	}
 
 	var toEvict []corev1.Pod
