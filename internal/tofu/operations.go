@@ -20,6 +20,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"regexp"
 	"slices"
 	"strings"
 
@@ -32,6 +33,23 @@ import (
 
 	"github.com/tidwall/gjson"
 )
+
+// sensitiveVarNamePattern matches OpenTofu variable names that are likely to
+// carry secret material. It is used to redact values from debug logs even when
+// the value did not arrive via the explicitly-secret (`v.Secret`) path — e.g. a
+// token sourced from an env var or a prior stage's output. Anchored on common
+// secret-bearing substrings so it errs toward redaction.
+var sensitiveVarNamePattern = regexp.MustCompile(`(?i)(token|password|passwd|secret|private_key|client_secret|credential|api[_-]?key|access[_-]?key)`)
+
+// redactSensitiveVar returns "[REDACTED]" when the variable name suggests the
+// value is a secret, otherwise the value unchanged. This keeps debug logs
+// useful for non-sensitive plumbing while never spilling credentials.
+func redactSensitiveVar(name string, val string) string {
+	if val != "" && sensitiveVarNamePattern.MatchString(name) {
+		return "[REDACTED]"
+	}
+	return val
+}
 
 // Version retrieves the version of the OpenTofu CLI.
 // It runs the `tofu version` command and returns the version string.
@@ -374,7 +392,7 @@ func (c *TofuClient) stageVars(ctx context.Context, stage schema.StageConfig) []
 
 	for k, v := range stage.Vars {
 		if v.Value != "" {
-			log.Debug("OpenTofu literal input var", "val", v.Value)
+			log.Debug("OpenTofu literal input var", "key", k, "val", redactSensitiveVar(k, v.Value))
 			vars = append(vars, tfexec.Var(fmt.Sprintf("%s=%s", k, v.Value)))
 		} else if v.Env != "" {
 			val, found := os.LookupEnv(v.Env)
@@ -382,7 +400,7 @@ func (c *TofuClient) stageVars(ctx context.Context, stage schema.StageConfig) []
 				log.Info("Stage env input not found", "stage", stage, "env", v.Env)
 			}
 
-			log.Debug("OpenTofu env input var", "key", v.Env, "val", val)
+			log.Debug("OpenTofu env input var", "key", v.Env, "val", redactSensitiveVar(k, val))
 			vars = append(vars, tfexec.Var(fmt.Sprintf("%s=%s", k, val)))
 		} else if v.Config != "" {
 			val := c.cfg.ConfigString(v.Config)
@@ -391,7 +409,7 @@ func (c *TofuClient) stageVars(ctx context.Context, stage schema.StageConfig) []
 				continue
 			}
 
-			log.Debug("OpenTofu config var", "key", v.Config, "val", val)
+			log.Debug("OpenTofu config var", "key", v.Config, "val", redactSensitiveVar(k, val))
 			vars = append(vars, tfexec.Var(fmt.Sprintf("%s=%s", k, val)))
 		} else if v.Secret != "" {
 			val := c.cfg.SecretString(v.Secret)
@@ -421,7 +439,7 @@ func (c *TofuClient) stageVars(ctx context.Context, stage schema.StageConfig) []
 				continue
 			}
 
-			log.Debug("OpenTofu stage input var", "stage", v.Stage.Name, "output", v.Stage.Output, "key", k, "val", val)
+			log.Debug("OpenTofu stage input var", "stage", v.Stage.Name, "output", v.Stage.Output, "key", k, "val", redactSensitiveVar(k, val))
 			vars = append(vars, tfexec.Var(fmt.Sprintf("%s=%s", k, val)))
 		}
 	}
