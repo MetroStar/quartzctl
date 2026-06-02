@@ -682,7 +682,16 @@ func TfValidate(ctx context.Context, stage string, p *CommandParams) (int, error
 	client := tofu.Instance(ctx, *p.Settings())
 	s := p.Settings().Config.Stages[stage]
 	v, err := client.Validate(ctx, s)
-	return v.ErrorCount, err
+	if err != nil {
+		return 0, err
+	}
+	// tofu writes the validate result to stdout for the user; the parsed
+	// summary may be nil if the structured output could not be decoded
+	// (e.g. version preamble on the stream). Guard against a nil deref.
+	if v == nil {
+		return 0, nil
+	}
+	return v.ErrorCount, nil
 }
 
 // TfFormat runs `tofu fmt` for a specific stage.
