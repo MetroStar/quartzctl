@@ -151,8 +151,25 @@ func Install(ctx context.Context, p *CommandParams, resumeFrom string) error {
 
 	for _, s := range stages {
 		if cp.isCompleted(s.Id) {
-			util.Msgf("Stage %s already completed, skipping (use --resume-from to override)", s.Id)
-			continue
+			// A checkpointed stage is not blindly skipped. It may have drifted
+			// since it last completed (manual console edits, template/var
+			// changes, or a partial prior apply). Run a plan and only skip when
+			// the stage is genuinely in sync; otherwise re-apply so a resume
+			// converges the cluster instead of silently leaving it stale.
+			drifted, derr := stageHasDrift(ctx, s.Id, p)
+			if derr != nil {
+				// Drift detection is best-effort. If it fails (e.g. transient
+				// backend error), preserve the prior fast-resume behavior and
+				// skip rather than blocking the whole install.
+				util.Msgf("Stage %s already completed; drift check failed (%v), skipping", s.Id, derr)
+				continue
+			}
+			if !drifted {
+				util.Msgf("Stage %s already completed and in sync, skipping", s.Id)
+				continue
+			}
+			util.Msgf("Stage %s already completed but drift detected, re-applying", s.Id)
+			// Fall through to re-apply below.
 		}
 
 		err = TfInit(ctx, s.Id, p)
@@ -193,8 +210,6 @@ func stageIds(stages []schema.StageConfig) string {
 	}
 	return strings.Join(ids, ", ")
 }
-
-
 
 // Preflight validates cloud credentials and connectivity before starting the install.
 // Fails fast if IAM credentials are invalid or the cloud provider is unreachable.
@@ -356,7 +371,6 @@ func Clean(ctx context.Context, p *CommandParams) error {
 
 	return nil
 }
-
 
 // printCleanupTimingSummary outputs timing information for each phase of the cleanup.
 func printCleanupTimingSummary(stageTiming map[string]time.Duration, totalDuration time.Duration) {
@@ -586,6 +600,28 @@ func parallelDestroy(ctx context.Context, stages []schema.StageConfig, p *Comman
 	}
 
 	return errs
+}
+
+// stageHasDrift initializes the given stage and runs a plan to detect whether
+// the live infrastructure has drifted from the desired configuration. It is
+// used on resume to decide whether an already-checkpointed stage can be safely
+// skipped or must be re-applied. Returns true when the plan contains changes.
+func stageHasDrift(ctx context.Context, stage string, p *CommandParams) (bool, error) {
+	if err := TfInit(ctx, stage, p); err != nil {
+		return false, err
+	}
+
+	if err := tfStagePrep(ctx, stage, p); err != nil {
+		return false, err
+	}
+
+	client := tofu.Instance(ctx, *p.Settings())
+	s := p.Settings().Config.Stages[stage]
+	hasChanges, err := client.Plan(ctx, s)
+	if err != nil {
+		return false, err
+	}
+	return hasChanges, nil
 }
 
 // checkpoint tracks which stages have completed successfully during an install.
