@@ -43,10 +43,11 @@ var (
 func NewRootLoginCommand(p *CommandParams) RootCommandResult {
 	return RootCommandResult{
 		Command: &cli.Command{
-			Name:  "login",
-			Usage: "Generate a kubeconfig for the current cluster",
+			Name:    "login",
+			Aliases: []string{"kubeconfig", "refresh-kubeconfig"},
+			Usage:   "Generate/refresh a kubeconfig for the current cluster",
 			Flags: []cli.Flag{
-				&cli.StringFlag{Name: "out", Aliases: []string{"o"}, Usage: "output path", Value: "./out/kubeconfig"},
+				&cli.StringFlag{Name: "out", Aliases: []string{"o"}, Usage: "output path (defaults to the configured kubeconfig path when empty)", Value: "./out/kubeconfig"},
 			},
 			Action: func(ctx context.Context, ccmd *cli.Command) error {
 				path := ccmd.String("out")

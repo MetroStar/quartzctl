@@ -43,7 +43,7 @@ func TestNewRootLoginCommand(t *testing.T) {
 	cmd := NewRootLoginCommand(p).Command
 
 	assert.Equal(t, "login", cmd.Name)
-	assert.Equal(t, "Generate a kubeconfig for the current cluster", cmd.Usage)
+	assert.Equal(t, "Generate/refresh a kubeconfig for the current cluster", cmd.Usage)
 	assert.Len(t, cmd.Flags, 1)
 
 	flag := cmd.Flags[0].(*cli.StringFlag)
