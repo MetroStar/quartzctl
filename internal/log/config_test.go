@@ -86,7 +86,7 @@ func TestDefaultLogConfig_FileLogConfig(t *testing.T) {
 func TestDefaultLogConfig_TofuLogConfig(t *testing.T) {
 	assert.False(t, DefaultLogConfig.Log.Tofu.Enabled, "Default OpenTofu logging should be disabled")
 	assert.Equal(t, "log/$name.$date.tf.log", DefaultLogConfig.Log.Tofu.Path, "Default OpenTofu log path should match")
-	assert.Equal(t, "trace", DefaultLogConfig.Log.Tofu.Level, "Default OpenTofu log level should be 'trace'")
+	assert.Equal(t, "debug", DefaultLogConfig.Log.Tofu.Level, "Default OpenTofu log level should be 'debug'")
 }
 
 func TestNewLogConfig_ReturnsDefaultOnEmptyPath(t *testing.T) {

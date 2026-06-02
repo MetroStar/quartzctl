@@ -35,9 +35,9 @@ type LogConfig struct {
 
 // LogOptionsConfig contains configuration options for different logging outputs.
 type LogOptionsConfig struct {
-	Console   ConsoleLogConfig   `koanf:"console"`
-	File      FileLogConfig      `koanf:"file"`
-	Tofu TofuLogConfig `koanf:"tofu"`
+	Console ConsoleLogConfig `koanf:"console"`
+	File    FileLogConfig    `koanf:"file"`
+	Tofu    TofuLogConfig    `koanf:"tofu"`
 }
 
 // ConsoleLogConfig represents the configuration for console logging.
@@ -73,7 +73,12 @@ var DefaultLogConfig = LogConfig{
 		Tofu: TofuLogConfig{
 			Enabled: false,
 			Path:    "log/$name.$date.tf.log",
-			Level:   "trace",
+			// `debug` rather than `trace`: TRACE emits the full provider RPC and
+			// HTTP wire firehose, which has produced single-run logs of 750MB+.
+			// DEBUG keeps the actionable plan/apply/provider detail at a fraction
+			// of the size. Set to `trace` explicitly only when chasing a
+			// provider-level bug.
+			Level: "debug",
 		},
 	},
 }

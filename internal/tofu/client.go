@@ -15,6 +15,7 @@
 package tofu
 
 import (
+	"compress/gzip"
 	"context"
 	"fmt"
 	"io"
@@ -220,6 +221,11 @@ func initLog(tf TfExecLogger, cfg schema.QuartzConfig) {
 	path = strings.ReplaceAll(path, "$name", cfg.Name)
 	path = strings.ReplaceAll(path, "$date", now.Format("2006-01-02"))
 
+	// Compress and archive any pre-existing log at this path so a re-run on the
+	// same day starts fresh instead of appending without bound. Keeps each run's
+	// OpenTofu log isolated and the on-disk footprint small.
+	rotateExistingTofuLog(path)
+
 	log.Info("Configuring OpenTofu log", "path", path, "level", level)
 	if err := tf.SetLogPath(path); err != nil {
 		log.Debug("Failed to set tofu log path", "err", err)
@@ -230,4 +236,48 @@ func initLog(tf TfExecLogger, cfg schema.QuartzConfig) {
 		log.Debug("Failed to set tofu log level", "err", err)
 		return
 	}
+}
+
+// rotateExistingTofuLog compresses a pre-existing OpenTofu log file (gzip) to
+// `<path>.<unixts>.gz` and removes the original, so the next run starts with a
+// fresh, empty log. No-op when the file is absent or empty. All failures are
+// non-fatal — logging must never block an install/destroy.
+func rotateExistingTofuLog(path string) {
+	info, err := os.Stat(path)
+	if err != nil || info.Size() == 0 {
+		return
+	}
+
+	src, err := os.Open(path) // #nosec G304 -- path derived from trusted config
+	if err != nil {
+		log.Debug("Failed to open existing tofu log for rotation", "err", err)
+		return
+	}
+	defer src.Close() //nolint:errcheck
+
+	archivePath := fmt.Sprintf("%s.%d.gz", path, time.Now().Unix())
+	dst, err := os.OpenFile(archivePath, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, 0640) // #nosec G304
+	if err != nil {
+		log.Debug("Failed to create rotated tofu log archive", "err", err)
+		return
+	}
+	defer dst.Close() //nolint:errcheck
+
+	gz := gzip.NewWriter(dst)
+	if _, err := io.Copy(gz, src); err != nil { // #nosec G110 -- local trusted log file
+		log.Debug("Failed to compress rotated tofu log", "err", err)
+		_ = gz.Close()
+		return
+	}
+	if err := gz.Close(); err != nil {
+		log.Debug("Failed to finalize rotated tofu log archive", "err", err)
+		return
+	}
+
+	if err := os.Remove(path); err != nil {
+		log.Debug("Failed to remove rotated tofu log original", "err", err)
+		return
+	}
+
+	log.Debug("Rotated existing OpenTofu log", "archive", archivePath, "bytes", info.Size())
 }
