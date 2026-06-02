@@ -16,6 +16,7 @@ package cmd
 
 import (
 	"context"
+	"errors"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
@@ -138,6 +139,39 @@ func TestIsRetryableDestroyError(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			result := isRetryableDestroyError(tt.errStr)
 			assert.Equal(t, tt.expected, result, "isRetryableDestroyError(%q) = %v, want %v", tt.errStr, result, tt.expected)
+		})
+	}
+}
+
+func TestIsFluxOwnedReleaseDrift(t *testing.T) {
+	tests := []struct {
+		name     string
+		err      error
+		expected bool
+	}{
+		{
+			name:     "nil error",
+			err:      nil,
+			expected: false,
+		},
+		{
+			name: "helm provider version mismatch (Flux-owned bootstrap release)",
+			err: errors.New(`Error: Planned version is different from configured version` +
+				"\n  with helm_release.quartz,\n" +
+				`The version in the configuration is "1.0.0+df9c1f7b78c1" but the planned version is "1.0.0".`),
+			expected: true,
+		},
+		{
+			name:     "unrelated plan error",
+			err:      errors.New("Error: Backend initialization required"),
+			expected: false,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			result := isFluxOwnedReleaseDrift(tt.err)
+			assert.Equal(t, tt.expected, result)
 		})
 	}
 }

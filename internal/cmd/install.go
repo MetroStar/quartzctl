@@ -619,9 +619,33 @@ func stageHasDrift(ctx context.Context, stage string, p *CommandParams) (bool, e
 	s := p.Settings().Config.Stages[stage]
 	hasChanges, err := client.Plan(ctx, s)
 	if err != nil {
+		// The core stage bootstraps the umbrella Helm release once and then
+		// hands ownership to Flux, which re-renders the chart from git and
+		// stamps the release version with the git revision as semver build
+		// metadata (e.g. "1.0.0+<sha>"). The local bootstrap chart is bare
+		// "1.0.0", so the Helm provider can never reconcile the two: it raises
+		// "Planned version is different from configured version" at plan time.
+		// This is NOT actionable drift — Flux solely owns the release after
+		// bootstrap — so treat it as in-sync and skip rather than failing the
+		// drift check or (worse) re-applying the bootstrap render, which would
+		// prune Flux's entire rendered stack.
+		if isFluxOwnedReleaseDrift(err) {
+			log.Debug("Plan reported Flux-owned release version drift; treating stage as in sync",
+				"stage", stage, "error", err)
+			return false, nil
+		}
 		return false, err
 	}
 	return hasChanges, nil
+}
+
+// isFluxOwnedReleaseDrift reports whether a plan error is the benign Helm
+// provider version-mismatch that occurs when Terraform's bootstrap Helm release
+// has since been adopted and re-versioned by Flux. Such drift is expected and
+// must not trigger a destructive re-apply on resume.
+func isFluxOwnedReleaseDrift(err error) bool {
+	return err != nil &&
+		strings.Contains(err.Error(), "Planned version is different from configured version")
 }
 
 // checkpoint tracks which stages have completed successfully during an install.
