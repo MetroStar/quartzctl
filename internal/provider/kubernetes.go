@@ -788,8 +788,15 @@ func (c KubernetesClient) ClusterProgressSnapshot(ctx context.Context) (ClusterP
 					fmt.Sprintf("%s/%s", item.GetNamespace(), item.GetName()))
 			}
 		})
+		// Unlike a missing CRD (LookupKind failure above, which legitimately
+		// means "no releases yet" → 0/0), a failure to LIST after a successful
+		// kind lookup means the snapshot is unreliable (e.g. context canceled
+		// when the reporter is stopped mid-call, or a transient API error).
+		// Propagate it so the caller can skip emitting a misleading "0/0 ready"
+		// instead of reporting partial counts as if they were authoritative.
 		if ferr != nil {
 			log.Debug("Progress snapshot: listing HelmReleases failed (non-fatal)", "err", ferr)
+			return progress, ferr
 		}
 	}
 

@@ -763,7 +763,22 @@ func TfDestroyBackend(ctx context.Context, p *CommandParams) error {
 }
 
 // preCheck runs pre-checks for a specific stage and event.
+//
+// Stage pre-checks are the dependency gates that can block for many minutes
+// waiting on prior-stage resources to converge (e.g. waiting on the istio
+// HelmRelease and ingressgateway to become Ready before installing sonarqube).
+// We run the same background safety nets here as in postCheck — the orphaned
+// admission-webhook reaper (so a stranded failurePolicy: Fail webhook can't
+// deadlock the very resources the gate is waiting on) and the periodic cluster
+// progress reporter (so these long waits surface real readiness instead of
+// looking hung).
 func preCheck(ctx context.Context, stage string, event string, p *CommandParams) error {
+	stopReaper := startWebhookReaper(ctx, p)
+	defer stopReaper()
+
+	stopProgress := startProgressReporter(ctx, p)
+	defer stopProgress()
+
 	_, err := stages.RunPreChecks(ctx, p.Settings().Config, *p.Provider(), stage, event, checkOpts)
 	return err
 }
@@ -872,8 +887,12 @@ func startProgressReporter(ctx context.Context, p *CommandParams) func() {
 		var lastSummary string
 		report := func() {
 			snap, sErr := kube.ClusterProgressSnapshot(reportCtx)
-			if sErr != nil {
-				log.Debug("Progress reporter snapshot failed (non-fatal)", "err", sErr)
+			// Skip emitting when the snapshot is unreliable: an explicit error,
+			// or a canceled context (the reporter is being stopped, e.g. a stage
+			// that skipped/completed in milliseconds). Emitting here would print
+			// a misleading "0/0 ready" from a half-collected snapshot.
+			if sErr != nil || reportCtx.Err() != nil {
+				log.Debug("Progress reporter snapshot unavailable (non-fatal)", "err", sErr)
 				return
 			}
 			summary := snap.Summary()
