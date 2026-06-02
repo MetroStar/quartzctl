@@ -16,6 +16,7 @@ package cmd
 
 import (
 	"context"
+	"fmt"
 	"slices"
 	"strings"
 	"time"
@@ -251,6 +252,86 @@ func NewTfRefreshAllCommand(p *CommandParams) TfCommandResult {
 					}
 				}
 				return TfRefreshAll(ctx, p)
+			},
+		},
+	}
+}
+
+// NewTfImportCommand creates a CLI command for running `tofu import` on a specific stage.
+// This brings an existing infrastructure object under OpenTofu management, which is
+// useful for reconciling state after an interrupted apply left a real resource created
+// but unrecorded (e.g. an EKS OIDC association that succeeded just before the process died).
+func NewTfImportCommand(p *CommandParams) TfCommandResult {
+	return TfCommandResult{
+		Command: &cli.Command{
+			Name:      "import",
+			Usage:     "Run `tofu import` for a specific stage",
+			ArgsUsage: "ADDRESS ID",
+			Flags: []cli.Flag{
+				&cli.StringFlag{Name: "stage", Aliases: []string{"s"}, Usage: "Stage name", Required: true},
+				&cli.StringFlag{Name: "address", Aliases: []string{"a"}, Usage: "Resource address to import into (e.g. aws_eks_identity_provider_config.keycloak)"},
+				&cli.StringFlag{Name: "id", Usage: "Real-world ID of the resource to import"},
+				&cli.BoolFlag{Name: "init", Aliases: []string{"i"}, Usage: "Run `tofu init` before importing", Required: false},
+			},
+			Action: func(ctx context.Context, ccmd *cli.Command) error {
+				stage := ccmd.String("stage")
+
+				// Accept the resource address and ID either as flags or as the
+				// two positional args, matching the ergonomics of native `tofu import`.
+				address := ccmd.String("address")
+				id := ccmd.String("id")
+				if address == "" && ccmd.Args().Len() > 0 {
+					address = ccmd.Args().Get(0)
+				}
+				if id == "" && ccmd.Args().Len() > 1 {
+					id = ccmd.Args().Get(1)
+				}
+				if address == "" || id == "" {
+					return fmt.Errorf("import requires a resource address and ID (use --address/--id or positional ADDRESS ID)")
+				}
+
+				if ccmd.Bool("init") {
+					if err := TfInit(ctx, stage, p); err != nil {
+						return err
+					}
+				}
+				return TfImport(ctx, stage, address, id, p)
+			},
+		},
+	}
+}
+
+// NewTfForceUnlockCommand creates a CLI command for running `tofu force-unlock` on a specific stage.
+// This releases a stale state lock left behind by an interrupted run so that subsequent
+// operations can proceed without manually editing the backend lock table.
+func NewTfForceUnlockCommand(p *CommandParams) TfCommandResult {
+	return TfCommandResult{
+		Command: &cli.Command{
+			Name:      "force-unlock",
+			Usage:     "Run `tofu force-unlock` for a specific stage",
+			ArgsUsage: "LOCK_ID",
+			Flags: []cli.Flag{
+				&cli.StringFlag{Name: "stage", Aliases: []string{"s"}, Usage: "Stage name", Required: true},
+				&cli.StringFlag{Name: "lock-id", Aliases: []string{"l"}, Usage: "Lock ID to release"},
+				&cli.BoolFlag{Name: "init", Aliases: []string{"i"}, Usage: "Run `tofu init` before unlocking", Required: false},
+			},
+			Action: func(ctx context.Context, ccmd *cli.Command) error {
+				stage := ccmd.String("stage")
+
+				lockID := ccmd.String("lock-id")
+				if lockID == "" && ccmd.Args().Len() > 0 {
+					lockID = ccmd.Args().Get(0)
+				}
+				if lockID == "" {
+					return fmt.Errorf("force-unlock requires a lock ID (use --lock-id or positional LOCK_ID)")
+				}
+
+				if ccmd.Bool("init") {
+					if err := TfInit(ctx, stage, p); err != nil {
+						return err
+					}
+				}
+				return TfForceUnlock(ctx, stage, lockID, p)
 			},
 		},
 	}
@@ -527,6 +608,48 @@ func TfRefreshWithUnlock(ctx context.Context, stage string, p *CommandParams) er
 
 	log.Info("Error refreshing tofu", "stage", s.Id, "err", err)
 	return err
+}
+
+// TfImport runs `tofu import` for a specific stage, associating the resource at
+// the given configuration address with its real-world ID.
+func TfImport(ctx context.Context, stage string, address string, id string, p *CommandParams) error {
+	log.Debug("Entering", "command", "tf:import", "stage", stage, "address", address, "id", id)
+	defer log.Debug("Completed", "command", "tf:import", "stage", stage)
+
+	util.Hdrf("Import %s", stage)
+
+	client := tofu.Instance(ctx, *p.Settings())
+	if err := tfStagePrep(ctx, stage, p); err != nil {
+		return err
+	}
+
+	s := p.Settings().Config.Stages[stage]
+	if err := client.Import(ctx, s, address, id); err != nil {
+		return err
+	}
+	util.Msgf("Imported %s as %s into stage %s", id, address, stage)
+	return nil
+}
+
+// TfForceUnlock runs `tofu force-unlock` for a specific stage, releasing a stale
+// state lock left behind by an interrupted run.
+func TfForceUnlock(ctx context.Context, stage string, lockID string, p *CommandParams) error {
+	log.Debug("Entering", "command", "tf:forceUnlock", "stage", stage, "lockID", lockID)
+	defer log.Debug("Completed", "command", "tf:forceUnlock", "stage", stage)
+
+	util.Hdrf("Force-unlock %s", stage)
+
+	client := tofu.Instance(ctx, *p.Settings())
+	if err := tfStagePrep(ctx, stage, p); err != nil {
+		return err
+	}
+
+	s := p.Settings().Config.Stages[stage]
+	if err := client.ForceUnlock(ctx, s, lockID); err != nil {
+		return err
+	}
+	util.Msgf("Released state lock %s for stage %s", lockID, stage)
+	return nil
 }
 
 // TfRefreshAll runs `tofu refresh` for all stages.

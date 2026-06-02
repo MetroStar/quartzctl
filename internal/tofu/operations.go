@@ -307,6 +307,30 @@ func (c *TofuClient) ForceUnlock(ctx context.Context, stage schema.StageConfig, 
 	return tf.ForceUnlock(ctx, lockID)
 }
 
+// Import brings an existing infrastructure object under OpenTofu management by
+// associating the resource at the given configuration address with its real-world
+// ID. It runs `tofu import <address> <id>` for the specified stage, applying the
+// same stage input variables used by plan/apply so that any provider/config
+// interpolation resolves identically.
+func (c *TofuClient) Import(ctx context.Context, stage schema.StageConfig, address string, id string) error {
+	log.Info("tofu import", "stage", stage.Id, "address", address, "id", id)
+	tf, err := c.getTf(stage.Path)
+	if err != nil {
+		return err
+	}
+
+	var opts []tfexec.ImportOption
+	for _, v := range c.stageVars(ctx, stage) {
+		opts = append(opts, v)
+	}
+	if !stage.OverrideVars {
+		opts = append(opts, tfexec.VarFile(c.cfg.Config.TfVarFilePath()))
+	}
+
+	c.setStageEnv(tf, stage)
+	return tf.Import(ctx, address, id, opts...)
+}
+
 // StateClear removes all resources from the state for a service-dependent stage
 // whose provider endpoint is unreachable. This allows clean to proceed without
 // needing to contact the dead service.
@@ -357,24 +381,35 @@ func (c *TofuClient) StateClear(ctx context.Context, stage schema.StageConfig) e
 	return nil
 }
 
-// ExtractLockID extracts the lock ID from a state lock error message.
+// lockInfoIDPattern matches the "ID:" field of the OpenTofu "Lock Info:" block.
+// It is anchored to the start of a line (after optional leading whitespace) so it
+// does NOT match unrelated fields that merely end in "ID:" — most importantly the
+// AWS DynamoDB "RequestID:" that appears earlier in a ConditionalCheckFailed error.
+// Matching that request ID by accident would cause force-unlock to use the wrong
+// ID and fail with "does not match existing lock", silently defeating recovery.
+var lockInfoIDPattern = regexp.MustCompile(`(?m)^[ \t]*ID:[ \t]+(\S+)`)
+
+// ExtractLockID extracts the OpenTofu state lock ID from a lock error message.
 // Returns the lock ID and true if found, or empty string and false if not.
+//
+// The canonical lock error embeds the ID in a "Lock Info:" block:
+//
+//	Error: Error acquiring the state lock
+//	...
+//	Lock Info:
+//	  ID:        54802a0b-4db5-819a-4f02-2827bdcf02ba
+//	  Path:      ...
+//
+// We must extract the value from that "ID:" line specifically. A naive
+// substring search for "ID:" matches "RequestID:" in the AWS error preamble
+// first and returns the request ID instead of the lock ID.
 func ExtractLockID(errMsg string) (string, bool) {
-	// Lock errors contain "ID:" followed by the lock ID
-	const marker = "ID:"
-	idx := strings.Index(errMsg, marker)
-	if idx < 0 {
+	m := lockInfoIDPattern.FindStringSubmatch(errMsg)
+	if m == nil {
 		return "", false
 	}
-	rest := errMsg[idx+len(marker):]
-	// Trim leading whitespace
-	rest = strings.TrimSpace(rest)
-	// Lock ID ends at newline or whitespace
-	end := strings.IndexAny(rest, " \t\n\r")
-	if end < 0 {
-		end = len(rest)
-	}
-	lockID := rest[:end]
+	// Strip trailing punctuation (e.g. a trailing comma) that may follow the ID.
+	lockID := strings.Trim(m[1], ",.;\"")
 	if lockID == "" {
 		return "", false
 	}
