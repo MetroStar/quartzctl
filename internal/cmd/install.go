@@ -301,7 +301,17 @@ func Clean(ctx context.Context, p *CommandParams) error {
 		}
 		err = TfRefreshWithUnlock(ctx, s.Id, p)
 		if err != nil {
-			log.Warn("Refresh failed for stage", "stage", s.Id, "error", err)
+			// The umbrella Helm release is version-stamped by Flux ("1.0.0+<sha>")
+			// once it adopts the bootstrap release, so a pre-destroy refresh of
+			// the core stage surfaces the benign Helm provider "Planned version
+			// is different from configured version" mismatch. The subsequent
+			// destroy runs with Refresh(false) and is unaffected, so this is
+			// cosmetic — demote it to debug to avoid alarming clean output.
+			if isFluxOwnedReleaseDrift(err) {
+				log.Debug("Refresh reported benign Flux-owned release version drift, continuing", "stage", s.Id, "error", err)
+			} else {
+				log.Warn("Refresh failed for stage", "stage", s.Id, "error", err)
+			}
 		}
 	}
 	stageTiming["init-refresh"] = time.Since(initStart)
