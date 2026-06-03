@@ -40,10 +40,13 @@ func TestNewRootCleanCommand(t *testing.T) {
 
 	assert.Equal(t, "clean", cmd.Name)
 	assert.Equal(t, "Perform a full cleanup/teardown of the system", cmd.Usage)
-	assert.Len(t, cmd.Flags, 1)
+	assert.Len(t, cmd.Flags, 2)
 
 	flag := cmd.Flags[0].(*cli.BoolFlag)
 	assert.Equal(t, "refresh", flag.Name)
+
+	yesFlag := cmd.Flags[1].(*cli.BoolFlag)
+	assert.Equal(t, "yes", yesFlag.Name)
 
 	err := cmd.Action(context.Background(), &cli.Command{})
 	assert.NoError(t, err)

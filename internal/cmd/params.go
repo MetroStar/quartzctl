@@ -38,6 +38,7 @@ type CommandParams struct {
 	secretsFile   string
 	startTime     time.Time
 	allowDeferral bool
+	assumeYes     bool
 
 	settings *config.Settings
 	provider *provider.ProviderFactory

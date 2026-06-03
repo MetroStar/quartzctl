@@ -47,11 +47,13 @@ func NewRootInstallCommand(p *CommandParams) RootCommandResult {
 			Flags: []cli.Flag{
 				&cli.StringFlag{Name: "resume-from", Aliases: []string{"r"}, Usage: "Resume installation from a specific stage ID (skips earlier stages)"},
 				&cli.BoolFlag{Name: "allow-deferral", Usage: "Enable OpenTofu deferred actions for resources that cannot be fully resolved in one pass"},
+				&cli.BoolFlag{Name: "yes", Aliases: []string{"y"}, Usage: "Skip the interactive confirmation prompt (assume yes)"},
 			},
 			Action: func(ctx context.Context, ccmd *cli.Command) error {
 				resumeFrom := ccmd.String("resume-from")
 				allowDeferral := ccmd.Bool("allow-deferral")
 				p.allowDeferral = allowDeferral
+				p.assumeYes = ccmd.Bool("yes")
 				err := Install(ctx, p, resumeFrom)
 				if err != nil {
 					return err
@@ -78,8 +80,10 @@ func NewRootCleanCommand(p *CommandParams) RootCommandResult {
 			Usage: "Perform a full cleanup/teardown of the system",
 			Flags: []cli.Flag{
 				&cli.BoolFlag{Name: "refresh", Aliases: []string{"r"}, Usage: "refresh (always enabled)", Value: true},
+				&cli.BoolFlag{Name: "yes", Aliases: []string{"y"}, Usage: "Skip the interactive confirmation prompt (assume yes)"},
 			},
 			Action: func(ctx context.Context, ccmd *cli.Command) error {
+				p.assumeYes = ccmd.Bool("yes")
 				err := Clean(ctx, p)
 				if err != nil {
 					return err

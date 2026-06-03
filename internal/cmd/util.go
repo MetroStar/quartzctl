@@ -255,6 +255,16 @@ func ClusterLogin(ctx context.Context, path string, p *CommandParams) error {
 
 	k8sClient, err := p.Provider().Kubernetes(ctx)
 	if err != nil {
+		// If the cluster no longer exists (e.g. a re-run of clean after the
+		// EKS cluster has already been destroyed), there is nothing to log
+		// into and no in-cluster (kubernetes/helm) resources left to manage.
+		// Treat this like the kubeconfig-write failure below and continue,
+		// so a service-dependent stage's destroy isn't blocked by a 404 from
+		// DescribeCluster and the state backend teardown can proceed.
+		if isClusterNotFoundError(err) {
+			util.Msgf("Cluster not found, skipping kubeconfig generation: %v", err)
+			return nil
+		}
 		return err
 	}
 
@@ -270,6 +280,31 @@ func ClusterLogin(ctx context.Context, path string, p *CommandParams) error {
 
 	util.Msgf("Kubeconfig written to %s", path)
 	return nil
+}
+
+// isClusterNotFoundError reports whether err indicates the target EKS cluster
+// no longer exists. This distinguishes a permanently-absent cluster (safe to
+// ignore when generating a kubeconfig) from a transient connectivity failure
+// (which should still surface). The EKS DescribeCluster API returns a 404 with
+// a ResourceNotFoundException ("No cluster found for name: ...") when the
+// cluster has been deleted.
+func isClusterNotFoundError(err error) bool {
+	if err == nil {
+		return false
+	}
+
+	errStr := err.Error()
+	notFoundPatterns := []string{
+		"ResourceNotFoundException",
+		"No cluster found",
+		"StatusCode: 404",
+	}
+	for _, pattern := range notFoundPatterns {
+		if strings.Contains(errStr, pattern) {
+			return true
+		}
+	}
+	return false
 }
 
 // Check verifies the dependencies required for Quartz installation.
@@ -359,6 +394,11 @@ func Confirm(ctx context.Context, msg string, p *CommandParams) error {
 	}
 
 	util.Msgf("Domain: %s\n", p.Settings().Config.Dns.Domain)
+
+	if p.assumeYes {
+		util.Msg("Confirmation prompt skipped (--yes)")
+		return nil
+	}
 
 	if r := util.PromptYesNo(msg); !r {
 		return fmt.Errorf("aborting")

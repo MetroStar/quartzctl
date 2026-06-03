@@ -17,6 +17,7 @@ package cmd
 import (
 	"bytes"
 	"context"
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -210,6 +211,28 @@ func TestCmdClusterLogin(t *testing.T) {
 	}
 }
 
+func TestIsClusterNotFoundError(t *testing.T) {
+	tests := []struct {
+		name string
+		err  error
+		want bool
+	}{
+		{"nil", nil, false},
+		{"resource not found", errors.New("operation error EKS: DescribeCluster, ResourceNotFoundException: No cluster found for name: foo"), true},
+		{"no cluster found", errors.New("No cluster found for name: foo"), true},
+		{"status 404", errors.New("https response error StatusCode: 404, request id: abc"), true},
+		{"transient connectivity", errors.New("dial tcp: i/o timeout"), false},
+		{"unrelated", errors.New("some other error"), false},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := isClusterNotFoundError(tt.err); got != tt.want {
+				t.Errorf("isClusterNotFoundError(%v) = %v, want %v", tt.err, got, tt.want)
+			}
+		})
+	}
+}
+
 func TestCmdCheck(t *testing.T) {
 	p := defaultTestConfig(t)
 	Check(context.Background(), p)
@@ -243,6 +266,16 @@ func TestCmdConfirm(t *testing.T) {
 	err := Confirm(context.Background(), "Are you sure you want to run this test?", p)
 	if err != nil {
 		t.Errorf("unexpected error in cmd Confirm, %v", err)
+	}
+}
+
+func TestCmdConfirmAssumeYes(t *testing.T) {
+	p := defaultTestConfig(t)
+	p.assumeYes = true
+
+	err := Confirm(context.Background(), "Are you sure you want to run this test?", p)
+	if err != nil {
+		t.Errorf("unexpected error in cmd Confirm with assumeYes, %v", err)
 	}
 }
 
