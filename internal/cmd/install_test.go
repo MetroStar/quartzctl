@@ -17,6 +17,7 @@ package cmd
 import (
 	"context"
 	"errors"
+	"fmt"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
@@ -142,6 +143,70 @@ func TestIsRetryableDestroyError(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			result := isRetryableDestroyError(tt.errStr)
 			assert.Equal(t, tt.expected, result, "isRetryableDestroyError(%q) = %v, want %v", tt.errStr, result, tt.expected)
+		})
+	}
+}
+
+func TestIsClusterUnreachableError(t *testing.T) {
+	tests := []struct {
+		name     string
+		errStr   string
+		expected bool
+	}{
+		{name: "resource not found", errStr: "Error: ResourceNotFoundException: No cluster found", expected: true},
+		{name: "no cluster found", errStr: "No cluster found for name pa-1", expected: true},
+		{name: "discovery client", errStr: "cannot create discovery client", expected: true},
+		{name: "rest mapper", errStr: "Failed to get RESTMapper client", expected: true},
+		{name: "config path", errStr: "provider config_path is set but file is missing", expected: true},
+		{name: "cluster unreachable", errStr: "Kubernetes cluster unreachable: timeout", expected: true},
+		{name: "could not find resource", errStr: "the server could not find the requested resource", expected: true},
+		{name: "unrelated", errStr: "DependencyViolation: in use", expected: false},
+		{name: "empty", errStr: "", expected: false},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			assert.Equal(t, tt.expected, isClusterUnreachableError(tt.errStr))
+		})
+	}
+}
+
+func TestIsHelmReleaseRecordError(t *testing.T) {
+	tests := []struct {
+		name     string
+		errStr   string
+		expected bool
+	}{
+		{name: "failed to delete release", errStr: "Error: failed to delete release: cilium", expected: true},
+		{name: "unable to uninstall", errStr: "Unable to uninstall Helm release foo", expected: true},
+		{name: "unrelated", errStr: "DependencyViolation: in use", expected: false},
+		{name: "empty", errStr: "", expected: false},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			assert.Equal(t, tt.expected, isHelmReleaseRecordError(tt.errStr))
+		})
+	}
+}
+
+func TestSplitStageError(t *testing.T) {
+	tests := []struct {
+		name      string
+		err       error
+		wantStage string
+		wantMsg   string
+	}{
+		{name: "stage prefixed", err: fmt.Errorf("stage prereqs: No cluster found"), wantStage: "prereqs", wantMsg: "No cluster found"},
+		{name: "no stage prefix", err: fmt.Errorf("cleanup: boom"), wantStage: "", wantMsg: "cleanup: boom"},
+		{name: "stage word but no colon", err: fmt.Errorf("stage failure"), wantStage: "", wantMsg: "stage failure"},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			stage, msg := splitStageError(tt.err)
+			assert.Equal(t, tt.wantStage, stage)
+			assert.Equal(t, tt.wantMsg, msg)
 		})
 	}
 }

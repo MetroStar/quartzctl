@@ -84,10 +84,10 @@ quartz [command] [flags]
 ### Available Commands
 
 - `check`: Check environment, configuration and access for installer prerequisites.
-- `clean`: Perform a full cleanup/teardown of the system.
+- `clean`: Perform a full cleanup/teardown of the system. Pass `--yes`/`-y` to skip the confirmation prompt (useful for CI). The destroy flow is self-healing: if the cluster is already gone it clears orphaned in-cluster (Helm/Kubernetes) state and continues destroying the remaining cloud resources.
 - `export`: Export configured Kubernetes resources to yaml.
 - `info`: Output configuration info for the current cluster.
-- `install`: Perform a full install/update of the system.
+- `install`: Perform a full install/update of the system. Pass `--yes`/`-y` to skip confirmation prompts.
 - `login`: Generate a kubeconfig for the current cluster.
 - `refresh-secrets`: Trigger all external secrets to be refreshed immediately.
 - `render`: Write internal configuration to yaml (For development use).
@@ -113,6 +113,10 @@ quartz [command] [flags]
 - `--secrets`: Path to a YAML file containing secrets as an alternative to environment variables. For development use only (Optional).
 - `--help`: Shows a list of commands or help for one command.
 - `--version`: Print the version and build time.
+
+### Environment Variables
+
+- `SILENT`: When set, all confirmation prompts are auto-confirmed (equivalent to passing `--yes`). Intended for non-interactive/CI use.
 
 ### Example
 

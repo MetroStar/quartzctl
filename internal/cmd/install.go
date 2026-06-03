@@ -303,6 +303,15 @@ func Clean(ctx context.Context, p *CommandParams) error {
 		if err != nil {
 			log.Warn("Init failed for stage, will attempt destroy anyway", "stage", s.Id, "error", err)
 		}
+
+		// Skip the pre-destroy refresh for stages with empty state: there is
+		// nothing to reconcile, and refreshing a service-dependent stage whose
+		// cluster is already gone only produces noisy provider-config errors.
+		if stageStateEmpty(ctx, s.Id, p) {
+			log.Debug("Stage state empty, skipping pre-destroy refresh", "stage", s.Id)
+			continue
+		}
+
 		err = TfRefreshWithUnlock(ctx, s.Id, p)
 		if err != nil {
 			// The umbrella Helm release is version-stamped by Flux ("1.0.0+<sha>")
@@ -396,14 +405,56 @@ func Clean(ctx context.Context, p *CommandParams) error {
 	printCleanupTimingSummary(stageTiming, time.Since(cleanupStart))
 
 	if len(destroyErrors) > 0 {
-		util.Hdr("Destroy Errors")
-		for _, e := range destroyErrors {
-			util.Msgf("  ✗ %v", e)
-		}
+		printDestroyErrors(destroyErrors)
 		return fmt.Errorf("%d stage(s) failed to destroy cleanly", len(destroyErrors))
 	}
 
 	return nil
+}
+
+// printDestroyErrors renders the destroy-error summary, collapsing identical
+// root-cause messages across stages into a single line. During teardown the
+// same failure (most often the EKS "No cluster found" 404) commonly surfaces on
+// several stages at once; listing it once with the affected stages is far
+// easier to read than N verbatim repetitions.
+func printDestroyErrors(errs []error) {
+	util.Hdr("Destroy Errors")
+
+	order := make([]string, 0, len(errs))
+	stagesByMsg := make(map[string][]string)
+	for _, e := range errs {
+		stage, msg := splitStageError(e)
+		if _, seen := stagesByMsg[msg]; !seen {
+			order = append(order, msg)
+		}
+		if stage != "" {
+			stagesByMsg[msg] = append(stagesByMsg[msg], stage)
+		}
+	}
+
+	for _, msg := range order {
+		stageList := stagesByMsg[msg]
+		if len(stageList) > 1 {
+			util.Msgf("  ✗ [%s] %s", strings.Join(stageList, ", "), msg)
+		} else if len(stageList) == 1 {
+			util.Msgf("  ✗ [%s] %s", stageList[0], msg)
+		} else {
+			util.Msgf("  ✗ %s", msg)
+		}
+	}
+}
+
+// splitStageError separates a "stage <id>: <message>" error into its stage id
+// and underlying message so identical messages can be grouped. Errors not in
+// that form are returned with an empty stage id and the full message.
+func splitStageError(e error) (string, string) {
+	s := e.Error()
+	if rest, ok := strings.CutPrefix(s, "stage "); ok {
+		if idx := strings.Index(rest, ": "); idx > 0 {
+			return rest[:idx], rest[idx+2:]
+		}
+	}
+	return "", s
 }
 
 // printCleanupTimingSummary outputs timing information for each phase of the cleanup.
@@ -451,6 +502,29 @@ func TfDestroyWithRetry(ctx context.Context, stage string, p *CommandParams, max
 			recoverStaleLock(ctx, stage, p, errStr)
 		}
 
+		// Self-heal orphaned in-cluster state: when the destroy fails because the
+		// Kubernetes/Helm provider can't reach the cluster, OR because Helm could
+		// not delete its own release record, the backing objects are already gone
+		// (they vanished with the cluster / were deprovisioned by the pre-delete
+		// hook). If the cluster is confirmed absent, drop just those orphaned
+		// in-cluster resources from state and retry so the stage — and ultimately
+		// the state backend teardown — can complete. AWS resources are untouched.
+		if (isClusterUnreachableError(errStr) || isHelmReleaseRecordError(errStr)) && clusterAbsent(ctx, p) {
+			removed, clearErr := clearOrphanedClusterState(ctx, stage, p)
+			if clearErr != nil {
+				log.Warn("Failed to clear orphaned in-cluster state", "stage", stage, "error", clearErr)
+			} else if removed > 0 {
+				util.Msgf("Cluster absent — removed %d orphaned in-cluster resource(s) from stage %s state, retrying destroy", removed, stage)
+				// Retry immediately; the remaining (cloud) resources can destroy.
+				if retryErr := TfDestroy(ctx, stage, p); retryErr == nil {
+					return nil
+				} else {
+					lastErr = retryErr
+					errStr = retryErr.Error()
+				}
+			}
+		}
+
 		// Check if this is a retryable error
 		if !isRetryableDestroyError(errStr) {
 			log.Warn("Non-retryable error during destroy", "stage", stage, "error", lastErr)
@@ -485,6 +559,92 @@ func isRetryableDestroyError(errStr string) bool {
 		}
 	}
 	return false
+}
+
+// isClusterUnreachableError reports whether a destroy/refresh error stems from
+// the Kubernetes/Helm providers being unable to reach the cluster's API server.
+// This is distinct from a retryable transient (handled by isRetryableDestroyError):
+// when the cluster is permanently gone these never succeed on retry, so the
+// orphaned in-cluster state must be cleared instead. The patterns cover the
+// EKS data-source lookup 404, the kubernetes provider config_path failure, and
+// the discovery-client/RESTMapper failures observed during teardown.
+func isClusterUnreachableError(errStr string) bool {
+	unreachablePatterns := []string{
+		"ResourceNotFoundException",
+		"No cluster found",
+		"couldn't find resource",          // data.aws_eks_cluster lookup miss
+		"cannot create discovery client",  // kubernetes provider, no client config
+		"Failed to get RESTMapper client", // kubernetes_resource data source
+		"config_path",                     // provider "kubernetes" {} invalid kubeconfig path
+		"Kubernetes cluster unreachable",
+		"the server could not find the requested resource",
+	}
+	for _, pattern := range unreachablePatterns {
+		if len(errStr) > 0 && strings.Contains(errStr, pattern) {
+			return true
+		}
+	}
+	return false
+}
+
+// isHelmReleaseRecordError reports whether a destroy error is the Helm
+// "release record" deletion failure — the pre-delete hook already deprovisioned
+// the backing cloud/in-cluster objects, but Helm could not delete its own
+// release bookkeeping (e.g. a stuck finalizer on an orphaned CRD). The managed
+// infrastructure is already gone, so the remedy is to drop the stuck
+// helm_release from state rather than fail the whole teardown.
+func isHelmReleaseRecordError(errStr string) bool {
+	recordPatterns := []string{
+		"failed to delete release",
+		"Unable to uninstall Helm release",
+	}
+	for _, pattern := range recordPatterns {
+		if len(errStr) > 0 && strings.Contains(errStr, pattern) {
+			return true
+		}
+	}
+	return false
+}
+
+// clusterAbsent reports whether the target EKS cluster is confirmed gone. It is
+// used to gate destructive state surgery (dropping orphaned in-cluster resources)
+// so we only do so when the cluster genuinely no longer exists — never on a
+// transient connectivity blip. A nil error (cluster reachable) or any non
+// "not found" error returns false.
+func clusterAbsent(ctx context.Context, p *CommandParams) bool {
+	_, err := p.Provider().Kubernetes(ctx)
+	if err == nil {
+		return false
+	}
+	return isClusterNotFoundError(err)
+}
+
+// clearOrphanedClusterState drops the in-cluster (Helm/Kubernetes) MANAGED
+// resources from a stage's state so a subsequent destroy can complete. It is a
+// no-op returning (0, nil) when there is nothing to clear. AWS-provider
+// resources in the stage are preserved for normal destruction.
+func clearOrphanedClusterState(ctx context.Context, stage string, p *CommandParams) (int, error) {
+	client := tofu.Instance(ctx, *p.Settings())
+	s := p.Settings().Config.Stages[stage]
+	return client.StateRemoveOrphanedClusterResources(ctx, s)
+}
+
+// stageStateEmpty reports whether a stage's state has no resource instances
+// recorded (the structured equivalent of an empty `tofu state list`). It is used
+// to skip the pre-destroy refresh for stages with nothing to refresh — which
+// both saves time and, more importantly, avoids noisy provider-config errors
+// (e.g. the kubernetes provider failing on a missing kubeconfig) for stages that
+// have no objects to reconcile. On any read error it returns false so the caller
+// falls back to the normal refresh path.
+func stageStateEmpty(ctx context.Context, stage string, p *CommandParams) bool {
+	client := tofu.Instance(ctx, *p.Settings())
+	s := p.Settings().Config.Stages[stage]
+	addrs, err := client.StateList(ctx, s)
+	if err != nil {
+		log.Debug("Could not determine if stage state is empty, assuming non-empty", "stage", stage, "error", err)
+		return false
+	}
+	return len(addrs) == 0
 }
 
 // TfApplyWithRetry attempts to apply a stage with retry logic for transient failures.

@@ -204,3 +204,27 @@ func TestCollectStateAddresses(t *testing.T) {
 		}
 	})
 }
+
+func TestIsClusterResidentType(t *testing.T) {
+	tests := []struct {
+		resourceType string
+		want         bool
+	}{
+		{"helm_release", true},
+		{"kubernetes_namespace_v1", true},
+		{"kubectl_manifest", true},
+		{"aws_iam_role", false},
+		{"aws_kms_key", false},
+		{"random_password", false},
+		{"", false},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.resourceType, func(t *testing.T) {
+			if got := isClusterResidentType(tt.resourceType); got != tt.want {
+				t.Fatalf("isClusterResidentType(%q) = %v, want %v", tt.resourceType, got, tt.want)
+			}
+		})
+	}
+}
+

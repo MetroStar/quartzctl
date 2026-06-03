@@ -388,6 +388,90 @@ func (c *TofuClient) StateClear(ctx context.Context, stage schema.StageConfig) e
 	return nil
 }
 
+// clusterResidentTypePrefixes enumerates the OpenTofu resource type prefixes
+// whose objects live INSIDE the Kubernetes cluster (and therefore vanish when
+// the cluster itself is destroyed). They are safe to drop from state once the
+// cluster is confirmed absent — unlike AWS-provider resources in the same stage
+// (IAM roles, KMS keys, secrets) which must still be destroyed normally.
+var clusterResidentTypePrefixes = []string{
+	"helm_release",
+	"kubernetes_",
+	"kubectl_",
+}
+
+// isClusterResidentType reports whether a resource type refers to an in-cluster
+// object managed via the Kubernetes/Helm providers.
+func isClusterResidentType(resourceType string) bool {
+	for _, p := range clusterResidentTypePrefixes {
+		if strings.HasPrefix(resourceType, p) {
+			return true
+		}
+	}
+	return false
+}
+
+// StateRemoveOrphanedClusterResources removes only the in-cluster (Helm/Kubernetes)
+// MANAGED resources from a stage's state, leaving AWS-provider resources intact.
+//
+// This is the safe, surgical counterpart to StateClear for mixed stages (e.g.
+// prereqs, core) that hold both cloud and in-cluster resources. When the EKS
+// cluster has already been destroyed, its in-cluster objects are gone but remain
+// recorded in state; OpenTofu can neither refresh nor destroy them because the
+// Kubernetes/Helm providers can no longer reach an API server. Dropping just
+// those orphaned records lets the remaining cloud resources destroy normally and
+// unblocks state backend teardown — without ever orphaning real AWS resources.
+//
+// It returns the number of resources removed. Data sources are never touched.
+func (c *TofuClient) StateRemoveOrphanedClusterResources(ctx context.Context, stage schema.StageConfig) (int, error) {
+	log.Info("Removing orphaned in-cluster resources from state", "stage", stage.Id)
+	state, err := c.showState(ctx, stage)
+	if err != nil {
+		return 0, err
+	}
+
+	var addresses []string
+	var walk func(mod *tfjson.StateModule)
+	walk = func(mod *tfjson.StateModule) {
+		if mod == nil {
+			return
+		}
+		for _, res := range mod.Resources {
+			if res.Mode == tfjson.ManagedResourceMode && isClusterResidentType(res.Type) {
+				addresses = append(addresses, res.Address)
+			}
+		}
+		for _, child := range mod.ChildModules {
+			walk(child)
+		}
+	}
+	if state != nil && state.Values != nil {
+		walk(state.Values.RootModule)
+	}
+
+	if len(addresses) == 0 {
+		log.Info("No orphaned in-cluster resources in state", "stage", stage.Id)
+		return 0, nil
+	}
+
+	tf, err := c.getTf(stage.Path)
+	if err != nil {
+		return 0, err
+	}
+	c.setStageEnv(tf, stage)
+
+	removed := 0
+	for _, addr := range addresses {
+		if err := tf.StateRm(ctx, addr); err != nil {
+			log.Warn("Failed to remove orphaned resource from state (may already be gone)", "stage", stage.Id, "address", addr, "error", err)
+			continue
+		}
+		log.Warn("Removed orphaned in-cluster resource from state", "stage", stage.Id, "address", addr)
+		removed++
+	}
+	return removed, nil
+}
+
+
 // StateResourceView is a redacted, presentation-friendly snapshot of a single
 // resource instance recorded in the OpenTofu state. Sensitive attribute values
 // are replaced with a redaction marker so the view can be safely printed to a
