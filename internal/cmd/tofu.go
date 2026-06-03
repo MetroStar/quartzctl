@@ -17,6 +17,7 @@ package cmd
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"os"
 	"slices"
@@ -1067,7 +1068,12 @@ func startProgressReporter(ctx context.Context, p *CommandParams) func() {
 			// that skipped/completed in milliseconds). Emitting here would print
 			// a misleading "0/0 ready" from a half-collected snapshot.
 			if sErr != nil || reportCtx.Err() != nil {
-				log.Debug("Progress reporter snapshot unavailable (non-fatal)", "err", sErr)
+				// A canceled context is the expected, benign case (the reporter is
+				// being stopped). Only log genuine, unexpected snapshot errors;
+				// logging cancellation is pure noise.
+				if sErr != nil && !errors.Is(sErr, context.Canceled) {
+					log.Debug("Progress reporter snapshot unavailable (non-fatal)", "err", sErr)
+				}
 				return
 			}
 			summary := snap.Summary()

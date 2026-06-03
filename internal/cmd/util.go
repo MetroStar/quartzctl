@@ -359,7 +359,18 @@ func Cleanup(ctx context.Context, p *CommandParams) error {
 	log.Debug("Entering", "internal", "cleanup")
 	defer log.Debug("Completed", "internal", "cleanup")
 
-	err := os.RemoveAll(p.Settings().Config.Tmp)
+	tmp := p.Settings().Config.Tmp
+	// Removing the working directory takes the generated kubeconfig with it.
+	// After a teardown that is the correct, desired behaviour (a kubeconfig
+	// pointing at a destroyed cluster is a footgun), but doing it silently is
+	// surprising — operators have lost shells/redirects pointed there. Announce
+	// it so the removal is never a mystery. Durable run logs live under log/,
+	// not here, so nothing observable is lost.
+	if _, statErr := os.Stat(tmp); statErr == nil {
+		util.Msgf("Removing local working directory %s (generated kubeconfig and manifests)", tmp)
+	}
+
+	err := os.RemoveAll(tmp)
 	if err != nil {
 		log.Warn("Error during cleanup", "err", err)
 	}

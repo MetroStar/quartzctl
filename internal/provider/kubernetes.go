@@ -795,7 +795,14 @@ func (c KubernetesClient) ClusterProgressSnapshot(ctx context.Context) (ClusterP
 		// Propagate it so the caller can skip emitting a misleading "0/0 ready"
 		// instead of reporting partial counts as if they were authoritative.
 		if ferr != nil {
-			log.Debug("Progress snapshot: listing HelmReleases failed (non-fatal)", "err", ferr)
+			// A canceled context is the expected, benign case (the progress
+			// reporter is being stopped, e.g. a stage that completed quickly or
+			// the cluster API going away mid-teardown). Don't log it even at
+			// DEBUG — it's pure noise. Still propagate so the caller skips the
+			// unreliable snapshot.
+			if !errors.Is(ferr, context.Canceled) {
+				log.Debug("Progress snapshot: listing HelmReleases failed (non-fatal)", "err", ferr)
+			}
 			return progress, ferr
 		}
 	}
