@@ -14,7 +14,13 @@
 
 package tofu
 
-import "testing"
+import (
+	"encoding/json"
+	"reflect"
+	"testing"
+
+	tfjson "github.com/hashicorp/terraform-json"
+)
 
 func TestExtractLockID(t *testing.T) {
 	tests := []struct {
@@ -85,4 +91,116 @@ Lock Info:
 			}
 		})
 	}
+}
+
+func TestRedactStateValues(t *testing.T) {
+	tests := []struct {
+		name      string
+		values    map[string]interface{}
+		sensitive string
+		want      map[string]interface{}
+	}{
+		{
+			name:      "nil values",
+			values:    nil,
+			sensitive: `{}`,
+			want:      nil,
+		},
+		{
+			name:      "no sensitive attributes",
+			values:    map[string]interface{}{"name": "quartz", "replicas": float64(3)},
+			sensitive: `{}`,
+			want:      map[string]interface{}{"name": "quartz", "replicas": float64(3)},
+		},
+		{
+			name:      "top-level sensitive leaf redacted",
+			values:    map[string]interface{}{"name": "quartz", "token": "ghp_secret"},
+			sensitive: `{"token": true}`,
+			want:      map[string]interface{}{"name": "quartz", "token": "[REDACTED]"},
+		},
+		{
+			name: "nested sensitive value redacted",
+			values: map[string]interface{}{
+				"metadata": map[string]interface{}{
+					"name":     "creds",
+					"password": "p@ss",
+				},
+			},
+			sensitive: `{"metadata": {"password": true}}`,
+			want: map[string]interface{}{
+				"metadata": map[string]interface{}{
+					"name":     "creds",
+					"password": "[REDACTED]",
+				},
+			},
+		},
+		{
+			name: "sensitive list element redacted",
+			values: map[string]interface{}{
+				"set_sensitive": []interface{}{"keep", "secret"},
+			},
+			sensitive: `{"set_sensitive": [false, true]}`,
+			want: map[string]interface{}{
+				"set_sensitive": []interface{}{"keep", "[REDACTED]"},
+			},
+		},
+		{
+			name:      "whole subtree redacted when node is true",
+			values:    map[string]interface{}{"values": map[string]interface{}{"a": "1", "b": "2"}},
+			sensitive: `{"values": true}`,
+			want:      map[string]interface{}{"values": "[REDACTED]"},
+		},
+		{
+			name:      "unparseable sensitivity leaves values unchanged",
+			values:    map[string]interface{}{"token": "secret"},
+			sensitive: `not-json`,
+			want:      map[string]interface{}{"token": "secret"},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := redactStateValues(tt.values, json.RawMessage(tt.sensitive))
+			if !reflect.DeepEqual(got, tt.want) {
+				t.Fatalf("redactStateValues = %#v, want %#v", got, tt.want)
+			}
+		})
+	}
+}
+
+func TestCollectStateAddresses(t *testing.T) {
+	t.Run("nil state", func(t *testing.T) {
+		if got := collectStateAddresses(nil); got != nil {
+			t.Fatalf("collectStateAddresses(nil) = %#v, want nil", got)
+		}
+	})
+
+	t.Run("root and child modules", func(t *testing.T) {
+		state := &tfjson.State{
+			Values: &tfjson.StateValues{
+				RootModule: &tfjson.StateModule{
+					Resources: []*tfjson.StateResource{
+						{Address: "helm_release.quartz"},
+						{Address: "kubernetes_namespace_v1.this"},
+					},
+					ChildModules: []*tfjson.StateModule{
+						{
+							Resources: []*tfjson.StateResource{
+								{Address: "module.eso.kubernetes_secret_v1.git"},
+							},
+						},
+					},
+				},
+			},
+		}
+
+		want := []string{
+			"helm_release.quartz",
+			"kubernetes_namespace_v1.this",
+			"module.eso.kubernetes_secret_v1.git",
+		}
+		if got := collectStateAddresses(state); !reflect.DeepEqual(got, want) {
+			t.Fatalf("collectStateAddresses = %#v, want %#v", got, want)
+		}
+	})
 }

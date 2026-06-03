@@ -18,6 +18,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
 	"regexp"
@@ -198,7 +199,7 @@ func (c *TofuClient) Destroy(ctx context.Context, stage schema.StageConfig) erro
 		vars = append(vars, tfexec.VarFile(c.cfg.Config.TfVarFilePath()))
 	}
 
-	targets, found, err := targetsToDestroy(ctx, tf, stage)
+	targets, found, err := targetsToDestroy(ctx, c, stage)
 	if err != nil {
 		return err
 	}
@@ -239,9 +240,15 @@ func (c *TofuClient) Refresh(ctx context.Context, stage schema.StageConfig) erro
 
 // Output retrieves the OpenTofu output for the specified stage directory.
 // It returns a map of output variable names to their values in JSON format.
+//
+// It runs on a quiet (stdout-discarded) instance: terraform-exec tees the
+// captured `tofu output -json` to stdout, which would leak sensitive stage
+// outputs (e.g. credentials produced by an earlier stage and consumed as input
+// by a later one) to the terminal/logs. Callers receive the structured map and
+// are responsible for any intentional, redacted display.
 func (c *TofuClient) Output(ctx context.Context, stage schema.StageConfig) (map[string][]byte, error) {
 	log.Debug("tofu output", "stage", stage)
-	tf, err := c.getTf(stage.Path)
+	tf, err := c.getTfQuiet(stage)
 	if err != nil {
 		return nil, err
 	}
@@ -336,7 +343,7 @@ func (c *TofuClient) Import(ctx context.Context, stage schema.StageConfig, addre
 // needing to contact the dead service.
 func (c *TofuClient) StateClear(ctx context.Context, stage schema.StageConfig) error {
 	log.Info("Clearing state for unreachable service-dependent stage", "stage", stage.Id)
-	tf, err := c.getTf(stage.Path)
+	tf, err := c.getTfQuiet(stage)
 	if err != nil {
 		return err
 	}
@@ -379,6 +386,240 @@ func (c *TofuClient) StateClear(ctx context.Context, stage schema.StageConfig) e
 	}
 
 	return nil
+}
+
+// StateResourceView is a redacted, presentation-friendly snapshot of a single
+// resource instance recorded in the OpenTofu state. Sensitive attribute values
+// are replaced with a redaction marker so the view can be safely printed to a
+// terminal or log without spilling secrets (tokens, passwords, helm values,
+// etc.). It is returned by StateShow.
+type StateResourceView struct {
+	Address string                 // full state address, e.g. helm_release.quartz
+	Mode    string                 // "managed" or "data"
+	Type    string                 // resource type, e.g. helm_release
+	Name    string                 // resource name, e.g. quartz
+	Values  map[string]interface{} // attribute values with sensitive entries redacted
+}
+
+// StateList returns the addresses of every resource instance recorded in the
+// state for the given stage, walking the root module and all child modules.
+// It is the structured equivalent of `tofu state list` (which terraform-exec
+// does not expose directly) and is derived from `tofu show -json`.
+//
+// An optional set of case-insensitive substring filters may be supplied; when
+// non-empty, only addresses matching at least one filter are returned.
+func (c *TofuClient) StateList(ctx context.Context, stage schema.StageConfig, filters ...string) ([]string, error) {
+	log.Debug("tofu state list", "stage", stage.Id)
+	state, err := c.showState(ctx, stage)
+	if err != nil {
+		return nil, err
+	}
+
+	addresses := collectStateAddresses(state)
+	if len(filters) == 0 {
+		return addresses, nil
+	}
+
+	var out []string
+	for _, addr := range addresses {
+		for _, f := range filters {
+			if f == "" || strings.Contains(strings.ToLower(addr), strings.ToLower(f)) {
+				out = append(out, addr)
+				break
+			}
+		}
+	}
+	return out, nil
+}
+
+// StateShow returns redacted views of resource instances in the stage state.
+// When addresses are supplied, only resources whose address exactly matches one
+// of them are returned; otherwise every resource is returned. Sensitive values
+// are masked. It is the structured, secret-safe equivalent of
+// `tofu state show <address>`.
+func (c *TofuClient) StateShow(ctx context.Context, stage schema.StageConfig, addresses ...string) ([]StateResourceView, error) {
+	log.Debug("tofu state show", "stage", stage.Id, "addresses", addresses)
+	state, err := c.showState(ctx, stage)
+	if err != nil {
+		return nil, err
+	}
+
+	want := make(map[string]bool, len(addresses))
+	for _, a := range addresses {
+		want[a] = true
+	}
+
+	var views []StateResourceView
+	var walk func(mod *tfjson.StateModule)
+	walk = func(mod *tfjson.StateModule) {
+		if mod == nil {
+			return
+		}
+		for _, res := range mod.Resources {
+			if len(want) > 0 && !want[res.Address] {
+				continue
+			}
+			views = append(views, StateResourceView{
+				Address: res.Address,
+				Mode:    string(res.Mode),
+				Type:    res.Type,
+				Name:    res.Name,
+				Values:  redactStateValues(res.AttributeValues, res.SensitiveValues),
+			})
+		}
+		for _, child := range mod.ChildModules {
+			walk(child)
+		}
+	}
+	if state != nil && state.Values != nil {
+		walk(state.Values.RootModule)
+	}
+	return views, nil
+}
+
+// StateRemove removes the named resource instances from the stage state without
+// destroying the underlying infrastructure. It is the equivalent of
+// `tofu state rm <address>...` and is primarily used to drop orphaned resources
+// (e.g. a helm_release pointing at an already-deleted cluster) so that a
+// subsequent destroy/clean can proceed. Each address is removed independently;
+// the first failure is returned after attempting the remainder so a partial
+// batch still makes progress.
+func (c *TofuClient) StateRemove(ctx context.Context, stage schema.StageConfig, addresses ...string) error {
+	log.Info("tofu state rm", "stage", stage.Id, "addresses", addresses)
+	if len(addresses) == 0 {
+		return fmt.Errorf("no resource addresses provided")
+	}
+
+	tf, err := c.getTf(stage.Path)
+	if err != nil {
+		return err
+	}
+	c.setStageEnv(tf, stage)
+
+	var firstErr error
+	for _, addr := range addresses {
+		if err := tf.StateRm(ctx, addr); err != nil {
+			log.Warn("Failed to remove resource from state", "stage", stage.Id, "address", addr, "error", err)
+			if firstErr == nil {
+				firstErr = fmt.Errorf("failed to remove %s: %w", addr, err)
+			}
+			continue
+		}
+		log.Info("Removed resource from state", "stage", stage.Id, "address", addr)
+	}
+	return firstErr
+}
+
+// showState runs `tofu show -json` for the stage and returns the parsed state.
+// It centralizes the getTf + env-prep + Show plumbing shared by the read-only
+// state inspection helpers (StateList, StateShow).
+func (c *TofuClient) showState(ctx context.Context, stage schema.StageConfig) (*tfjson.State, error) {
+	tf, err := c.getTfQuiet(stage)
+	if err != nil {
+		return nil, err
+	}
+	state, err := tf.Show(ctx)
+	if err != nil {
+		return nil, fmt.Errorf("failed to read state for stage %s: %w", stage.Id, err)
+	}
+	return state, nil
+}
+
+// getTfQuiet returns a stage-scoped OpenTofu instance whose stdout is discarded.
+// It MUST be used for any command that captures JSON from stdout — most
+// importantly `tofu show -json` (via Show()). terraform-exec tees the captured
+// JSON to the instance's configured stdout (os.Stdout for the normal cached
+// client), which would otherwise spill the ENTIRE state — including plaintext
+// secrets such as tokens, passwords, and helm values — to the terminal/logs.
+// Discarding stdout keeps the structured result (parsed from terraform-exec's
+// internal buffer) intact while preventing the leak. stderr is preserved so
+// genuine errors are still surfaced.
+func (c *TofuClient) getTfQuiet(stage schema.StageConfig) (*tfexec.Terraform, error) {
+	tf, err := c.newTfOpts(&TfOpts{dir: stage.Path, stdout: io.Discard, stderr: os.Stderr})
+	if err != nil {
+		return nil, err
+	}
+	c.setStageEnv(tf, stage)
+	return tf, nil
+}
+
+// collectStateAddresses walks the root and child modules of a parsed state and
+// returns every resource instance address in document order.
+func collectStateAddresses(state *tfjson.State) []string {
+	var addresses []string
+	if state == nil || state.Values == nil {
+		return addresses
+	}
+	var walk func(mod *tfjson.StateModule)
+	walk = func(mod *tfjson.StateModule) {
+		if mod == nil {
+			return
+		}
+		for _, res := range mod.Resources {
+			addresses = append(addresses, res.Address)
+		}
+		for _, child := range mod.ChildModules {
+			walk(child)
+		}
+	}
+	walk(state.Values.RootModule)
+	return addresses
+}
+
+// redactStateValues returns a copy of a resource's attribute values with every
+// value flagged sensitive replaced by "[REDACTED]". The sensitivity map mirrors
+// the shape of the values tree (per the tofu show -json schema): a node is the
+// boolean `true` when that attribute is sensitive, or a nested object/array
+// describing sensitivity of nested attributes/elements. This guarantees secrets
+// embedded anywhere in the tree (e.g. helm_release.values) are never printed.
+func redactStateValues(values map[string]interface{}, sensitive json.RawMessage) map[string]interface{} {
+	if values == nil {
+		return nil
+	}
+	var sensTree interface{}
+	if len(sensitive) > 0 {
+		// Best-effort: if the sensitivity tree can't be parsed, fall back to
+		// returning values unchanged rather than failing the whole show.
+		_ = json.Unmarshal(sensitive, &sensTree)
+	}
+	redacted, _ := redactValue(values, sensTree).(map[string]interface{})
+	return redacted
+}
+
+// redactValue recursively walks a value tree alongside its sensitivity tree and
+// replaces sensitive leaves with a redaction marker.
+func redactValue(value interface{}, sensitive interface{}) interface{} {
+	// A sensitivity node of literal `true` redacts the entire subtree.
+	if b, ok := sensitive.(bool); ok && b {
+		return "[REDACTED]"
+	}
+
+	switch v := value.(type) {
+	case map[string]interface{}:
+		sensMap, _ := sensitive.(map[string]interface{})
+		out := make(map[string]interface{}, len(v))
+		for key, val := range v {
+			var childSens interface{}
+			if sensMap != nil {
+				childSens = sensMap[key]
+			}
+			out[key] = redactValue(val, childSens)
+		}
+		return out
+	case []interface{}:
+		sensArr, _ := sensitive.([]interface{})
+		out := make([]interface{}, len(v))
+		for i, val := range v {
+			var childSens interface{}
+			if sensArr != nil && i < len(sensArr) {
+				childSens = sensArr[i]
+			}
+			out[i] = redactValue(val, childSens)
+		}
+		return out
+	default:
+		return value
+	}
 }
 
 // lockInfoIDPattern matches the "ID:" field of the OpenTofu "Lock Info:" block.
@@ -505,7 +746,11 @@ func parseStageOutputValue(o map[string][]byte, key string) (string, error) {
 
 // targetsToDestroy determines the specific resources to destroy for the specified stage.
 // It applies inclusion and exclusion filters based on the stage configuration.
-func targetsToDestroy(ctx context.Context, tf *tfexec.Terraform, stage schema.StageConfig) ([]string, bool, error) {
+//
+// The state inspection runs on a quiet (stdout-discarded) OpenTofu instance via
+// showState so the full `tofu show -json` output — which embeds plaintext
+// secrets — is never streamed to the terminal/logs during destroy/clean.
+func targetsToDestroy(ctx context.Context, c *TofuClient, stage schema.StageConfig) ([]string, bool, error) {
 	hasIncludes := len(stage.Destroy.Include) > 0
 	hasExcludes := len(stage.Destroy.Exclude) > 0
 
@@ -514,7 +759,7 @@ func targetsToDestroy(ctx context.Context, tf *tfexec.Terraform, stage schema.St
 		return nil, true, nil
 	}
 
-	state, err := tf.Show(ctx)
+	state, err := c.showState(ctx, stage)
 	if err != nil {
 		return nil, false, err
 	}

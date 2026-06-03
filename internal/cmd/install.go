@@ -670,7 +670,7 @@ func stageHasDrift(ctx context.Context, stage string, p *CommandParams) (bool, e
 }
 
 // isFluxOwnedReleaseDrift reports whether a plan error is the benign Helm
-// provider version-mismatch that occurs when Terraform's bootstrap Helm release
+// provider version-mismatch that occurs when OpenTofu's bootstrap Helm release
 // has since been adopted and re-versioned by Flux. Such drift is expected and
 // must not trigger a destructive re-apply on resume.
 func isFluxOwnedReleaseDrift(err error) bool {

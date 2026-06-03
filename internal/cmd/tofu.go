@@ -16,6 +16,7 @@ package cmd
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"os"
 	"slices"
@@ -400,6 +401,82 @@ func NewTfVersionCommand(p *CommandParams) TfCommandResult {
 	}
 }
 
+// NewTfStateCommand creates the "state" subcommand group for inspecting and
+// modifying the OpenTofu state of an individual stage. It mirrors the native
+// `tofu state` workflow (list/show/rm) but routes through quartzctl so the
+// correct backend, providers, and environment for a stage are resolved
+// automatically. The `show` subcommand redacts sensitive attribute values so
+// state can be inspected without leaking secrets.
+func NewTfStateCommand(p *CommandParams) TfCommandResult {
+	// Construct fresh flag instances per subcommand; sharing a single flag
+	// pointer across commands is unsafe because cli stores parsed values on it.
+	stageFlag := func() cli.Flag {
+		return &cli.StringFlag{Name: "stage", Aliases: []string{"s"}, Usage: "Stage name", Required: true}
+	}
+	initFlag := func() cli.Flag {
+		return &cli.BoolFlag{Name: "init", Aliases: []string{"i"}, Usage: "Run `tofu init` (backend only) before the state operation"}
+	}
+
+	return TfCommandResult{
+		Command: &cli.Command{
+			Name:  "state",
+			Usage: "Inspect and modify OpenTofu state for a specific stage",
+			Commands: []*cli.Command{
+				{
+					Name:      "list",
+					Usage:     "List resource addresses in a stage's state",
+					ArgsUsage: "[ADDRESS_FILTER...]",
+					Flags:     []cli.Flag{stageFlag(), initFlag()},
+					Action: func(ctx context.Context, ccmd *cli.Command) error {
+						stage := ccmd.String("stage")
+						if ccmd.Bool("init") {
+							if err := TfStateInit(ctx, stage, p); err != nil {
+								return err
+							}
+						}
+						return TfStateList(ctx, stage, ccmd.Args().Slice(), p)
+					},
+				},
+				{
+					Name:      "show",
+					Usage:     "Show resource attributes from a stage's state (sensitive values redacted)",
+					ArgsUsage: "[ADDRESS...]",
+					Flags:     []cli.Flag{stageFlag(), initFlag()},
+					Action: func(ctx context.Context, ccmd *cli.Command) error {
+						stage := ccmd.String("stage")
+						if ccmd.Bool("init") {
+							if err := TfStateInit(ctx, stage, p); err != nil {
+								return err
+							}
+						}
+						return TfStateShow(ctx, stage, ccmd.Args().Slice(), p)
+					},
+				},
+				{
+					Name:      "rm",
+					Aliases:   []string{"remove"},
+					Usage:     "Remove resources from a stage's state without destroying them",
+					ArgsUsage: "ADDRESS [ADDRESS...]",
+					Flags:     []cli.Flag{stageFlag(), initFlag()},
+					Action: func(ctx context.Context, ccmd *cli.Command) error {
+						stage := ccmd.String("stage")
+						addresses := ccmd.Args().Slice()
+						if len(addresses) == 0 {
+							return fmt.Errorf("state rm requires at least one resource ADDRESS")
+						}
+						if ccmd.Bool("init") {
+							if err := TfStateInit(ctx, stage, p); err != nil {
+								return err
+							}
+						}
+						return TfStateRemove(ctx, stage, addresses, p)
+					},
+				},
+			},
+		},
+	}
+}
+
 // TfInit runs `tofu init` for a specific stage.
 func TfInit(ctx context.Context, stage string, p *CommandParams) error {
 	return util.RunOnce("tf:init:"+stage, func() error {
@@ -650,6 +727,104 @@ func TfForceUnlock(ctx context.Context, stage string, lockID string, p *CommandP
 		return err
 	}
 	util.Msgf("Released state lock %s for stage %s", lockID, stage)
+	return nil
+}
+
+// TfStateInit runs a backend-only `tofu init` for a stage prior to a state
+// operation. Unlike TfInit it deliberately skips the cluster-login step in
+// tfStagePrep: state inspection/removal must work even when the stage's
+// Kubernetes endpoint is gone (the exact situation where `state rm` is needed
+// to drop orphaned resources).
+func TfStateInit(ctx context.Context, stage string, p *CommandParams) error {
+	log.Debug("Entering", "command", "tf:state:init", "stage", stage)
+	defer log.Debug("Completed", "command", "tf:state:init", "stage", stage)
+
+	util.Hdrf("Init %s", stage)
+
+	client := tofu.Instance(ctx, *p.Settings())
+	cp, _ := p.Provider().Cloud(ctx)
+	b := cp.StateBackendInfo(stage)
+	s := p.Settings().Config.Stages[stage]
+	return client.Init(ctx, s, tofu.TofuInitOpts{
+		BackendConfig: b.InitBackendConfig,
+	})
+}
+
+// TfStateList prints the resource addresses recorded in a stage's state,
+// optionally filtered by case-insensitive substring match.
+func TfStateList(ctx context.Context, stage string, filters []string, p *CommandParams) error {
+	log.Debug("Entering", "command", "tf:state:list", "stage", stage)
+	defer log.Debug("Completed", "command", "tf:state:list", "stage", stage)
+
+	util.Hdrf("State list %s", stage)
+
+	client := tofu.Instance(ctx, *p.Settings())
+	s := p.Settings().Config.Stages[stage]
+	addresses, err := client.StateList(ctx, s, filters...)
+	if err != nil {
+		return err
+	}
+
+	if len(addresses) == 0 {
+		util.Msgf("No resources in state for stage %s", stage)
+		return nil
+	}
+
+	for _, addr := range addresses {
+		util.Print(addr)
+	}
+	return nil
+}
+
+// TfStateShow prints the attributes of resources in a stage's state with
+// sensitive values redacted. When no addresses are supplied every resource is
+// shown.
+func TfStateShow(ctx context.Context, stage string, addresses []string, p *CommandParams) error {
+	log.Debug("Entering", "command", "tf:state:show", "stage", stage, "addresses", addresses)
+	defer log.Debug("Completed", "command", "tf:state:show", "stage", stage)
+
+	util.Hdrf("State show %s", stage)
+
+	client := tofu.Instance(ctx, *p.Settings())
+	s := p.Settings().Config.Stages[stage]
+	views, err := client.StateShow(ctx, s, addresses...)
+	if err != nil {
+		return err
+	}
+
+	if len(views) == 0 {
+		util.Msgf("No matching resources in state for stage %s", stage)
+		return nil
+	}
+
+	for _, v := range views {
+		j, err := json.MarshalIndent(v.Values, "", "  ")
+		if err != nil {
+			return fmt.Errorf("failed to render resource %s: %w", v.Address, err)
+		}
+		util.Msgf("# %s", v.Address)
+		util.Print(string(j))
+	}
+	return nil
+}
+
+// TfStateRemove removes the named resources from a stage's state without
+// destroying the underlying infrastructure. It is primarily used to drop
+// orphaned resources (e.g. a helm_release pointing at an already-deleted
+// cluster) so a subsequent destroy/clean can proceed.
+func TfStateRemove(ctx context.Context, stage string, addresses []string, p *CommandParams) error {
+	log.Debug("Entering", "command", "tf:state:rm", "stage", stage, "addresses", addresses)
+	defer log.Debug("Completed", "command", "tf:state:rm", "stage", stage)
+
+	util.Hdrf("State rm %s", stage)
+
+	client := tofu.Instance(ctx, *p.Settings())
+	s := p.Settings().Config.Stages[stage]
+	if err := client.StateRemove(ctx, s, addresses...); err != nil {
+		return err
+	}
+
+	util.Msgf("Removed %d resource(s) from state for stage %s", len(addresses), stage)
 	return nil
 }
 
