@@ -338,56 +338,6 @@ func (c *TofuClient) Import(ctx context.Context, stage schema.StageConfig, addre
 	return tf.Import(ctx, address, id, opts...)
 }
 
-// StateClear removes all resources from the state for a service-dependent stage
-// whose provider endpoint is unreachable. This allows clean to proceed without
-// needing to contact the dead service.
-func (c *TofuClient) StateClear(ctx context.Context, stage schema.StageConfig) error {
-	log.Info("Clearing state for unreachable service-dependent stage", "stage", stage.Id)
-	tf, err := c.getTfQuiet(stage)
-	if err != nil {
-		return err
-	}
-	c.setStageEnv(tf, stage)
-
-	// Get current state to find resource addresses
-	state, err := tf.Show(ctx)
-	if err != nil {
-		return fmt.Errorf("failed to show state: %w", err)
-	}
-
-	if state == nil || state.Values == nil || state.Values.RootModule == nil {
-		log.Info("State already empty", "stage", stage.Id)
-		return nil
-	}
-
-	// Collect all resource addresses from state
-	var addresses []string
-	var collectAddresses func(mod *tfjson.StateModule)
-	collectAddresses = func(mod *tfjson.StateModule) {
-		for _, res := range mod.Resources {
-			addresses = append(addresses, res.Address)
-		}
-		for _, child := range mod.ChildModules {
-			collectAddresses(child)
-		}
-	}
-	collectAddresses(state.Values.RootModule)
-
-	if len(addresses) == 0 {
-		log.Info("No resources in state", "stage", stage.Id)
-		return nil
-	}
-
-	log.Info("Removing resources from state", "stage", stage.Id, "count", len(addresses))
-	for _, addr := range addresses {
-		if err := tf.StateRm(ctx, addr); err != nil {
-			log.Warn("Failed to remove resource from state (may already be gone)", "address", addr, "error", err)
-		}
-	}
-
-	return nil
-}
-
 // clusterResidentTypePrefixes enumerates the OpenTofu resource type prefixes
 // whose objects live INSIDE the Kubernetes cluster (and therefore vanish when
 // the cluster itself is destroyed). They are safe to drop from state once the
@@ -413,7 +363,7 @@ func isClusterResidentType(resourceType string) bool {
 // StateRemoveOrphanedClusterResources removes only the in-cluster (Helm/Kubernetes)
 // MANAGED resources from a stage's state, leaving AWS-provider resources intact.
 //
-// This is the safe, surgical counterpart to StateClear for mixed stages (e.g.
+// This is a safe, surgical state cleanup for mixed stages (e.g.
 // prereqs, core) that hold both cloud and in-cluster resources. When the EKS
 // cluster has already been destroyed, its in-cluster objects are gone but remain
 // recorded in state; OpenTofu can neither refresh nor destroy them because the
