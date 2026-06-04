@@ -722,6 +722,24 @@ func (c KubernetesClient) CleanupStuckTerminatingPods(ctx context.Context, timeo
 	return cleaned, nil
 }
 
+// HelmReleaseStatus is a per-release readiness detail captured during a
+// ClusterProgressSnapshot. It carries enough signal for a convergence gate to
+// distinguish a release that is still progressing (keep waiting) from one Flux
+// has given up on (Stalled — fail fast and surface the reason).
+type HelmReleaseStatus struct {
+	Namespace  string
+	Name       string
+	Ready      bool
+	ReadyMsg   string
+	Stalled    bool
+	StalledMsg string
+}
+
+// ID returns the "namespace/name" identifier for the release.
+func (h HelmReleaseStatus) ID() string {
+	return fmt.Sprintf("%s/%s", h.Namespace, h.Name)
+}
+
 // ClusterProgress is a point-in-time snapshot of cluster health used to give
 // users visibility into a deploying Quartz cluster. It surfaces the signals
 // that otherwise only become apparent minutes into a stalled install.
@@ -729,8 +747,33 @@ type ClusterProgress struct {
 	HelmReleasesReady     int
 	HelmReleasesTotal     int
 	NotReadyReleases      []string
+	Releases              []HelmReleaseStatus
 	TerminatingNamespaces []string
 	UnhealthyPods         []string
+}
+
+// NotReadyDetails returns the per-release detail for every release that is not
+// currently Ready, in the order collected.
+func (p ClusterProgress) NotReadyDetails() []HelmReleaseStatus {
+	var out []HelmReleaseStatus
+	for _, r := range p.Releases {
+		if !r.Ready {
+			out = append(out, r)
+		}
+	}
+	return out
+}
+
+// StalledReleases returns the per-release detail for every release Flux has
+// marked Stalled (retries/remediation exhausted), i.e. genuinely stuck.
+func (p ClusterProgress) StalledReleases() []HelmReleaseStatus {
+	var out []HelmReleaseStatus
+	for _, r := range p.Releases {
+		if r.Stalled {
+			out = append(out, r)
+		}
+	}
+	return out
 }
 
 // Summary renders a concise one-line health summary suitable for periodic
@@ -767,24 +810,39 @@ func (c KubernetesClient) ClusterProgressSnapshot(ctx context.Context) (ClusterP
 		ferr := c.ForEachDynamicResources(ctx, gvr, "", func(item unstructured.Unstructured) {
 			progress.HelmReleasesTotal++
 			conds, found, _ := unstructured.NestedSlice(item.Object, "status", "conditions")
-			ready := false
+			detail := HelmReleaseStatus{Namespace: item.GetNamespace(), Name: item.GetName()}
 			if found {
 				for _, cond := range conds {
 					m, ok := cond.(map[string]interface{})
 					if !ok {
 						continue
 					}
-					if m["type"] == "Ready" && m["status"] == "True" {
-						ready = true
-						break
+					ctype, _ := m["type"].(string)
+					cstatus, _ := m["status"].(string)
+					cmsg, _ := m["message"].(string)
+					switch ctype {
+					case "Ready":
+						detail.Ready = cstatus == "True"
+						detail.ReadyMsg = cmsg
+					case "Stalled":
+						// Flux's runtime sets the Stalled condition (status True)
+						// when a release has hit a terminal error and retries are
+						// exhausted — i.e. it will not converge without
+						// intervention. This is the fail-fast signal for the
+						// convergence gate.
+						if cstatus == "True" {
+							detail.Stalled = true
+							detail.StalledMsg = cmsg
+						}
 					}
 				}
 			}
-			if ready {
+			progress.Releases = append(progress.Releases, detail)
+			if detail.Ready {
 				progress.HelmReleasesReady++
 			} else {
 				progress.NotReadyReleases = append(progress.NotReadyReleases,
-					fmt.Sprintf("%s/%s", item.GetNamespace(), item.GetName()))
+					detail.ID())
 			}
 		})
 		// Unlike a missing CRD (LookupKind failure above, which legitimately

@@ -26,6 +26,7 @@ import (
 
 	"github.com/MetroStar/quartzctl/internal/config/schema"
 	"github.com/MetroStar/quartzctl/internal/log"
+	"github.com/MetroStar/quartzctl/internal/provider"
 	"github.com/MetroStar/quartzctl/internal/tofu"
 	"github.com/MetroStar/quartzctl/internal/util"
 	"github.com/urfave/cli/v3"
@@ -210,13 +211,26 @@ func Install(ctx context.Context, p *CommandParams, resumeFrom string) error {
 		cp.save(p)
 	}
 
-	// Clear checkpoint on successful completion
-	cp.clear(p)
-
 	err = RefreshSecrets(ctx, p)
 	if err != nil {
 		return err
 	}
+
+	// Final convergence gate. Per-stage post-checks only verify that stage's
+	// own HelmRelease, so without this an install can report success while
+	// sibling releases are still failing to reconcile. Wait for every Flux
+	// HelmRelease to become Ready (or fail with the offending releases named)
+	// before declaring the install successful. Runs after RefreshSecrets so
+	// external-secret-dependent releases have their inputs in place. The
+	// checkpoint is intentionally cleared only AFTER this gate passes so a
+	// failed convergence still allows a fast drift-aware resume.
+	err = waitForClusterConvergence(ctx, p)
+	if err != nil {
+		return err
+	}
+
+	// Clear checkpoint on successful completion.
+	cp.clear(p)
 
 	err = ClusterInfo(ctx, p)
 	if err != nil {
@@ -233,6 +247,162 @@ func stageIds(stages []schema.StageConfig) string {
 		ids[i] = s.Id
 	}
 	return strings.Join(ids, ", ")
+}
+
+// helmConvergenceTimeout returns the overall budget for the post-install
+// HelmRelease convergence gate. Defaults to 30m; override with
+// QUARTZ_CONVERGENCE_TIMEOUT (e.g. "45m"). Set to "0" to disable the gate.
+func helmConvergenceTimeout() time.Duration {
+	const def = 30 * time.Minute
+	if v := os.Getenv("QUARTZ_CONVERGENCE_TIMEOUT"); v != "" {
+		if d, err := time.ParseDuration(v); err == nil && d >= 0 {
+			return d
+		}
+	}
+	return def
+}
+
+// convergencePollInterval returns the cadence for the convergence gate's
+// polling loop. Defaults to 20s; override with QUARTZ_CONVERGENCE_INTERVAL.
+func convergencePollInterval() time.Duration {
+	const def = 20 * time.Second
+	if v := os.Getenv("QUARTZ_CONVERGENCE_INTERVAL"); v != "" {
+		if d, err := time.ParseDuration(v); err == nil && d > 0 {
+			return d
+		}
+	}
+	return def
+}
+
+// formatReleaseFailures renders a compact, operator-actionable description of a
+// set of not-ready/stalled HelmReleases (id + truncated condition message).
+func formatReleaseFailures(rs []provider.HelmReleaseStatus) string {
+	if len(rs) == 0 {
+		return "(none)"
+	}
+	parts := make([]string, 0, len(rs))
+	for _, r := range rs {
+		msg := r.ReadyMsg
+		if r.Stalled && r.StalledMsg != "" {
+			msg = r.StalledMsg
+		}
+		msg = strings.TrimSpace(strings.ReplaceAll(msg, "\n", " "))
+		if len(msg) > 200 {
+			msg = msg[:200] + "..."
+		}
+		if msg == "" {
+			parts = append(parts, r.ID())
+		} else {
+			parts = append(parts, fmt.Sprintf("%s (%s)", r.ID(), msg))
+		}
+	}
+	return strings.Join(parts, "; ")
+}
+
+// waitForClusterConvergence is the final install gate. Per-stage post-checks
+// only verify that stage's own HelmRelease, so an install can otherwise report
+// success while sibling releases (neuvector, kiali, ...) are still failing to
+// reconcile. This polls ALL Flux HelmReleases until every one is Ready, the
+// overall timeout elapses, or a release is Stalled (Flux exhausted its
+// retries). On a non-convergent outcome it returns an error naming the
+// offending releases so the operator gets an actionable failure instead of a
+// misleading "Installation successful".
+func waitForClusterConvergence(ctx context.Context, p *CommandParams) error {
+	timeout := helmConvergenceTimeout()
+	if timeout == 0 {
+		util.Msg("HelmRelease convergence gate disabled (QUARTZ_CONVERGENCE_TIMEOUT=0)")
+		return nil
+	}
+
+	kube, err := p.Provider().Kubernetes(ctx)
+	if err != nil {
+		// Cluster unreachable. The stage applies already fail loudly if the
+		// cluster never came up, so don't manufacture a new failure here.
+		log.Debug("Convergence gate: cluster not reachable, skipping", "err", err)
+		return nil
+	}
+
+	util.Hdr("Waiting for all HelmReleases to converge")
+
+	deadline := time.Now().Add(timeout)
+	interval := convergencePollInterval()
+
+	// A release must report Stalled across consecutive polls before the gate
+	// gives up on it, so a brief self-healing blip doesn't abort an
+	// otherwise-converging install.
+	const stalledThreshold = 2
+	stalledStreak := map[string]int{}
+
+	var last provider.ClusterProgress
+	for {
+		snap, sErr := kube.ClusterProgressSnapshot(ctx)
+		if sErr != nil {
+			if ctx.Err() != nil {
+				return ctx.Err()
+			}
+			// Transient API hiccup — keep trying until the deadline.
+			log.Debug("Convergence gate: snapshot failed (will retry)", "err", sErr)
+		} else {
+			last = snap
+
+			if snap.HelmReleasesTotal > 0 && snap.HelmReleasesReady == snap.HelmReleasesTotal {
+				util.Msgf("All %d HelmReleases are Ready", snap.HelmReleasesTotal)
+				return nil
+			}
+
+			// No HelmReleases present at all (CRD absent or none created yet).
+			// There is nothing to converge — don't spin until the deadline. This
+			// also keeps the gate a no-op for non-Flux/mock clusters.
+			if snap.HelmReleasesTotal == 0 {
+				log.Debug("Convergence gate: no HelmReleases present, nothing to wait for")
+				return nil
+			}
+
+			util.Msgf("Convergence: %s", snap.Summary())
+
+			// Fail fast on releases Flux has marked Stalled (retries/remediation
+			// exhausted) once the signal persists across consecutive polls.
+			stalled := snap.StalledReleases()
+			current := map[string]bool{}
+			for _, r := range stalled {
+				current[r.ID()] = true
+				stalledStreak[r.ID()]++
+			}
+			for id := range stalledStreak {
+				if !current[id] {
+					delete(stalledStreak, id)
+				}
+			}
+			var stuck []provider.HelmReleaseStatus
+			for _, r := range stalled {
+				if stalledStreak[r.ID()] >= stalledThreshold {
+					stuck = append(stuck, r)
+				}
+			}
+			if len(stuck) > 0 {
+				return fmt.Errorf("install did not converge: %d HelmRelease(s) stalled (Flux exhausted retries): %s",
+					len(stuck), formatReleaseFailures(stuck))
+			}
+
+			// Best-effort self-heal: clear Helm release secrets wedged in a
+			// pending state, which otherwise block Flux from retrying.
+			if scrubbed, scrubErr := kube.ScrubStuckHelmReleaseSecrets(ctx); scrubErr == nil && len(scrubbed) > 0 {
+				util.Msgf("Cleared %d stuck Helm release secret(s) to unblock reconciliation: %v", len(scrubbed), scrubbed)
+			}
+		}
+
+		if time.Now().After(deadline) {
+			return fmt.Errorf("install did not converge within %s: %d/%d HelmReleases ready; still not ready: %s",
+				timeout, last.HelmReleasesReady, last.HelmReleasesTotal,
+				formatReleaseFailures(last.NotReadyDetails()))
+		}
+
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		case <-time.After(interval):
+		}
+	}
 }
 
 // Preflight validates cloud credentials and connectivity before starting the install.
