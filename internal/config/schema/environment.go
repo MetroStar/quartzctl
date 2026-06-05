@@ -382,6 +382,18 @@ func NewInfrastructureEnvironmentConfig(name string, desc string) Infrastructure
 				CallbackUrls: []ApplicationCallbackConfig{
 					{Path: "/oauth/oidc/callback"},
 				},
+				// Open-WebUI's bundled SQLite is a single-writer store that
+				// concurrent replicas corrupt, so the shared infra Postgres
+				// (same RDS instance as sonarqube/keycloak) backs it instead.
+				// Admin:true reuses the master role (no separate role to manage,
+				// like sonarqube); a distinct DbName isolates its tables in a
+				// dedicated database on the shared instance (created by the
+				// chart's ensure-open-webui-db Job).
+				Db: InfrastructureApplicationDbConfig{
+					Enabled: true,
+					Admin:   true,
+					DbName:  "openwebui",
+				},
 				Lookup: NewApplicationLookupConfig("open-webui", "", "", "", "", "open-webui"),
 			},
 			// epyon has no native OIDC support, so a confidential client is
