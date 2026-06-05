@@ -274,6 +274,25 @@ func convergencePollInterval() time.Duration {
 	return def
 }
 
+// workloadStabilizeGrace returns how long, after every HelmRelease has become
+// Ready, the convergence gate will wait for the resulting workloads to finish
+// rolling out before declaring success. A HelmRelease reports Ready when Helm's
+// install/upgrade succeeds, which does NOT guarantee the pods it created are
+// healthy: a chart whose RBAC or image is mismatched installs cleanly yet
+// crashloops. This grace window lets the gate catch that class of failure
+// instead of reporting a misleading success the instant releases are Ready.
+// Defaults to 3m; override with QUARTZ_WORKLOAD_GRACE. Set to "0" to disable
+// the workload check (HelmRelease readiness alone then ends the gate).
+func workloadStabilizeGrace() time.Duration {
+	const def = 3 * time.Minute
+	if v := os.Getenv("QUARTZ_WORKLOAD_GRACE"); v != "" {
+		if d, err := time.ParseDuration(v); err == nil && d >= 0 {
+			return d
+		}
+	}
+	return def
+}
+
 // formatReleaseFailures renders a compact, operator-actionable description of a
 // set of not-ready/stalled HelmReleases (id + truncated condition message).
 func formatReleaseFailures(rs []provider.HelmReleaseStatus) string {
@@ -333,6 +352,15 @@ func waitForClusterConvergence(ctx context.Context, p *CommandParams) error {
 	const stalledThreshold = 2
 	stalledStreak := map[string]int{}
 
+	// Once every HelmRelease is Ready, workloads get a bounded grace window to
+	// finish rolling out. A pod must stay unhealthy across several consecutive
+	// polls before it counts against the install, so transient image-pull or
+	// startup churn doesn't produce a false failure.
+	workloadGrace := workloadStabilizeGrace()
+	const unhealthyThreshold = 3
+	unhealthyStreak := map[string]int{}
+	var releasesReadyAt time.Time
+
 	var last provider.ClusterProgress
 	for {
 		snap, sErr := kube.ClusterProgressSnapshot(ctx)
@@ -345,11 +373,6 @@ func waitForClusterConvergence(ctx context.Context, p *CommandParams) error {
 		} else {
 			last = snap
 
-			if snap.HelmReleasesTotal > 0 && snap.HelmReleasesReady == snap.HelmReleasesTotal {
-				util.Msgf("All %d HelmReleases are Ready", snap.HelmReleasesTotal)
-				return nil
-			}
-
 			// No HelmReleases present at all (CRD absent or none created yet).
 			// There is nothing to converge — don't spin until the deadline. This
 			// also keeps the gate a no-op for non-Flux/mock clusters.
@@ -358,36 +381,85 @@ func waitForClusterConvergence(ctx context.Context, p *CommandParams) error {
 				return nil
 			}
 
-			util.Msgf("Convergence: %s", snap.Summary())
-
-			// Fail fast on releases Flux has marked Stalled (retries/remediation
-			// exhausted) once the signal persists across consecutive polls.
-			stalled := snap.StalledReleases()
-			current := map[string]bool{}
-			for _, r := range stalled {
-				current[r.ID()] = true
-				stalledStreak[r.ID()]++
-			}
-			for id := range stalledStreak {
-				if !current[id] {
-					delete(stalledStreak, id)
+			if snap.HelmReleasesReady == snap.HelmReleasesTotal {
+				// Every release is Ready. Confirm the resulting workloads have
+				// actually stabilized before declaring success, so a release
+				// that installs cleanly but crashloops (RBAC/image skew) is
+				// caught instead of slipping through.
+				if workloadGrace == 0 || len(snap.UnhealthyPods) == 0 {
+					util.Msgf("All %d HelmReleases are Ready", snap.HelmReleasesTotal)
+					return nil
 				}
-			}
-			var stuck []provider.HelmReleaseStatus
-			for _, r := range stalled {
-				if stalledStreak[r.ID()] >= stalledThreshold {
-					stuck = append(stuck, r)
-				}
-			}
-			if len(stuck) > 0 {
-				return fmt.Errorf("install did not converge: %d HelmRelease(s) stalled (Flux exhausted retries): %s",
-					len(stuck), formatReleaseFailures(stuck))
-			}
 
-			// Best-effort self-heal: clear Helm release secrets wedged in a
-			// pending state, which otherwise block Flux from retrying.
-			if scrubbed, scrubErr := kube.ScrubStuckHelmReleaseSecrets(ctx); scrubErr == nil && len(scrubbed) > 0 {
-				util.Msgf("Cleared %d stuck Helm release secret(s) to unblock reconciliation: %v", len(scrubbed), scrubbed)
+				if releasesReadyAt.IsZero() {
+					releasesReadyAt = time.Now()
+					util.Msgf("All %d HelmReleases are Ready; waiting up to %s for %d workload(s) to stabilize",
+						snap.HelmReleasesTotal, workloadGrace, len(snap.UnhealthyPods))
+				}
+
+				// Track which pods stay unhealthy across consecutive polls.
+				current := map[string]bool{}
+				for _, pod := range snap.UnhealthyPods {
+					current[pod] = true
+					unhealthyStreak[pod]++
+				}
+				for pod := range unhealthyStreak {
+					if !current[pod] {
+						delete(unhealthyStreak, pod)
+					}
+				}
+
+				if time.Since(releasesReadyAt) >= workloadGrace {
+					var persistent []string
+					for pod, streak := range unhealthyStreak {
+						if streak >= unhealthyThreshold {
+							persistent = append(persistent, pod)
+						}
+					}
+					if len(persistent) > 0 {
+						slices.Sort(persistent)
+						return fmt.Errorf("install did not converge: all HelmReleases Ready but %d workload(s) unhealthy after %s: %s",
+							len(persistent), workloadGrace, strings.Join(persistent, ", "))
+					}
+					// Grace elapsed with nothing persistently unhealthy — the
+					// snapshot's unhealthy pods were transient churn. Accept.
+					util.Msgf("All %d HelmReleases are Ready; workloads stabilized", snap.HelmReleasesTotal)
+					return nil
+				}
+
+				util.Msgf("Convergence: %s", snap.Summary())
+			} else {
+				util.Msgf("Convergence: %s", snap.Summary())
+
+				// Fail fast on releases Flux has marked Stalled (retries/remediation
+				// exhausted) once the signal persists across consecutive polls.
+				stalled := snap.StalledReleases()
+				current := map[string]bool{}
+				for _, r := range stalled {
+					current[r.ID()] = true
+					stalledStreak[r.ID()]++
+				}
+				for id := range stalledStreak {
+					if !current[id] {
+						delete(stalledStreak, id)
+					}
+				}
+				var stuck []provider.HelmReleaseStatus
+				for _, r := range stalled {
+					if stalledStreak[r.ID()] >= stalledThreshold {
+						stuck = append(stuck, r)
+					}
+				}
+				if len(stuck) > 0 {
+					return fmt.Errorf("install did not converge: %d HelmRelease(s) stalled (Flux exhausted retries): %s",
+						len(stuck), formatReleaseFailures(stuck))
+				}
+
+				// Best-effort self-heal: clear Helm release secrets wedged in a
+				// pending state, which otherwise block Flux from retrying.
+				if scrubbed, scrubErr := kube.ScrubStuckHelmReleaseSecrets(ctx); scrubErr == nil && len(scrubbed) > 0 {
+					util.Msgf("Cleared %d stuck Helm release secret(s) to unblock reconciliation: %v", len(scrubbed), scrubbed)
+				}
 			}
 		}
 
