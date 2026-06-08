@@ -41,6 +41,31 @@ description = "Build and install to ~/go/bin"
 depends = ["build"]
 run = "cp ./bin/quartz ~/go/bin/"
 
+[tasks.deploy]
+description = "Fast rebuild + atomically deploy quartz to every local install location"
+run = [
+  "mkdir -p ./bin",
+  # Fast local build (no goreleaser): embed the same version/buildDate ldflags so
+  # `quartz --version` stays meaningful on dev builds. CGO_ENABLED=0 comes from [env].
+  "go build -ldflags \"-s -w -X main.version=$(git describe --tags --always --dirty 2>/dev/null || echo dev) -X main.buildDate=$(date -u +%s)\" -o ./bin/quartz ./cmd/quartz",
+  # Atomically replace each installed copy. Copy to a sibling temp then rename:
+  # `mv` swaps the inode, so it never hits "Text file busy" even when the target
+  # binary is currently running. /usr/local/bin is root-owned, so fall back to
+  # sudo for any directory the current user cannot write.
+  """
+  for dest in /usr/local/bin/quartz "$HOME/quartz/bin/quartz" "$HOME/quartzctl/bin/quartz"; do
+    dir=$(dirname "$dest"); tmp="$dir/.quartz.new.$$"
+    if [ -w "$dir" ]; then
+      cp ./bin/quartz "$tmp" && mv -f "$tmp" "$dest"
+    else
+      sudo cp ./bin/quartz "$tmp" && sudo mv -f "$tmp" "$dest"
+    fi
+    echo "deployed -> $dest"
+  done
+  """,
+  "quartz --version",
+]
+
 [tasks.test]
 description = "Run tests"
 run = "go test -json -cover ./... {{ if env.RUN }}-run $RUN{{ end }} | tparse -all"

@@ -24,6 +24,7 @@ import (
 	"path"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/MetroStar/quartzctl/internal/config/schema"
 	"github.com/MetroStar/quartzctl/internal/util"
@@ -1425,6 +1426,8 @@ func TestProviderKubernetesClientScrubStuckHelmReleaseSecrets(t *testing.T) {
 				Namespace: ns,
 				Name:      name,
 				Labels:    map[string]string{"owner": "helm", "name": release, "status": status},
+				// Zero creationTimestamp => effectively ancient, so these are
+				// always older than any grace window and remain eligible.
 			},
 			Type: "helm.sh/release.v1",
 		}
@@ -1436,6 +1439,10 @@ func TestProviderKubernetesClientScrubStuckHelmReleaseSecrets(t *testing.T) {
 	// Healthy records that must be preserved.
 	deployed := helmSecret("quartz", "sh.helm.release.v1.foo.v2", "foo", "deployed")
 	superseded := helmSecret("quartz", "sh.helm.release.v1.foo.v1", "foo", "superseded")
+	// A pending record created just now: a controller is actively driving this
+	// operation, so it must be preserved when a grace window is in effect.
+	freshPending := helmSecret("quartz", "sh.helm.release.v1.baz.v2", "baz", "pending-upgrade")
+	freshPending.CreationTimestamp = metav1.NewTime(time.Now())
 	// A non-helm secret that shares the owner label must be ignored (wrong type).
 	notHelm := &corev1.Secret{
 		ObjectMeta: metav1.ObjectMeta{
@@ -1445,13 +1452,13 @@ func TestProviderKubernetesClientScrubStuckHelmReleaseSecrets(t *testing.T) {
 		Type: "Opaque",
 	}
 
-	api := NewKubernetesApiMock().WithClientObjects(stuckUninstalling, stuckPending, deployed, superseded, notHelm)
+	api := NewKubernetesApiMock().WithClientObjects(stuckUninstalling, stuckPending, deployed, superseded, freshPending, notHelm)
 	c, err := NewKubernetesClient(api, KubeconfigInfo{}, schema.QuartzConfig{})
 	if err != nil {
 		t.Fatalf("unexpected error from kubernetes client constructor, %v", err)
 	}
 
-	scrubbed, err := c.ScrubStuckHelmReleaseSecrets(context.Background())
+	scrubbed, err := c.ScrubStuckHelmReleaseSecrets(context.Background(), 10*time.Minute)
 	if err != nil {
 		t.Fatalf("unexpected error from ScrubStuckHelmReleaseSecrets, %v", err)
 	}
@@ -1467,5 +1474,8 @@ func TestProviderKubernetesClientScrubStuckHelmReleaseSecrets(t *testing.T) {
 	}
 	if got["quartz/sh.helm.release.v1.foo.v2"] || got["quartz/sh.helm.release.v1.foo.v1"] || got["quartz/random"] {
 		t.Errorf("healthy/non-helm secrets must not be scrubbed, got %v", scrubbed)
+	}
+	if got["quartz/sh.helm.release.v1.baz.v2"] {
+		t.Errorf("a freshly-created pending record (active reconcile) must not be scrubbed within the grace window, got %v", scrubbed)
 	}
 }

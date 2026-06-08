@@ -22,6 +22,7 @@ import (
 	"path/filepath"
 	"slices"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/MetroStar/quartzctl/internal/config/schema"
@@ -456,8 +457,11 @@ func waitForClusterConvergence(ctx context.Context, p *CommandParams) error {
 				}
 
 				// Best-effort self-heal: clear Helm release secrets wedged in a
-				// pending state, which otherwise block Flux from retrying.
-				if scrubbed, scrubErr := kube.ScrubStuckHelmReleaseSecrets(ctx); scrubErr == nil && len(scrubbed) > 0 {
+				// pending state, which otherwise block Flux from retrying. Only
+				// records stuck past the grace period are scrubbed so we never
+				// delete a revision secret helm-controller is actively driving
+				// (doing so wedges it forever on "secrets ...vN not found").
+				if scrubbed, scrubErr := kube.ScrubStuckHelmReleaseSecrets(ctx, provider.HelmReleaseStuckGracePeriod); scrubErr == nil && len(scrubbed) > 0 {
 					util.Msgf("Cleared %d stuck Helm release secret(s) to unblock reconciliation: %v", len(scrubbed), scrubbed)
 				}
 			}
@@ -537,38 +541,13 @@ func Clean(ctx context.Context, p *CommandParams) error {
 
 	stages := p.Settings().Config.StagesOrdered()
 
-	// Initialize and refresh each stage before destruction.
+	// Initialize and refresh each stage before destruction. Stages are
+	// independent for init/refresh (each operates on its own working directory
+	// and remote state), so they run concurrently to avoid the serial
+	// per-stage module download + refresh that dominated clean startup time.
 	// Uses TfRefreshWithUnlock for automatic state lock recovery.
 	initStart := time.Now()
-	for _, s := range stages {
-		err = TfInit(ctx, s.Id, p)
-		if err != nil {
-			log.Warn("Init failed for stage, will attempt destroy anyway", "stage", s.Id, "error", err)
-		}
-
-		// Skip the pre-destroy refresh for stages with empty state: there is
-		// nothing to reconcile, and refreshing a service-dependent stage whose
-		// cluster is already gone only produces noisy provider-config errors.
-		if stageStateEmpty(ctx, s.Id, p) {
-			log.Debug("Stage state empty, skipping pre-destroy refresh", "stage", s.Id)
-			continue
-		}
-
-		err = TfRefreshWithUnlock(ctx, s.Id, p)
-		if err != nil {
-			// The umbrella Helm release is version-stamped by Flux ("1.0.0+<sha>")
-			// once it adopts the bootstrap release, so a pre-destroy refresh of
-			// the core stage surfaces the benign Helm provider "Planned version
-			// is different from configured version" mismatch. The subsequent
-			// destroy runs with Refresh(false) and is unaffected, so this is
-			// cosmetic — demote it to debug to avoid alarming clean output.
-			if isFluxOwnedReleaseDrift(err) {
-				log.Debug("Refresh reported benign Flux-owned release version drift, continuing", "stage", s.Id, "error", err)
-			} else {
-				log.Warn("Refresh failed for stage", "stage", s.Id, "error", err)
-			}
-		}
-	}
+	parallelInitRefresh(ctx, stages, p)
 	stageTiming["init-refresh"] = time.Since(initStart)
 
 	// K8s preparation: remove Flux finalizers, patch stuck namespaces,
@@ -767,6 +746,28 @@ func TfDestroyWithRetry(ctx context.Context, stage string, p *CommandParams, max
 			}
 		}
 
+		// Tolerate already-absent git refs on resumed/re-run cleans: a previous
+		// clean may have already deleted the apps branch, so GitHub answers the
+		// delete with 422 "Reference does not exist". The branch is genuinely
+		// gone, so drop the stale github_branch entries from state and retry
+		// rather than fail teardown. This is safe — github_branch manages only a
+		// git ref (no cloud/cluster infra), so removing it from state never
+		// orphans real resources.
+		if isGitRefAbsentError(errStr) {
+			removed, clearErr := clearAbsentGitRefState(ctx, stage, p)
+			if clearErr != nil {
+				log.Warn("Failed to clear already-absent git ref state", "stage", stage, "error", clearErr)
+			} else if removed > 0 {
+				util.Msgf("Git ref already absent — removed %d stale branch resource(s) from stage %s state, retrying destroy", removed, stage)
+				if retryErr := TfDestroy(ctx, stage, p); retryErr == nil {
+					return nil
+				} else {
+					lastErr = retryErr
+					errStr = retryErr.Error()
+				}
+			}
+		}
+
 		// Check if this is a retryable error
 		if !isRetryableDestroyError(errStr) {
 			log.Warn("Non-retryable error during destroy", "stage", stage, "error", lastErr)
@@ -869,6 +870,35 @@ func clearOrphanedClusterState(ctx context.Context, stage string, p *CommandPara
 	client := tofu.Instance(ctx, *p.Settings())
 	s := p.Settings().Config.Stages[stage]
 	return client.StateRemoveOrphanedClusterResources(ctx, s)
+}
+
+// isGitRefAbsentError reports whether a destroy error stems from deleting a git
+// ref (branch) that is already gone. GitHub answers a delete of a non-existent
+// ref with 422 "Reference does not exist", which surfaces on a resumed or
+// repeated clean after the branch was removed by an earlier run.
+func isGitRefAbsentError(errStr string) bool {
+	return len(errStr) > 0 && strings.Contains(errStr, "Reference does not exist")
+}
+
+// clearAbsentGitRefState drops github_branch resources from a stage's state so a
+// subsequent destroy can converge when the underlying ref is already gone. It
+// is safe because github_branch manages only a git ref — removing it from state
+// never orphans cloud or cluster infrastructure. Returns the number of entries
+// removed (0 when there is nothing to clear).
+func clearAbsentGitRefState(ctx context.Context, stage string, p *CommandParams) (int, error) {
+	client := tofu.Instance(ctx, *p.Settings())
+	s := p.Settings().Config.Stages[stage]
+	addrs, err := client.StateList(ctx, s, "github_branch.")
+	if err != nil {
+		return 0, err
+	}
+	if len(addrs) == 0 {
+		return 0, nil
+	}
+	if err := client.StateRemove(ctx, s, addrs...); err != nil {
+		return 0, err
+	}
+	return len(addrs), nil
 }
 
 // stageStateEmpty reports whether a stage's state has no resource instances
@@ -1009,6 +1039,51 @@ func buildDestroyWaves(stages []schema.StageConfig) [][]schema.StageConfig {
 	return waves
 }
 
+// parallelInitRefresh initializes and refreshes every stage concurrently in
+// preparation for destroy. Each stage operates on its own working directory and
+// remote state, so there is no inter-stage ordering requirement here (unlike
+// destroy, which must respect reverse dependencies). Failures are logged but
+// not returned: a stage that cannot init or refresh is still attempted during
+// the destroy phase, matching the prior serial behavior.
+func parallelInitRefresh(ctx context.Context, stages []schema.StageConfig, p *CommandParams) {
+	var wg sync.WaitGroup
+	for _, s := range stages {
+		wg.Add(1)
+		go func(stage schema.StageConfig) {
+			defer wg.Done()
+
+			if err := TfInit(ctx, stage.Id, p); err != nil {
+				log.Warn("Init failed for stage, will attempt destroy anyway", "stage", stage.Id, "error", err)
+			}
+
+			// Skip the pre-destroy refresh for stages with empty state: there
+			// is nothing to reconcile, and refreshing a service-dependent stage
+			// whose cluster is already gone only produces noisy provider-config
+			// errors.
+			if stageStateEmpty(ctx, stage.Id, p) {
+				log.Debug("Stage state empty, skipping pre-destroy refresh", "stage", stage.Id)
+				return
+			}
+
+			if err := TfRefreshWithUnlock(ctx, stage.Id, p); err != nil {
+				// The umbrella Helm release is version-stamped by Flux
+				// ("1.0.0+<sha>") once it adopts the bootstrap release, so a
+				// pre-destroy refresh of the core stage surfaces the benign Helm
+				// provider "Planned version is different from configured
+				// version" mismatch. The subsequent destroy runs with
+				// Refresh(false) and is unaffected, so this is cosmetic — demote
+				// it to debug to avoid alarming clean output.
+				if isFluxOwnedReleaseDrift(err) {
+					log.Debug("Refresh reported benign Flux-owned release version drift, continuing", "stage", stage.Id, "error", err)
+				} else {
+					log.Warn("Refresh failed for stage", "stage", stage.Id, "error", err)
+				}
+			}
+		}(s)
+	}
+	wg.Wait()
+}
+
 // parallelDestroy destroys multiple independent stages concurrently.
 // Returns a slice of errors from any stages that failed.
 func parallelDestroy(ctx context.Context, stages []schema.StageConfig, p *CommandParams) []error {
@@ -1038,7 +1113,6 @@ func parallelDestroy(ctx context.Context, stages []schema.StageConfig, p *Comman
 	return errs
 }
 
-// stageHasDrift initializes the given stage and runs a plan to detect whether
 // the live infrastructure has drifted from the desired configuration. It is
 // used on resume to decide whether an already-checkpointed stage can be safely
 // skipped or must be re-applied. Returns true when the plan contains changes.

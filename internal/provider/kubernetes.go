@@ -67,7 +67,7 @@ type KubernetesProviderClient interface {
 	GetDaemonSetStatus(ctx context.Context, kind schema.GroupVersionResource, ns string, name string) (int64, int64, error)
 	CleanupStuckTerminatingPods(ctx context.Context, timeout time.Duration) ([]string, error)
 	ReapOrphanedAdmissionWebhooks(ctx context.Context) ([]string, error)
-	ScrubStuckHelmReleaseSecrets(ctx context.Context) ([]string, error)
+	ScrubStuckHelmReleaseSecrets(ctx context.Context, minAge time.Duration) ([]string, error)
 	ClusterProgressSnapshot(ctx context.Context) (ClusterProgress, error)
 	ListVirtualServices(ctx context.Context) ([]VirtualServiceInfo, error)
 	PrepareForDestroy(ctx context.Context) error
@@ -1005,6 +1005,15 @@ func (c KubernetesClient) ReapOrphanedAdmissionWebhooks(ctx context.Context) ([]
 	return reaped, nil
 }
 
+// HelmReleaseStuckGracePeriod is how long a Helm release record may sit in a
+// transient ("uninstalling"/"pending-*") status before ScrubStuckHelmReleaseSecrets
+// considers it genuinely wedged rather than an operation a controller is
+// actively driving. A healthy install/upgrade completes well within this window
+// (especially with Flux's disableWait, which returns as soon as manifests are
+// applied), so anything still pending past it has been abandoned by a dead or
+// looping controller.
+const HelmReleaseStuckGracePeriod = 10 * time.Minute
+
 // ScrubStuckHelmReleaseSecrets deletes Helm v3 release-record Secrets that are
 // stuck in a non-terminal status (uninstalling, pending-install,
 // pending-upgrade, pending-rollback). Helm stores one Secret per release
@@ -1017,7 +1026,16 @@ func (c KubernetesClient) ReapOrphanedAdmissionWebhooks(ctx context.Context) ([]
 // Only transient-status records are removed; "deployed", "failed", and
 // "superseded" revisions are left intact so release history and rollback
 // targets are preserved. Returns the namespace/name of each scrubbed secret.
-func (c KubernetesClient) ScrubStuckHelmReleaseSecrets(ctx context.Context) ([]string, error) {
+//
+// minAge guards against orphaning a release that a controller is *actively*
+// reconciling: a transient record younger than minAge is left alone, because
+// helm-controller creates the pending revision secret at the start of an
+// operation and expects to find it when finishing. Deleting that secret out
+// from under an in-flight upgrade leaves the controller looping forever on
+// "secrets sh.helm.release.v1.<name>.v<N> not found". Pass 0 to scrub
+// unconditionally (safe during teardown, when Flux is already suspended and no
+// reconciliation is in progress).
+func (c KubernetesClient) ScrubStuckHelmReleaseSecrets(ctx context.Context, minAge time.Duration) ([]string, error) {
 	clientset, err := c.api.ClientSet()
 	if err != nil {
 		return nil, err
@@ -1039,6 +1057,7 @@ func (c KubernetesClient) ScrubStuckHelmReleaseSecrets(ctx context.Context) ([]s
 		return nil, err
 	}
 
+	now := time.Now()
 	var scrubbed []string
 	for _, s := range secrets.Items {
 		if s.Type != "helm.sh/release.v1" {
@@ -1046,6 +1065,22 @@ func (c KubernetesClient) ScrubStuckHelmReleaseSecrets(ctx context.Context) ([]s
 		}
 		if !stuckStatuses[s.Labels["status"]] {
 			continue
+		}
+
+		// Skip records still within the grace window — these belong to an
+		// operation a controller is most likely actively driving. Deleting an
+		// in-flight revision secret is unrecoverable for helm-controller, which
+		// expects to find it when it completes the operation.
+		if minAge > 0 {
+			if age := now.Sub(s.CreationTimestamp.Time); age < minAge {
+				log.Debug("Skipping recently-created Helm release secret (likely active reconcile)",
+					"namespace", s.Namespace,
+					"name", s.Name,
+					"release", s.Labels["name"],
+					"status", s.Labels["status"],
+					"age", age.Round(time.Second))
+				continue
+			}
 		}
 
 		log.Info("Scrubbing stuck Helm release secret",
@@ -1463,7 +1498,9 @@ func (c KubernetesClient) InterStageCleanup(ctx context.Context) error {
 	// status; the next operation then aborts with "another operation is in
 	// progress", deadlocking re-install of that release. Scrubbing only the
 	// stuck records lets Helm recover without touching healthy deployments.
-	if _, err := c.ScrubStuckHelmReleaseSecrets(ctx); err != nil {
+	// Flux is already suspended during teardown, so there is no active
+	// reconciliation to protect — scrub unconditionally (minAge 0).
+	if _, err := c.ScrubStuckHelmReleaseSecrets(ctx, 0); err != nil {
 		log.Debug("Stuck helm release secret scrub during inter-stage cleanup failed (non-fatal)", "err", err)
 	}
 

@@ -45,6 +45,7 @@ type TofuClient struct {
 	execPath string
 	cfg      config.Settings
 
+	cacheMu     *sync.Mutex
 	clientCache map[string]*tfexec.Terraform
 }
 
@@ -100,6 +101,7 @@ func NewTofuClient(ctx context.Context, cfg config.Settings) (TofuClient, error)
 		version:     cfg.Config.Tofu.Version,
 		cfg:         cfg,
 		execPath:    execPath,
+		cacheMu:     &sync.Mutex{},
 		clientCache: make(map[string]*tfexec.Terraform),
 	}, nil
 }
@@ -117,7 +119,14 @@ func (c *TofuClient) Cleanup(ctx context.Context) error {
 
 // getTf retrieves a cached OpenTofu instance for the specified directory.
 // If no instance exists, it creates a new one.
+//
+// The cache is guarded by a mutex because stage operations (init, refresh,
+// destroy) run concurrently during clean; an unsynchronized map write here
+// would otherwise risk a "concurrent map writes" panic.
 func (c *TofuClient) getTf(dir string) (*tfexec.Terraform, error) {
+	c.cacheMu.Lock()
+	defer c.cacheMu.Unlock()
+
 	if i, found := c.clientCache[dir]; found {
 		return i, nil
 	}
