@@ -938,6 +938,19 @@ func TfDestroyBackend(ctx context.Context, p *CommandParams) error {
 	return cp.DestroyStateBackend(ctx)
 }
 
+// TfStateBackendExists reports whether the OpenTofu state backend still exists.
+// Used to detect an already-destroyed environment so clean can short-circuit.
+func TfStateBackendExists(ctx context.Context, p *CommandParams) (bool, error) {
+	log.Debug("Entering", "internal", "tf:stateBackendExists")
+	defer log.Debug("Completed", "internal", "tf:stateBackendExists")
+
+	cp, err := p.Provider().Cloud(ctx)
+	if err != nil {
+		return false, err
+	}
+	return cp.StateBackendExists(ctx)
+}
+
 // preCheck runs pre-checks for a specific stage and event.
 //
 // Stage pre-checks are the dependency gates that can block for many minutes

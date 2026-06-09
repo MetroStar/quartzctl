@@ -78,6 +78,13 @@ func (c LocalClient) DestroyStateBackend(_ context.Context) error {
 	return nil
 }
 
+// StateBackendExists always reports true for the local provider: there is no
+// remote backend to probe, so the teardown should always run its normal path
+// rather than short-circuiting.
+func (c LocalClient) StateBackendExists(_ context.Context) (bool, error) {
+	return true, nil
+}
+
 // KubeconfigInfo returns an error as kubeconfig information is not supported for the local provider.
 func (c LocalClient) KubeconfigInfo(ctx context.Context) (KubeconfigInfo, error) {
 	return KubeconfigInfo{}, fmt.Errorf("not supported at this time")

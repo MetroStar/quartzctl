@@ -222,10 +222,20 @@ func (c *TofuClient) Destroy(ctx context.Context, stage schema.StageConfig) erro
 // It runs `tofu refresh` with the configured input variables.
 func (c *TofuClient) Refresh(ctx context.Context, stage schema.StageConfig) error {
 	log.Debug("tofu refresh", "stage", stage)
-	tf, err := c.getTf(stage.Path)
+
+	// Route refresh output through a filter that suppresses benign diagnostic
+	// blocks emitted while tearing an environment down (e.g. Flux-owned Helm
+	// release version drift, optional S3 sub-resources that don't exist). The
+	// destroy that follows runs with refresh disabled and is unaffected, so this
+	// only spares the operator alarming-but-harmless noise. A fresh, non-cached
+	// instance is used (like getTfQuiet) so the wrapped writers are stage-local.
+	stdout := newNoiseFilterWriter(os.Stdout)
+	stderr := newNoiseFilterWriter(os.Stderr)
+	tf, err := c.newTfOpts(&TfOpts{dir: stage.Path, stdout: stdout, stderr: stderr})
 	if err != nil {
 		return err
 	}
+	c.setStageEnv(tf, stage)
 
 	var vars []tfexec.RefreshCmdOption
 	for _, v := range c.stageVars(ctx, stage) {
@@ -234,8 +244,15 @@ func (c *TofuClient) Refresh(ctx context.Context, stage schema.StageConfig) erro
 	if !stage.OverrideVars {
 		vars = append(vars, tfexec.VarFile(c.cfg.Config.TfVarFilePath()))
 	}
-	c.setStageEnv(tf, stage)
-	return tf.Refresh(ctx, vars...)
+
+	refreshErr := tf.Refresh(ctx, vars...)
+	if flushErr := stdout.Flush(); flushErr != nil {
+		log.Debug("Failed flushing refresh stdout filter", "stage", stage.Id, "error", flushErr)
+	}
+	if flushErr := stderr.Flush(); flushErr != nil {
+		log.Debug("Failed flushing refresh stderr filter", "stage", stage.Id, "error", flushErr)
+	}
+	return refreshErr
 }
 
 // Output retrieves the OpenTofu output for the specified stage directory.

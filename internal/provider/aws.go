@@ -164,6 +164,14 @@ func (c AwsClient) DestroyStateBackend(ctx context.Context) error {
 	return nil
 }
 
+// StateBackendExists reports whether the S3 state bucket backing this cluster
+// still exists. A clean run destroys the bucket only after every stage has been
+// torn down, so its absence is a reliable signal that there is nothing left to
+// destroy.
+func (c AwsClient) StateBackendExists(ctx context.Context) (bool, error) {
+	return c.BucketExists(ctx, c.stateBackendBucketName())
+}
+
 func (c AwsClient) KubeconfigInfo(ctx context.Context) (KubeconfigInfo, error) {
 	kc, _, err := c.EksKubeconfigInfo(ctx)
 	return kc, err

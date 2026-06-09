@@ -15,15 +15,18 @@
 package cmd
 
 import (
+	"cmp"
 	"context"
 	"fmt"
 	"os"
 	"path"
 	"path/filepath"
+	"slices"
 	"strconv"
 	"strings"
 	"time"
 
+	"github.com/MetroStar/quartzctl/internal/config/schema"
 	"github.com/MetroStar/quartzctl/internal/log"
 	"github.com/MetroStar/quartzctl/internal/provider"
 	"github.com/MetroStar/quartzctl/internal/stages"
@@ -230,12 +233,179 @@ func ClusterInfo(ctx context.Context, p *CommandParams) error {
 	if err != nil {
 		return err
 	}
+
+	// Flux HelmRelease reconciliation status and the SSO posture per package,
+	// shown before the per-application connection details.
+	printHelmReleaseStatus(ctx, k8s)
+	printSSOSummary(p.Settings().Config)
+
 	k8s.PrintClusterInfo(ctx)
 
 	util.Msgf("export KUBECONFIG=%s", p.Settings().Config.KubeconfigPath())
 	util.Msg("CI/CD builds may take up to 15 minutes to complete following initial setup, progress may be tracked at the Jenkins and ArgoCD URL's above")
 
 	return err
+}
+
+// printHelmReleaseStatus renders a table of every Flux HelmRelease and its
+// current reconciliation state. It reuses the read-only ClusterProgressSnapshot
+// already collected for install convergence, so it adds no extra cluster load
+// and degrades gracefully when the Flux CRDs are absent (no table is printed).
+func printHelmReleaseStatus(ctx context.Context, k8s provider.KubernetesProviderClient) {
+	progress, err := k8s.ClusterProgressSnapshot(ctx)
+	if err != nil {
+		log.Debug("Skipping HelmRelease status table", "err", err)
+		return
+	}
+	if len(progress.Releases) == 0 {
+		return
+	}
+
+	releases := append([]provider.HelmReleaseStatus(nil), progress.Releases...)
+	slices.SortFunc(releases, func(a, b provider.HelmReleaseStatus) int {
+		return cmp.Compare(a.ID(), b.ID())
+	})
+
+	rows := make([][]string, 0, len(releases))
+	for _, r := range releases {
+		status := "Ready"
+		detail := r.ReadyMsg
+		switch {
+		case r.Ready:
+			// keep defaults
+		case r.Stalled:
+			status = "Stalled"
+			detail = r.StalledMsg
+		default:
+			status = "Not Ready"
+		}
+		rows = append(rows, []string{r.Namespace, r.Name, status, truncateDetail(detail, 60)})
+	}
+
+	fmt.Println()
+	util.Printf("Flux HelmReleases (%d/%d ready)", progress.HelmReleasesReady, progress.HelmReleasesTotal)
+	util.PrintRowStatusTable(
+		[]string{"Namespace", "Name", "Status", "Detail"},
+		rows,
+		func(_ int, row []string) util.RowStatus {
+			switch row[2] {
+			case "Ready":
+				return util.StatusOk
+			case "Stalled":
+				return util.StatusError
+			default:
+				return util.StatusWarning
+			}
+		},
+	)
+}
+
+// ssoBackendsWithoutSSO lists Quartz packages deployed without any Keycloak
+// client (no SSO integration). They have no entry in the infra application
+// config, so they are appended explicitly to keep the SSO summary an accurate
+// picture of the full package set surfaced by `quartz info`.
+var ssoBackendsWithoutSSO = []string{"agentgateway", "k8sgpt", "kagent"}
+
+// printSSOSummary renders the SSO posture of each Quartz package: the
+// authentication method, the Keycloak client type, and the realm it
+// authenticates against. All application SSO is brokered through the single
+// Keycloak "infra" realm; the "master" realm is the IdP admin realm used only
+// by Keycloak itself.
+func printSSOSummary(cfg schema.QuartzConfig) {
+	rows := buildSSOSummaryRows(cfg)
+	if len(rows) == 0 {
+		return
+	}
+
+	fmt.Println()
+	util.Printf("SSO summary")
+	util.PrintTable([]string{"Package", "SSO", "Client Type", "Realm"}, rows)
+}
+
+// buildSSOSummaryRows derives the SSO summary table rows from the infra
+// application config. Disabled applications are omitted, and packages deployed
+// without any Keycloak client are appended so the summary reflects the full set
+// of packages surfaced by `quartz info`. Rows are sorted by package name.
+func buildSSOSummaryRows(cfg schema.QuartzConfig) [][]string {
+	configured := make(map[string]bool, len(cfg.Core.Applications))
+	var rows [][]string
+
+	for name, app := range cfg.Core.Applications {
+		configured[name] = true
+		if app.Disabled {
+			continue
+		}
+
+		pkg := app.Description
+		if pkg == "" {
+			pkg = name
+		}
+
+		paths := make([]string, 0, len(app.CallbackUrls))
+		for _, cb := range app.CallbackUrls {
+			paths = append(paths, cb.Path)
+		}
+
+		sso, clientType, realm := classifySSO(name, paths, app.Public)
+		rows = append(rows, []string{pkg, sso, clientType, realm})
+	}
+
+	for _, name := range ssoBackendsWithoutSSO {
+		if configured[name] {
+			continue
+		}
+		rows = append(rows, []string{name, "none", "—", "—"})
+	}
+
+	slices.SortFunc(rows, func(a, b []string) int {
+		return cmp.Compare(strings.ToLower(a[0]), strings.ToLower(b[0]))
+	})
+
+	return rows
+}
+
+// classifySSO derives the SSO posture of an infra application from its callback
+// configuration. It returns the authentication method, Keycloak client type,
+// and the realm the package authenticates against.
+func classifySSO(name string, callbackPaths []string, public bool) (sso string, clientType string, realm string) {
+	// Keycloak is the identity provider itself: it brokers SSO for everything
+	// else and its own admin console authenticates against the master realm.
+	if name == "keycloak" {
+		return "IdP (admin)", "—", "master"
+	}
+
+	// No registered callback means no Keycloak client, i.e. no SSO.
+	if len(callbackPaths) == 0 {
+		return "none", "—", "—"
+	}
+
+	// Packages without native OIDC support are fronted by an oauth2-proxy
+	// sidecar that performs the Keycloak login (callback path /oauth2/callback).
+	for _, p := range callbackPaths {
+		if p == "/oauth2/callback" {
+			return "OIDC (oauth2-proxy)", "confidential", "infra"
+		}
+	}
+
+	if public {
+		return "OIDC (native)", "public", "infra"
+	}
+	return "OIDC (native)", "confidential", "infra"
+}
+
+// truncateDetail trims surrounding whitespace and caps a message at max runes,
+// appending an ellipsis when it overflows, so status detail columns stay within
+// a readable width.
+func truncateDetail(s string, max int) string {
+	s = strings.TrimSpace(s)
+	r := []rune(s)
+	if len(r) <= max {
+		return s
+	}
+	if max <= 1 {
+		return string(r[:max])
+	}
+	return string(r[:max-1]) + "…"
 }
 
 // ClusterLogin generates a kubeconfig file for the Quartz environment.

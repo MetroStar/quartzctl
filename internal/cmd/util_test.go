@@ -21,10 +21,13 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"slices"
+	"strings"
 	"testing"
 	"time"
 
 	"github.com/MetroStar/quartzctl/internal/config"
+	"github.com/MetroStar/quartzctl/internal/config/schema"
 	"github.com/MetroStar/quartzctl/internal/provider"
 	"github.com/MetroStar/quartzctl/internal/stages"
 	"github.com/MetroStar/quartzctl/internal/tofu"
@@ -299,6 +302,176 @@ func TestCmdPrepareAccount(t *testing.T) {
 	}
 }
 
+func TestClassifySSO(t *testing.T) {
+	tests := []struct {
+		name           string
+		app            string
+		callbackPaths  []string
+		public         bool
+		wantSSO        string
+		wantClientType string
+		wantRealm      string
+	}{
+		{
+			name:           "keycloak is the IdP itself",
+			app:            "keycloak",
+			callbackPaths:  nil,
+			wantSSO:        "IdP (admin)",
+			wantClientType: "—",
+			wantRealm:      "master",
+		},
+		{
+			name:           "no callbacks means no SSO",
+			app:            "k8sgpt",
+			callbackPaths:  nil,
+			wantSSO:        "none",
+			wantClientType: "—",
+			wantRealm:      "—",
+		},
+		{
+			name:           "oauth2-proxy callback path",
+			app:            "epyon",
+			callbackPaths:  []string{"/oauth2/callback"},
+			wantSSO:        "OIDC (oauth2-proxy)",
+			wantClientType: "confidential",
+			wantRealm:      "infra",
+		},
+		{
+			name:           "native confidential client",
+			app:            "argocd",
+			callbackPaths:  []string{"/auth/callback", "/api/dex/callback"},
+			wantSSO:        "OIDC (native)",
+			wantClientType: "confidential",
+			wantRealm:      "infra",
+		},
+		{
+			name:           "native public client",
+			app:            "headlamp",
+			callbackPaths:  []string{"/oidc-callback"},
+			public:         true,
+			wantSSO:        "OIDC (native)",
+			wantClientType: "public",
+			wantRealm:      "infra",
+		},
+		{
+			name:           "sonarqube nested oauth2 path stays native",
+			app:            "sonarqube",
+			callbackPaths:  []string{"/oauth2/callback/oidc"},
+			wantSSO:        "OIDC (native)",
+			wantClientType: "confidential",
+			wantRealm:      "infra",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			sso, clientType, realm := classifySSO(tt.app, tt.callbackPaths, tt.public)
+			assert.Equal(t, tt.wantSSO, sso)
+			assert.Equal(t, tt.wantClientType, clientType)
+			assert.Equal(t, tt.wantRealm, realm)
+		})
+	}
+}
+
+func TestTruncateDetail(t *testing.T) {
+	tests := []struct {
+		name string
+		in   string
+		max  int
+		want string
+	}{
+		{name: "short string unchanged", in: "ready", max: 10, want: "ready"},
+		{name: "trims surrounding whitespace", in: "  ready  ", max: 10, want: "ready"},
+		{name: "exact length unchanged", in: "abcde", max: 5, want: "abcde"},
+		{name: "truncated with ellipsis", in: "abcdefghij", max: 5, want: "abcd…"},
+		{name: "max of one returns single rune", in: "abcdef", max: 1, want: "a"},
+		{name: "unicode counted by rune", in: "héllo wörld", max: 6, want: "héllo…"},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			assert.Equal(t, tt.want, truncateDetail(tt.in, tt.max))
+		})
+	}
+}
+
+func TestBuildSSOSummaryRows(t *testing.T) {
+	cfg := schema.QuartzConfig{
+		Core: schema.InfrastructureEnvironmentConfig{
+			Applications: map[string]schema.InfrastructureApplicationConfig{
+				"argocd": {
+					Description:  "ArgoCD",
+					CallbackUrls: []schema.ApplicationCallbackConfig{{Path: "/auth/callback"}},
+				},
+				"epyon": {
+					Description:  "Epyon",
+					CallbackUrls: []schema.ApplicationCallbackConfig{{Path: "/oauth2/callback"}},
+				},
+				"keycloak": {
+					Description: "Keycloak",
+				},
+				"disabled-app": {
+					Description:  "Disabled",
+					Disabled:     true,
+					CallbackUrls: []schema.ApplicationCallbackConfig{{Path: "/cb"}},
+				},
+			},
+		},
+	}
+
+	rows := buildSSOSummaryRows(cfg)
+
+	// Build a lookup by package name for easy assertions.
+	byPkg := make(map[string][]string, len(rows))
+	for _, r := range rows {
+		byPkg[r[0]] = r
+	}
+
+	// Configured apps with their derived posture.
+	assert.Equal(t, []string{"ArgoCD", "OIDC (native)", "confidential", "infra"}, byPkg["ArgoCD"])
+	assert.Equal(t, []string{"Epyon", "OIDC (oauth2-proxy)", "confidential", "infra"}, byPkg["Epyon"])
+	assert.Equal(t, []string{"Keycloak", "IdP (admin)", "—", "master"}, byPkg["Keycloak"])
+
+	// Backends without SSO are appended for a complete package picture.
+	assert.Equal(t, []string{"agentgateway", "none", "—", "—"}, byPkg["agentgateway"])
+	assert.Equal(t, []string{"k8sgpt", "none", "—", "—"}, byPkg["k8sgpt"])
+	assert.Equal(t, []string{"kagent", "none", "—", "—"}, byPkg["kagent"])
+
+	// Disabled apps are omitted.
+	_, ok := byPkg["Disabled"]
+	assert.False(t, ok)
+
+	// Rows are sorted case-insensitively by package name.
+	names := make([]string, 0, len(rows))
+	for _, r := range rows {
+		names = append(names, strings.ToLower(r[0]))
+	}
+	assert.True(t, slices.IsSorted(names))
+}
+
+func TestPrintSSOSummary(t *testing.T) {
+	// Smoke test: the header is written via the util writer; the table body is
+	// rendered to stdout by lipgloss. Verify the header is emitted and the call
+	// does not panic for a representative config.
+	var buf bytes.Buffer
+	util.SetWriter(&buf)
+	t.Cleanup(func() { util.SetWriter(os.Stdout) })
+
+	cfg := schema.QuartzConfig{
+		Core: schema.InfrastructureEnvironmentConfig{
+			Applications: map[string]schema.InfrastructureApplicationConfig{
+				"argocd": {
+					Description:  "ArgoCD",
+					CallbackUrls: []schema.ApplicationCallbackConfig{{Path: "/auth/callback"}},
+				},
+			},
+		},
+	}
+
+	printSSOSummary(cfg)
+	assert.Contains(t, buf.String(), "SSO summary")
+}
+
 func defaultTestConfig(t *testing.T) *CommandParams {
 	t.Setenv("SILENT", "1")
 
@@ -313,6 +486,10 @@ func defaultTestConfig(t *testing.T) *CommandParams {
 	}
 
 	cfg.Config.Tmp = t.TempDir()
+	// Redirect file-log artifacts (e.g. the clean teardown report written by
+	// persistCleanupReport) into a per-test temp dir so Clean()-exercising tests
+	// don't litter the repo working tree with a log/ directory.
+	cfg.Config.Log.File.Path = filepath.Join(t.TempDir(), "$name.$date.log")
 
 	cm := &corev1.ConfigMap{
 		TypeMeta: metav1.TypeMeta{

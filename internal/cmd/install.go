@@ -183,7 +183,7 @@ func Install(ctx context.Context, p *CommandParams, resumeFrom string) error {
 			return err
 		}
 
-		err = TfApplyWithRetry(ctx, s.Id, p, 1, 30*time.Second)
+		err = TfApplyWithRetry(ctx, s.Id, p, 2, 30*time.Second)
 		if err != nil {
 			// The core stage bootstraps the umbrella Helm release once and then
 			// hands ownership to Flux, which re-renders from git and stamps the
@@ -541,6 +541,23 @@ func Clean(ctx context.Context, p *CommandParams) error {
 
 	stages := p.Settings().Config.StagesOrdered()
 
+	// No-op fast path: a successful clean destroys the state backend last, so
+	// its absence means the environment is already torn down. Probing it once
+	// up front lets us skip the parallel init/refresh and per-stage destroy
+	// waves entirely — work that would otherwise spend minutes downloading
+	// modules and refreshing empty state across every stage only to find
+	// nothing to do. On any probe error we fall through to the normal path
+	// rather than risk skipping a real teardown.
+	if exists, err := TfStateBackendExists(ctx, p); err != nil {
+		log.Debug("State backend existence check failed, proceeding with full clean", "error", err)
+	} else if !exists {
+		util.Msg("State backend not found — environment already torn down, nothing to destroy.")
+		if cleanupErr := Cleanup(ctx, p); cleanupErr != nil {
+			log.Warn("Final cleanup failed (non-fatal)", "error", cleanupErr)
+		}
+		return nil
+	}
+
 	// Initialize and refresh each stage before destruction. Stages are
 	// independent for init/refresh (each operates on its own working directory
 	// and remote state), so they run concurrently to avoid the serial
@@ -623,14 +640,113 @@ func Clean(ctx context.Context, p *CommandParams) error {
 		destroyErrors = append(destroyErrors, fmt.Errorf("cleanup: %w", err))
 	}
 
-	printCleanupTimingSummary(stageTiming, time.Since(cleanupStart))
+	totalDuration := time.Since(cleanupStart)
+	printCleanupTimingSummary(stageTiming, totalDuration)
 
 	if len(destroyErrors) > 0 {
 		printDestroyErrors(destroyErrors)
+	}
+
+	// Persist a durable, plaintext teardown report under the run log directory.
+	// The console summary above is lost the moment the working directory is
+	// removed (and the operator's terminal scrolls away); on a FAILED clean that
+	// post-mortem is exactly what is needed to decide the next step. The report
+	// carries no secrets — only stage timings and de-duplicated error messages —
+	// so it is always safe to write, unlike the raw tofu destroy output.
+	if path, err := persistCleanupReport(p, stageTiming, totalDuration, destroyErrors); err != nil {
+		log.Warn("Could not persist cleanup report (non-fatal)", "error", err)
+	} else if path != "" {
+		util.Msgf("Teardown report written to %s", path)
+	}
+
+	if len(destroyErrors) > 0 {
 		return fmt.Errorf("%d stage(s) failed to destroy cleanly", len(destroyErrors))
 	}
 
 	return nil
+}
+
+// cleanupReportDir resolves the directory durable run artifacts are written to,
+// derived from the configured file-log path (default "log/...") so the teardown
+// report lands alongside the tofu logs regardless of whether file logging is
+// enabled. Falls back to "log" when no path is configured.
+func cleanupReportDir(cfg schema.QuartzConfig) string {
+	p := cfg.Log.File.Path
+	if p == "" {
+		return "log"
+	}
+	return filepath.Dir(p)
+}
+
+// renderCleanupReport builds the plaintext teardown report: a header, the
+// per-phase timing table (sorted for deterministic output), and the grouped
+// destroy errors. It deliberately mirrors the console summary but emits no
+// color codes so the artifact stays grep- and diff-friendly.
+func renderCleanupReport(name string, stageTiming map[string]time.Duration, totalDuration time.Duration, errs []error) string {
+	var b strings.Builder
+	result := "SUCCESS"
+	if len(errs) > 0 {
+		result = fmt.Sprintf("FAILED (%d stage(s) did not destroy cleanly)", len(errs))
+	}
+
+	fmt.Fprintf(&b, "Quartz Teardown Report\n")
+	fmt.Fprintf(&b, "Cluster:   %s\n", name)
+	fmt.Fprintf(&b, "Completed: %s\n", time.Now().UTC().Format(time.RFC3339))
+	fmt.Fprintf(&b, "Result:    %s\n\n", result)
+
+	fmt.Fprintf(&b, "Timing:\n")
+	keys := make([]string, 0, len(stageTiming))
+	for k := range stageTiming {
+		keys = append(keys, k)
+	}
+	slices.Sort(keys)
+	for _, k := range keys {
+		fmt.Fprintf(&b, "  %-25s %v\n", k+":", stageTiming[k].Round(time.Second))
+	}
+	fmt.Fprintf(&b, "  %-25s %v\n", "TOTAL:", totalDuration.Round(time.Second))
+
+	if len(errs) > 0 {
+		fmt.Fprintf(&b, "\nDestroy Errors:\n")
+		order, stagesByMsg := groupStageErrors(errs)
+		for _, msg := range order {
+			stageList := stagesByMsg[msg]
+			switch {
+			case len(stageList) > 1:
+				fmt.Fprintf(&b, "  x [%s] %s\n", strings.Join(stageList, ", "), msg)
+			case len(stageList) == 1:
+				fmt.Fprintf(&b, "  x [%s] %s\n", stageList[0], msg)
+			default:
+				fmt.Fprintf(&b, "  x %s\n", msg)
+			}
+		}
+	}
+
+	return b.String()
+}
+
+// persistCleanupReport writes the teardown report to a timestamped file in the
+// run log directory and returns its path. The filename follows the same
+// "<name>.<date>.<kind>.<unix>" convention as the tofu logs so artifacts from a
+// single run sort together.
+func persistCleanupReport(p *CommandParams, stageTiming map[string]time.Duration, totalDuration time.Duration, errs []error) (string, error) {
+	cfg := p.Settings().Config
+	dir := cleanupReportDir(cfg)
+	if err := os.MkdirAll(dir, 0o750); err != nil {
+		return "", err
+	}
+
+	now := time.Now()
+	name := cfg.Name
+	if name == "" {
+		name = "quartz"
+	}
+	file := filepath.Join(dir, fmt.Sprintf("%s.%s.clean.%d.log", name, now.Format("2006-01-02"), now.Unix()))
+
+	report := renderCleanupReport(name, stageTiming, totalDuration, errs)
+	if err := os.WriteFile(file, []byte(report), 0o640); err != nil {
+		return "", err
+	}
+	return file, nil
 }
 
 // printDestroyErrors renders the destroy-error summary, collapsing identical
@@ -641,6 +757,24 @@ func Clean(ctx context.Context, p *CommandParams) error {
 func printDestroyErrors(errs []error) {
 	util.Hdr("Destroy Errors")
 
+	order, stagesByMsg := groupStageErrors(errs)
+	for _, msg := range order {
+		stageList := stagesByMsg[msg]
+		if len(stageList) > 1 {
+			util.Msgf("  ✗ [%s] %s", strings.Join(stageList, ", "), msg)
+		} else if len(stageList) == 1 {
+			util.Msgf("  ✗ [%s] %s", stageList[0], msg)
+		} else {
+			util.Msgf("  ✗ %s", msg)
+		}
+	}
+}
+
+// groupStageErrors collapses a slice of stage destroy errors by their
+// underlying message, preserving first-seen order, so identical root causes
+// surfacing on several stages are reported once with the affected stage list.
+// Shared by the console summary and the persisted report.
+func groupStageErrors(errs []error) ([]string, map[string][]string) {
 	order := make([]string, 0, len(errs))
 	stagesByMsg := make(map[string][]string)
 	for _, e := range errs {
@@ -652,17 +786,7 @@ func printDestroyErrors(errs []error) {
 			stagesByMsg[msg] = append(stagesByMsg[msg], stage)
 		}
 	}
-
-	for _, msg := range order {
-		stageList := stagesByMsg[msg]
-		if len(stageList) > 1 {
-			util.Msgf("  ✗ [%s] %s", strings.Join(stageList, ", "), msg)
-		} else if len(stageList) == 1 {
-			util.Msgf("  ✗ [%s] %s", stageList[0], msg)
-		} else {
-			util.Msgf("  ✗ %s", msg)
-		}
-	}
+	return order, stagesByMsg
 }
 
 // splitStageError separates a "stage <id>: <message>" error into its stage id
@@ -678,11 +802,18 @@ func splitStageError(e error) (string, string) {
 	return "", s
 }
 
-// printCleanupTimingSummary outputs timing information for each phase of the cleanup.
+// printCleanupTimingSummary outputs timing information for each phase of the
+// cleanup. Phases are sorted so the summary is deterministic across runs
+// (Go map iteration order is otherwise randomized, scrambling the table).
 func printCleanupTimingSummary(stageTiming map[string]time.Duration, totalDuration time.Duration) {
 	util.Hdr("Cleanup Timing Summary")
-	for stage, duration := range stageTiming {
-		util.Msgf("  %-25s %v", stage+":", duration.Round(time.Second))
+	keys := make([]string, 0, len(stageTiming))
+	for k := range stageTiming {
+		keys = append(keys, k)
+	}
+	slices.Sort(keys)
+	for _, stage := range keys {
+		util.Msgf("  %-25s %v", stage+":", stageTiming[stage].Round(time.Second))
 	}
 	util.Msgf("  %-25s %v", "TOTAL:", totalDuration.Round(time.Second))
 }
@@ -974,6 +1105,16 @@ func isRetryableApplyError(errStr string) bool {
 		"RequestLimitExceeded",
 		"ServiceUnavailable",
 		"context deadline exceeded",
+		// Keycloak provisions realms against a multi-replica StatefulSet behind a
+		// Service. While Keycloak is still rolling out (or being rescaled), the
+		// parallel realm-create requests load-balance across replicas and one may
+		// hit a pod whose theme cache has not finished loading yet, yielding
+		// `validation error: theme "quartz" does not exist on the server`. The
+		// theme does exist (sibling realms in the same apply succeed); this is an
+		// eventual-consistency race that clears once the rollout settles, so retry.
+		// Re-apply is idempotent: realms created before the failure are already in
+		// state and plan as no-ops.
+		"does not exist on the server",
 	}
 	for _, pattern := range retryablePatterns {
 		if len(errStr) > 0 && strings.Contains(errStr, pattern) {

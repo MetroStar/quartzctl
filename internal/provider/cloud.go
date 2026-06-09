@@ -35,6 +35,11 @@ type CloudProviderClient interface {
 	CreateStateBackend(ctx context.Context) error
 	// DestroyStateBackend destroys the state backend for the cloud provider.
 	DestroyStateBackend(ctx context.Context) error
+	// StateBackendExists reports whether the state backend currently exists. It
+	// is used to short-circuit a teardown when the backend is already gone (the
+	// terminal state of a successful clean), so there is nothing left to refresh
+	// or destroy.
+	StateBackendExists(ctx context.Context) (bool, error)
 	// KubeconfigInfo retrieves the kubeconfig information for the cloud provider.
 	KubeconfigInfo(ctx context.Context) (KubeconfigInfo, error)
 	// PrintConfig prints the cloud provider configuration.

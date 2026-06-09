@@ -18,8 +18,13 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"os"
+	"path/filepath"
+	"strings"
 	"testing"
+	"time"
 
+	"github.com/MetroStar/quartzctl/internal/provider"
 	"github.com/stretchr/testify/assert"
 	"github.com/urfave/cli/v3"
 )
@@ -68,6 +73,40 @@ func TestCmdClean(t *testing.T) {
 	err := Clean(context.Background(), p)
 	if err != nil {
 		t.Errorf("unexpected error in cmd Clean, %v", err)
+	}
+}
+
+// backendGoneCloud is a cloud provider that reports its state backend as already
+// destroyed, exercising the no-op clean fast path. It embeds LocalClient so it
+// satisfies the full CloudProviderClient interface with only the existence probe
+// overridden.
+type backendGoneCloud struct {
+	provider.LocalClient
+}
+
+func (backendGoneCloud) StateBackendExists(context.Context) (bool, error) {
+	return false, nil
+}
+
+func TestCmdCleanNoOpFastPath(t *testing.T) {
+	p := defaultTestConfig(t)
+	k8s, err := p.Provider().Kubernetes(context.Background())
+	if err != nil {
+		t.Fatalf("unexpected error getting kubernetes provider, %v", err)
+	}
+
+	// Swap in a cloud provider whose state backend is already gone so the clean
+	// short-circuits before any init/refresh/destroy work.
+	p.provider = provider.NewProviderFactory(
+		p.Settings().Config,
+		p.Settings().Secrets,
+		provider.WithKubernetesProvider(k8s),
+		provider.WithCloudProvider(backendGoneCloud{provider.LocalClient{Name: "test"}}),
+	)
+
+	err = Clean(context.Background(), p)
+	if err != nil {
+		t.Errorf("unexpected error in no-op clean fast path, %v", err)
 	}
 }
 
@@ -209,6 +248,56 @@ func TestSplitStageError(t *testing.T) {
 			assert.Equal(t, tt.wantMsg, msg)
 		})
 	}
+}
+
+func TestRenderCleanupReportSuccess(t *testing.T) {
+	timing := map[string]time.Duration{
+		"init-refresh":    12 * time.Second,
+		"destroy-network": 90 * time.Second,
+	}
+	out := renderCleanupReport("pa-test", timing, 2*time.Minute, nil)
+
+	assert.Contains(t, out, "Quartz Teardown Report")
+	assert.Contains(t, out, "Cluster:   pa-test")
+	assert.Contains(t, out, "Result:    SUCCESS")
+	assert.Contains(t, out, "TOTAL:")
+	// Sorted, deterministic order: destroy-network precedes init-refresh.
+	assert.Less(t, strings.Index(out, "destroy-network"), strings.Index(out, "init-refresh"))
+	// No error section on a clean teardown.
+	assert.NotContains(t, out, "Destroy Errors:")
+}
+
+func TestRenderCleanupReportWithErrors(t *testing.T) {
+	timing := map[string]time.Duration{"destroy-cluster": 30 * time.Second}
+	errs := []error{
+		fmt.Errorf("stage cluster: No cluster found"),
+		fmt.Errorf("stage network: No cluster found"),
+		fmt.Errorf("stage host: boom"),
+	}
+	out := renderCleanupReport("pa-test", timing, time.Minute, errs)
+
+	assert.Contains(t, out, "Result:    FAILED (3 stage(s) did not destroy cleanly)")
+	assert.Contains(t, out, "Destroy Errors:")
+	// Identical messages are grouped onto a single line with both stages.
+	assert.Contains(t, out, "[cluster, network] No cluster found")
+	assert.Contains(t, out, "[host] boom")
+}
+
+func TestPersistCleanupReport(t *testing.T) {
+	dir := t.TempDir()
+	p := defaultTestConfig(t)
+	p.Settings().Config.Name = "pa-test"
+	p.Settings().Config.Log.File.Path = filepath.Join(dir, "$name.$date.log")
+
+	timing := map[string]time.Duration{"cleanup-final": time.Second}
+	path, err := persistCleanupReport(p, timing, time.Second, nil)
+	assert.NoError(t, err)
+	assert.FileExists(t, path)
+
+	data, err := os.ReadFile(path) // #nosec G304
+	assert.NoError(t, err)
+	assert.Contains(t, string(data), "Quartz Teardown Report")
+	assert.Contains(t, string(data), "Result:    SUCCESS")
 }
 
 func TestIsFluxOwnedReleaseDrift(t *testing.T) {

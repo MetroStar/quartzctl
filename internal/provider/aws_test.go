@@ -157,6 +157,35 @@ func TestProviderAwsClientDestroyStateBackend(t *testing.T) {
 	}
 }
 
+func TestProviderAwsClientStateBackendExists(t *testing.T) {
+	tests := []struct {
+		name     string
+		exists   bool
+		expected bool
+	}{
+		{name: "backend present", exists: true, expected: true},
+		{name: "backend already destroyed", exists: false, expected: false},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			c := NewAwsClient("testcluster", "us-east-1", aws.Config{
+				Region: "us-east-1",
+			}, &AwsSdkClientMock{
+				s3Client: S3ClientMock{exists: tt.exists},
+			})
+
+			got, err := c.StateBackendExists(context.Background())
+			if err != nil {
+				t.Errorf("unexpected error from aws client state backend exists, %v", err)
+			}
+			if got != tt.expected {
+				t.Errorf("expected StateBackendExists=%v, got %v", tt.expected, got)
+			}
+		})
+	}
+}
+
 func TestProviderAwsClientKubeconfigInfo(t *testing.T) {
 	c := NewAwsClient("testcluster", "us-east-1", aws.Config{
 		Region: "us-east-1",

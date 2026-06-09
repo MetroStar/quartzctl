@@ -253,7 +253,7 @@ func NewInfrastructureEnvironmentConfig(name string, desc string) Infrastructure
 					Enabled: true,
 					Admin:   true,
 				},
-				Lookup: NewApplicationLookupConfig("sonarqube", "quartz-quartz-bigbang-sonarqube", "", "username", "password", "sonarqube"),
+				Lookup: NewApplicationLookupConfig("sonarqube", "quartz-bigbang-sonarqube", "", "username", "password", "sonarqube"),
 			},
 			"jenkins": {
 				Description: "Jenkins",
