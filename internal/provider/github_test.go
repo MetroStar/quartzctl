@@ -95,11 +95,6 @@ func TestProviderGithubClientCheckAccess(t *testing.T) {
 				Organization: "example",
 				RepoUrl:      "https://github.com/example/testinfrarepo",
 			},
-			Apps: schema.RepositoryConfig{
-				Name:         "testappsrepo",
-				Organization: "example",
-				RepoUrl:      "https://github.com/example/testappsrepo",
-			},
 		},
 		Applications: map[string]schema.ApplicationRepositoryConfig{
 			"testapp1": {
@@ -139,7 +134,7 @@ func TestProviderGithubClientCheckAccess(t *testing.T) {
 	}
 
 	headers, rows := res.ToTable()
-	if len(rows) != 4 {
+	if len(rows) != 3 {
 		t.Errorf("unexpected response from github check access table, %v, %v", headers, rows)
 	}
 
@@ -151,7 +146,7 @@ func TestProviderGithubClientCheckAccess(t *testing.T) {
 		}
 	}
 
-	if errorCount != 4 {
-		t.Errorf("expected 4 errors, found %v", errorCount)
+	if errorCount != 3 {
+		t.Errorf("expected 3 errors, found %v", errorCount)
 	}
 }

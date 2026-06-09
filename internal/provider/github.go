@@ -212,7 +212,6 @@ func (r GithubProviderCheckResult) ToTable() ([]string, []ProviderCheckResultRow
 func (c GithubClient) Repositories() []schema.RepositoryConfig {
 	repositories := []schema.RepositoryConfig{
 		c.cfg.Gitops.Core,
-		c.cfg.Gitops.Apps,
 	}
 
 	for _, app := range c.cfg.Applications {
