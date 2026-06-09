@@ -134,7 +134,8 @@ func (c *TofuClient) Plan(ctx context.Context, stage schema.StageConfig) (bool, 
 
 // TofuApplyOpts contains options for Apply operations.
 type TofuApplyOpts struct {
-	AllowDeferral bool // Enable OpenTofu deferred actions (-allow-deferral)
+	AllowDeferral bool     // Enable OpenTofu deferred actions (-allow-deferral)
+	Targets       []string // Restrict the apply to these resource addresses (-target)
 }
 
 // Apply applies the OpenTofu configuration for the specified stage.
@@ -162,6 +163,16 @@ func (c *TofuClient) Apply(ctx context.Context, stage schema.StageConfig, opts .
 	// Apply deferred actions flag if requested
 	if len(opts) > 0 && opts[0].AllowDeferral {
 		vars = append(vars, tfexec.AllowDeferral(true))
+	}
+
+	// Restrict the apply to specific resource addresses when requested. Used to
+	// converge a stage's co-resources (e.g. the values overlay Secret) without
+	// touching a Flux-adopted Helm release, whose version drift would otherwise
+	// abort an untargeted plan before any resource applies.
+	if len(opts) > 0 {
+		for _, t := range opts[0].Targets {
+			vars = append(vars, tfexec.Target(t))
+		}
 	}
 
 	c.setStageEnv(tf, stage)
@@ -437,7 +448,6 @@ func (c *TofuClient) StateRemoveOrphanedClusterResources(ctx context.Context, st
 	}
 	return removed, nil
 }
-
 
 // StateResourceView is a redacted, presentation-friendly snapshot of a single
 // resource instance recorded in the OpenTofu state. Sensitive attribute values

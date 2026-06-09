@@ -182,6 +182,36 @@ func TestTofuApply(t *testing.T) {
 	}
 }
 
+func TestTofuApplyTargets(t *testing.T) {
+	t.Setenv("TEST_TF_INPUT_1", "testvalue1")
+
+	tf, err := newTestTfClient(t)
+	if err != nil {
+		t.Errorf("unexpected error from tofu client constructor, %v", err)
+	}
+
+	defer tf.Cleanup(context.Background())
+
+	stage := schema.StageConfig{
+		Path: "./testdata/destroy",
+		Vars: map[string]schema.StageVarsConfig{
+			"env_input": {Env: "TEST_TF_INPUT_1"},
+		},
+	}
+
+	tf.Init(context.Background(), stage, TofuInitOpts{})
+
+	// A targeted apply must succeed and create only the targeted resource's
+	// subgraph, leaving the others untouched. This mirrors the Flux-owned
+	// release convergence path, where only the values overlay Secret is applied.
+	err = tf.Apply(context.Background(), stage, TofuApplyOpts{
+		Targets: []string{"random_integer.include"},
+	})
+	if err != nil {
+		t.Errorf("unexpected error from targeted tofu apply, %v", err)
+	}
+}
+
 func TestTofuDestroy(t *testing.T) {
 	t.Setenv("TEST_TF_INPUT_1", "testvalue1")
 	tf, err := newTestTfClient(t)
@@ -326,7 +356,7 @@ func TestNewTofuClient(t *testing.T) {
 	cfg := config.Settings{
 		Config: schema.QuartzConfig{
 			Tofu: schema.TofuConfig{Version: test_version},
-			Tmp:       tmpDir,
+			Tmp:  tmpDir,
 		},
 	}
 
@@ -342,7 +372,7 @@ func TestTofuClient_Cleanup(t *testing.T) {
 	cfg := config.Settings{
 		Config: schema.QuartzConfig{
 			Tofu: schema.TofuConfig{Version: test_version},
-			Tmp:       tmpDir,
+			Tmp:  tmpDir,
 		},
 	}
 
@@ -358,7 +388,7 @@ func TestTofuClient_getTf(t *testing.T) {
 	cfg := config.Settings{
 		Config: schema.QuartzConfig{
 			Tofu: schema.TofuConfig{Version: test_version},
-			Tmp:       tmpDir,
+			Tmp:  tmpDir,
 		},
 	}
 
@@ -376,7 +406,7 @@ func TestTofuClient_newTfOpts(t *testing.T) {
 	cfg := config.Settings{
 		Config: schema.QuartzConfig{
 			Tofu: schema.TofuConfig{Version: test_version},
-			Tmp:       tmpDir,
+			Tmp:  tmpDir,
 		},
 	}
 
@@ -415,7 +445,7 @@ func TestInitLog(t *testing.T) {
 		Log: log.LogOptionsConfig{
 			Tofu: log.TofuLogConfig{
 				Enabled: true,
-						Path:    filepath.Join(tmpDir, "tofu.log"),
+				Path:    filepath.Join(tmpDir, "tofu.log"),
 				Level:   "DEBUG",
 			},
 		},

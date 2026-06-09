@@ -201,6 +201,24 @@ func Install(ctx context.Context, p *CommandParams, resumeFrom string) error {
 				log.Debug("Apply reported Flux-owned release version drift; treating stage as complete",
 					"stage", s.Id, "error", err)
 				util.Msgf("Stage %s is owned by Flux (release already adopted), skipping bootstrap apply", s.Id)
+
+				// The bootstrap apply is a no-op, but the stage's co-resources
+				// (e.g. the values overlay Secret consumed by the release via
+				// valuesFrom) still need to converge so day-2 quartz.yaml changes
+				// take effect. An untargeted apply can't reach them: the Helm
+				// provider aborts the whole plan on the version mismatch before
+				// any resource applies. Fall back to a targeted apply of the
+				// stage's declared convergence resources, which excludes the
+				// Flux-owned release and so avoids the abort.
+				if targets := s.Flux.ConvergeTargets; len(targets) > 0 {
+					if cerr := TfApplyTargeted(ctx, s.Id, p, targets); cerr != nil {
+						log.Warn("Targeted convergence apply failed for Flux-owned stage",
+							"stage", s.Id, "targets", targets, "error", cerr)
+						return cerr
+					}
+					util.Msgf("Stage %s co-resources converged via targeted apply", s.Id)
+				}
+
 				cp.markCompleted(s.Id)
 				cp.save(p)
 				continue

@@ -30,7 +30,20 @@ type StageConfig struct {
 	Vars         map[string]StageVarsConfig   `koanf:"vars"`
 	Checks       map[string]StageChecksConfig `koanf:"checks"`
 	Destroy      StageDestroyConfig           `koanf:"destroy"`
+	Flux         StageFluxConfig              `koanf:"flux"`
 	Debug        StageDebugConfig             `koanf:"debug"`
+}
+
+// StageFluxConfig configures how a stage behaves once its bootstrap Helm release
+// has been adopted by Flux. After adoption Flux re-renders the chart from git and
+// stamps the release version with the git revision ("1.0.0+<sha>"), so any later
+// untargeted apply aborts at plan time with "Planned version is different from
+// configured version" before the stage's other resources can converge.
+// ConvergeTargets lists the resource addresses (e.g. the values overlay Secret)
+// to re-apply with -target on that drift so day-2 configuration changes still take
+// effect without disturbing the Flux-owned release.
+type StageFluxConfig struct {
+	ConvergeTargets []string `koanf:"converge_targets"`
 }
 
 // StageChecksConfig represents the configuration for checks associated with a stage.

@@ -570,6 +570,32 @@ func TfApply(ctx context.Context, stage string, p *CommandParams) error {
 	return err
 }
 
+// TfApplyTargeted runs `tofu apply` for a stage restricted to the given resource
+// addresses (-target). It converges a stage's co-resources when a full apply is
+// blocked — specifically when the stage's bootstrap Helm release has been adopted
+// and re-versioned by Flux, which aborts an untargeted plan at plan time before
+// any resource can apply. Stage post-checks are intentionally skipped: a targeted
+// secret/config convergence does not change the cluster topology those checks
+// validate, and re-running them (e.g. the 1200s istiod gate) would needlessly
+// stall a day-2 config change.
+func TfApplyTargeted(ctx context.Context, stage string, p *CommandParams, targets []string) error {
+	log.Debug("Entering", "command", "tf:apply:targeted", "stage", stage, "targets", targets)
+	defer log.Debug("Completed", "command", "tf:apply:targeted", "stage", stage)
+
+	util.Hdrf("Apply %s (targeted convergence)", stage)
+
+	client := tofu.Instance(ctx, *p.Settings())
+	if err := tfStagePrep(ctx, stage, p); err != nil {
+		return err
+	}
+
+	s := p.Settings().Config.Stages[stage]
+	return client.Apply(ctx, s, tofu.TofuApplyOpts{
+		AllowDeferral: p.allowDeferral,
+		Targets:       targets,
+	})
+}
+
 // TfDestroy runs `tofu destroy` for a specific stage.
 func TfDestroy(ctx context.Context, stage string, p *CommandParams) error {
 	log.Debug("Entering", "command", "tf:destroy", "stage", stage)
