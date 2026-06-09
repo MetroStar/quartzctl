@@ -25,16 +25,18 @@ type RepositoryConfig struct {
 
 // ApplicationRepositoryConfig represents the configuration for an application repository.
 type ApplicationRepositoryConfig struct {
-	Name         string                      `koanf:"repo"`
-	RepoUrl      string                      `koanf:"repo_url"`
-	Provider     string                      `koanf:"provider"`
-	Organization string                      `koanf:"organization"`
-	Branch       string                      `koanf:"branch"`
-	Type         string                      `koanf:"type"`
-	Db           ApplicationDbConfig         `koanf:"db"`
-	BaseUrl      string                      `koanf:"base_url"`
-	CallbackUrls []ApplicationCallbackConfig `koanf:"callback_urls"`
-	Keycloak     map[string]interface{}      `koanf:"keycloak"`
+	Name            string                      `koanf:"repo"`
+	RepoUrl         string                      `koanf:"repo_url"`
+	Provider        string                      `koanf:"provider"`
+	Organization    string                      `koanf:"organization"`
+	Branch          string                      `koanf:"branch"`
+	Type            string                      `koanf:"type"`
+	Path            string                      `koanf:"path"`
+	ImageAutomation bool                        `koanf:"image_automation"`
+	Db              ApplicationDbConfig         `koanf:"db"`
+	BaseUrl         string                      `koanf:"base_url"`
+	CallbackUrls    []ApplicationCallbackConfig `koanf:"callback_urls"`
+	Keycloak        map[string]interface{}      `koanf:"keycloak"`
 
 	// Cloud specific and other schema-less settings for the app
 	Settings map[string]interface{} `koanf:"settings"`

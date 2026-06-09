@@ -191,7 +191,7 @@ func setDefaults(k *koanf.Koanf) {
 		Project:      "quartz",
 		Chart:        schema.ChartConfig{Path: filepath.Join(pwd, "chart")},
 		Providers:    providers,
-		Tofu:    schema.NewTofuConfig(),
+		Tofu:         schema.NewTofuConfig(),
 		Auth:         schema.DefaultAuthConfig(),
 		Gitops:       schema.DefaultGitopsConfig(providers.SourceControl),
 		Github:       schema.NewGithubConfig(),
@@ -342,6 +342,12 @@ func setAppDefaults(k *koanf.Koanf) {
 
 		if a.RepoUrl == "" && !strings.EqualFold(a.Type, "external") {
 			a.RepoUrl = githubRepoUrl(a.Organization, a.Name)
+		}
+
+		// Path to the deploy chart within the application repository
+		// (app-owns-manifests pattern). Defaults to "deploy".
+		if a.Path == "" {
+			a.Path = "deploy"
 		}
 
 		if a.Settings == nil {
