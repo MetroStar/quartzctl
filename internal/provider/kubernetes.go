@@ -733,6 +733,11 @@ type HelmReleaseStatus struct {
 	ReadyMsg   string
 	Stalled    bool
 	StalledMsg string
+	// Timeout is the release's own spec.timeout (the budget Flux gives a single
+	// install/upgrade attempt before it fails and remediates). Zero when unset.
+	// The convergence gate uses the largest of these to size its overall wait so
+	// it never gives up on a release that is still inside its own allotted time.
+	Timeout time.Duration
 }
 
 // ID returns the "namespace/name" identifier for the release.
@@ -776,6 +781,20 @@ func (p ClusterProgress) StalledReleases() []HelmReleaseStatus {
 	return out
 }
 
+// MaxReleaseTimeout returns the largest per-release spec.timeout in the
+// snapshot (zero if none declare one). The convergence gate uses this to size
+// its overall wait: a release legitimately allowed, say, 90m must not be
+// declared a failure by a gate that only waits 30m.
+func (p ClusterProgress) MaxReleaseTimeout() time.Duration {
+	var max time.Duration
+	for _, r := range p.Releases {
+		if r.Timeout > max {
+			max = r.Timeout
+		}
+	}
+	return max
+}
+
 // Summary renders a concise one-line health summary suitable for periodic
 // logging during an install.
 func (p ClusterProgress) Summary() string {
@@ -811,6 +830,13 @@ func (c KubernetesClient) ClusterProgressSnapshot(ctx context.Context) (ClusterP
 			progress.HelmReleasesTotal++
 			conds, found, _ := unstructured.NestedSlice(item.Object, "status", "conditions")
 			detail := HelmReleaseStatus{Namespace: item.GetNamespace(), Name: item.GetName()}
+			// spec.timeout is a Go duration string (e.g. "45m", "90m"). Used by
+			// the convergence gate to size its wait to the slowest release.
+			if ts, ok, _ := unstructured.NestedString(item.Object, "spec", "timeout"); ok && ts != "" {
+				if d, perr := time.ParseDuration(ts); perr == nil {
+					detail.Timeout = d
+				}
+			}
 			if found {
 				for _, cond := range conds {
 					m, ok := cond.(map[string]interface{})

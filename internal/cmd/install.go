@@ -269,16 +269,42 @@ func stageIds(stages []schema.StageConfig) string {
 }
 
 // helmConvergenceTimeout returns the overall budget for the post-install
-// HelmRelease convergence gate. Defaults to 30m; override with
-// QUARTZ_CONVERGENCE_TIMEOUT (e.g. "45m"). Set to "0" to disable the gate.
-func helmConvergenceTimeout() time.Duration {
+// HelmRelease convergence gate, and whether it was set explicitly by the
+// operator. Defaults to 30m; override with QUARTZ_CONVERGENCE_TIMEOUT (e.g.
+// "45m"). Set to "0" to disable the gate.
+//
+// When NOT set explicitly, the returned value is only a floor: the gate raises
+// it to fit the slowest HelmRelease's own spec.timeout (see adaptiveConvergenceTimeout),
+// because a release that Flux legitimately allows 90m must not be failed by a
+// gate that only waits 30m. An explicit value is always honored verbatim.
+func helmConvergenceTimeout() (time.Duration, bool) {
 	const def = 30 * time.Minute
 	if v := os.Getenv("QUARTZ_CONVERGENCE_TIMEOUT"); v != "" {
 		if d, err := time.ParseDuration(v); err == nil && d >= 0 {
-			return d
+			return d, true
 		}
 	}
-	return def
+	return def, false
+}
+
+// adaptiveConvergenceTimeout sizes the gate's wait to the slowest release. A
+// release with spec.timeout T may consume the whole T on its first attempt and
+// then remediate (retry) once before genuinely converging; the resulting
+// workloads then need the stabilize grace to roll out. Budgeting 2*T + grace
+// lets a healthy-but-slow release (cold image pulls, model warmers) finish
+// instead of tripping a misleading "did not converge" while it is still
+// progressing. The static floor still applies for fast clusters. The gate
+// exits the instant all releases are Ready or any release Stalls, so a generous
+// backstop never makes a converged install wait.
+func adaptiveConvergenceTimeout(floor, maxReleaseTimeout, grace time.Duration) time.Duration {
+	if maxReleaseTimeout <= 0 {
+		return floor
+	}
+	adaptive := 2*maxReleaseTimeout + grace
+	if adaptive > floor {
+		return adaptive
+	}
+	return floor
 }
 
 // convergencePollInterval returns the cadence for the convergence gate's
@@ -346,7 +372,7 @@ func formatReleaseFailures(rs []provider.HelmReleaseStatus) string {
 // offending releases so the operator gets an actionable failure instead of a
 // misleading "Installation successful".
 func waitForClusterConvergence(ctx context.Context, p *CommandParams) error {
-	timeout := helmConvergenceTimeout()
+	timeout, explicit := helmConvergenceTimeout()
 	if timeout == 0 {
 		util.Msg("HelmRelease convergence gate disabled (QUARTZ_CONVERGENCE_TIMEOUT=0)")
 		return nil
@@ -362,8 +388,15 @@ func waitForClusterConvergence(ctx context.Context, p *CommandParams) error {
 
 	util.Hdr("Waiting for all HelmReleases to converge")
 
-	deadline := time.Now().Add(timeout)
+	start := time.Now()
+	deadline := start.Add(timeout)
 	interval := convergencePollInterval()
+
+	// Unless the operator pinned the budget explicitly, the gate adapts its
+	// deadline once to the slowest release's own spec.timeout (computed from the
+	// first snapshot below), so it never gives up on a release that is still
+	// inside the time Flux is allowed to spend on it.
+	deadlineAdapted := explicit
 
 	// A release must report Stalled across consecutive polls before the gate
 	// gives up on it, so a brief self-healing blip doesn't abort an
@@ -398,6 +431,19 @@ func waitForClusterConvergence(ctx context.Context, p *CommandParams) error {
 			if snap.HelmReleasesTotal == 0 {
 				log.Debug("Convergence gate: no HelmReleases present, nothing to wait for")
 				return nil
+			}
+
+			// Size the wait to the slowest release the first time we can see the
+			// releases. Done once: the release set is stable for an install and
+			// extending the deadline mid-wait should reflect declared intent, not
+			// drift in transient status.
+			if !deadlineAdapted {
+				deadlineAdapted = true
+				if adapted := adaptiveConvergenceTimeout(timeout, snap.MaxReleaseTimeout(), workloadGrace); adapted > timeout {
+					deadline = start.Add(adapted)
+					util.Msgf("Convergence budget extended to %s to fit slowest HelmRelease timeout (%s)",
+						adapted, snap.MaxReleaseTimeout())
+				}
 			}
 
 			if snap.HelmReleasesReady == snap.HelmReleasesTotal {
@@ -486,9 +532,30 @@ func waitForClusterConvergence(ctx context.Context, p *CommandParams) error {
 		}
 
 		if time.Now().After(deadline) {
-			return fmt.Errorf("install did not converge within %s: %d/%d HelmReleases ready; still not ready: %s",
-				timeout, last.HelmReleasesReady, last.HelmReleasesTotal,
-				formatReleaseFailures(last.NotReadyDetails()))
+			elapsed := time.Since(start).Round(time.Second)
+			notReady := last.NotReadyDetails()
+
+			// Distinguish a genuinely stuck install (a release Flux has Stalled —
+			// retries/remediation exhausted, won't recover without intervention)
+			// from one that is merely still progressing. The latter routinely
+			// self-heals: Flux keeps reconciling in-cluster after the CLI exits,
+			// so a resume that skips completed stages and re-checks convergence
+			// usually finds the cluster green. Wording the two cases differently
+			// stops a slow-but-healthy install from looking like a hard failure.
+			var stalledNow []provider.HelmReleaseStatus
+			for _, r := range notReady {
+				if r.Stalled {
+					stalledNow = append(stalledNow, r)
+				}
+			}
+			if len(stalledNow) > 0 {
+				return fmt.Errorf("install did not converge within %s: %d HelmRelease(s) stalled (Flux exhausted retries): %s",
+					elapsed, len(stalledNow), formatReleaseFailures(stalledNow))
+			}
+			return fmt.Errorf("install did not converge within %s: %d/%d HelmReleases ready, none stalled — still progressing. "+
+				"Flux keeps reconciling in-cluster; re-run `quartz install` to resume (completed stages are skipped) and confirm convergence. Still not ready: %s",
+				elapsed, last.HelmReleasesReady, last.HelmReleasesTotal,
+				formatReleaseFailures(notReady))
 		}
 
 		select {

@@ -332,3 +332,50 @@ func TestIsFluxOwnedReleaseDrift(t *testing.T) {
 		})
 	}
 }
+
+func TestHelmConvergenceTimeout(t *testing.T) {
+	t.Setenv("QUARTZ_CONVERGENCE_TIMEOUT", "")
+	d, explicit := helmConvergenceTimeout()
+	assert.Equal(t, 30*time.Minute, d)
+	assert.False(t, explicit, "unset env should not be explicit")
+
+	t.Setenv("QUARTZ_CONVERGENCE_TIMEOUT", "45m")
+	d, explicit = helmConvergenceTimeout()
+	assert.Equal(t, 45*time.Minute, d)
+	assert.True(t, explicit, "set env should be explicit")
+
+	// Garbage falls back to the (non-explicit) default.
+	t.Setenv("QUARTZ_CONVERGENCE_TIMEOUT", "not-a-duration")
+	d, explicit = helmConvergenceTimeout()
+	assert.Equal(t, 30*time.Minute, d)
+	assert.False(t, explicit)
+}
+
+func TestAdaptiveConvergenceTimeout(t *testing.T) {
+	floor := 30 * time.Minute
+	grace := 3 * time.Minute
+
+	// No release declares a timeout: keep the floor.
+	assert.Equal(t, floor, adaptiveConvergenceTimeout(floor, 0, grace))
+
+	// Slow release (90m, e.g. ollama cold pull): 2*90m + 3m, well above floor.
+	assert.Equal(t, 183*time.Minute, adaptiveConvergenceTimeout(floor, 90*time.Minute, grace))
+
+	// A release whose timeout is small enough that 2*T+grace stays under the
+	// floor must not shrink the budget below the floor.
+	assert.Equal(t, floor, adaptiveConvergenceTimeout(floor, 5*time.Minute, grace))
+}
+
+func TestClusterProgressMaxReleaseTimeout(t *testing.T) {
+	p := provider.ClusterProgress{
+		Releases: []provider.HelmReleaseStatus{
+			{Namespace: "quartz", Name: "kiali", Timeout: 45 * time.Minute},
+			{Namespace: "quartz", Name: "ollama", Timeout: 90 * time.Minute},
+			{Namespace: "quartz", Name: "reloader"}, // no timeout
+		},
+	}
+	assert.Equal(t, 90*time.Minute, p.MaxReleaseTimeout())
+
+	// Empty snapshot reports zero (gate then keeps its floor).
+	assert.Equal(t, time.Duration(0), provider.ClusterProgress{}.MaxReleaseTimeout())
+}
