@@ -85,7 +85,10 @@ func AwsGetEksToken(ctx context.Context, name string, region string) error {
 		return err
 	}
 
-	_, token, err := aws.EksKubeconfigInfo(ctx)
+	// The exec credential plugin only needs the token; the cluster endpoint and
+	// CA are already present in the kubeconfig. Minting the token via STS presign
+	// avoids an eks:DescribeCluster call (and the IAM permission it requires).
+	token, err := aws.GenerateEksToken(ctx)
 	if err != nil {
 		return err
 	}
