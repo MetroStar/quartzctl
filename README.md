@@ -24,6 +24,10 @@ Quartz is an open-source CLI tool designed to automate the full lifecycle of Kub
 - Plugin framework to expand beyond AWS and OpenTofu
 - Unwind tightly coupled assumptions of the platform (ex: separate repositories vs monorepo, use of gitops, core application stack, etc...)
 
+## Capability Documentation
+
+Delivery teams and capture teams should start with the [quartzctl Capability Package](docs/capability/README.md). It includes the nine-document delivery set: capability summary, reference architecture, operating model, onboarding guide, runbook, troubleshooting guide, template package, value brief, and product page.
+
 ---
 
 ## 📖 Table of Contents
@@ -32,6 +36,7 @@ Quartz is an open-source CLI tool designed to automate the full lifecycle of Kub
 - [Getting Started](#getting-started)
 - [Usage](#usage)
 - [Configuration](#configuration)
+- [Capability Documentation](#capability-documentation)
 - [Development](#development)
 - [Security](#security)
 - [Contributing](#contributing)
@@ -47,6 +52,9 @@ Quartz is an open-source CLI tool designed to automate the full lifecycle of Kub
 - **Dynamic Variables**: Pass output variables from one stage as input to another.
 - **Environment Management**: Set environment variables and configuration values per stage.
 - **Health Checks**: Execute pre- and post-apply/destroy health checks to ensure application stability.
+- **Resumable Installs**: Resume from a named stage and skip completed stages only when drift checks show they are still in sync.
+- **State Repair**: Import resources, release stale locks, inspect redacted state, and remove state entries through the CLI.
+- **Resilient Teardown**: Destroy stages in reverse dependency order and preserve the backend until all stages cleanly destroy.
 - **Kubernetes Integration**: Monitor Kubernetes deployment statuses and other conditions before proceeding.
 - **Extensibility**: Support for additional features and integrations as needed.
 
@@ -84,25 +92,28 @@ quartz [command] [flags]
 ### Available Commands
 
 - `check`: Check environment, configuration and access for installer prerequisites.
-- `clean`: Perform a full cleanup/teardown of the system. Pass `--yes`/`-y` to skip the confirmation prompt (useful for CI). The destroy flow is self-healing: if the cluster is already gone it clears orphaned in-cluster (Helm/Kubernetes) state and continues destroying the remaining cloud resources.
+- `clean`: Perform a full cleanup/teardown of the system. Pass `--yes`/`-y` to skip the confirmation prompt (useful for CI). Cleanup destroys stages in reverse dependency order and preserves the state backend until all stages complete successfully.
 - `export`: Export configured Kubernetes resources to yaml.
 - `info`: Output configuration info for the current cluster.
-- `install`: Perform a full install/update of the system. Pass `--yes`/`-y` to skip confirmation prompts.
-- `login`: Generate a kubeconfig for the current cluster.
-- `refresh-secrets`: Trigger all external secrets to be refreshed immediately.
-- `render`: Write internal configuration to yaml (For development use).
-- `restart`: Restart target resource(s).
-- `tofu`: OpenTofu subcommands for configured stages.
+- `install`: Perform a full install/update of the system. Pass `--resume-from`/`-r` to resume from a stage, `--allow-deferral` to enable OpenTofu deferred actions, and `--yes`/`-y` to skip confirmation prompts.
+- `login`: Generate a kubeconfig for the current cluster (`kubeconfig` and `refresh-kubeconfig` aliases).
+- `refresh-secrets`: Trigger all external secrets to be refreshed immediately (`rs` alias).
+- `render`: Write fully rendered configuration to yaml (`--out`/`-o`, default `./out/quartz.generated.yaml`).
+- `restart`: Restart target Kubernetes resources. Defaults to deployments, daemonsets, and statefulsets; narrow with `--kind`/`-k`, `--namespace`/`-n`, and `--name`.
+- `tofu` / `tf`: OpenTofu subcommands for configured stages.
   - `apply`: Run `tofu apply` for a stage (`--stage <name>` required).
   - `destroy`: Run `tofu destroy` for a stage (`--stage <name>` required).
-  - `format`: Run `tofu fmt` for a stage (`--stage <name>` required).
+  - `force-unlock`: Run `tofu force-unlock` for a stage (`--stage <name>` plus lock id).
+  - `format` / `fmt`: Run `tofu fmt` for a stage (`--stage <name>` required).
   - `format-all`: Run `tofu fmt` for all stages.
+  - `import`: Run `tofu import` for a stage (`--stage <name>` plus address/id).
   - `init`: Run `tofu init` for a stage (`--stage <name>` required).
   - `init-all`: Run `tofu init` for all stages.
   - `output`: Run `tofu output` for a stage (`--stage <name>` required).
   - `plan`: Run `tofu plan` for a stage (`--stage <name>` required).
   - `refresh`: Run `tofu refresh` for a stage (`--stage <name>` required).
   - `refresh-all`: Run `tofu refresh` for all stages.
+  - `state`: Inspect or modify stage state: `list`, `show` (sensitive values redacted), and `rm`/`remove`.
   - `validate`: Run `tofu validate` for a stage (`--stage <name>` required).
   - `version`: Run `tofu version`.
 - `help`: Shows a list of commands or help for one command
@@ -121,7 +132,7 @@ quartz [command] [flags]
 ### Example
 
 ```bash
-quartz install --config=quartz.yaml
+quartz --config=quartz.yaml install
 ```
 
 ---
@@ -152,7 +163,7 @@ The `stage.yaml` file allows for stage directories to override configuration fro
 ```yaml
 
 # define input variables for the tofu stage and their source
-# NOTE: all stages assume the existence of a `settings` input variable that recieves the entire rendered config map unless overridden
+# NOTE: all stages assume the existence of a `settings` input variable that receives the entire rendered config map unless overridden
 vars:
   # input variable <my_env_val> defined in variables.tf
   my_env_val:
