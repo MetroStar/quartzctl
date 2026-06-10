@@ -228,6 +228,7 @@ func checkCloudConfig(ctx context.Context, k *koanf.Koanf) error {
 
 // setGitopsDefaults sets default values for GitOps configuration.
 func setGitopsDefaults(k *koanf.Koanf) {
+	name := k.String("name")
 	p := k.String("providers.source_control")
 
 	var sc schema.GithubConfig
@@ -242,17 +243,26 @@ func setGitopsDefaults(k *koanf.Koanf) {
 
 	org := sc.Organization
 
-	if gitops.Core.Provider == "" {
-		gitops.Core.Provider = p
+	if gitops.Apps.Branch == "" {
+		gitops.Apps.Branch = name
 	}
-	if gitops.Core.Organization == "" {
-		gitops.Core.Organization = org
-	}
-	if gitops.Core.Branch == "" {
-		gitops.Core.Branch = "main"
-	}
-	if gitops.Core.RepoUrl == "" {
-		gitops.Core.RepoUrl = githubRepoUrl(gitops.Core.Organization, gitops.Core.Name)
+
+	for _, r := range []*schema.RepositoryConfig{&gitops.Core, &gitops.Apps} {
+		if r.Provider == "" {
+			r.Provider = p
+		}
+
+		if r.Organization == "" {
+			r.Organization = org
+		}
+
+		if r.Branch == "" {
+			r.Branch = "main"
+		}
+
+		if r.RepoUrl == "" {
+			r.RepoUrl = githubRepoUrl(r.Organization, r.Name)
+		}
 	}
 
 	k2 := koanf.New(".")
