@@ -567,6 +567,10 @@ func TfApply(ctx context.Context, stage string, p *CommandParams) error {
 	})
 
 	if err != nil {
+		if isFluxOwnedReleaseDrift(err) {
+			util.Msgf("Stage %s encountered Flux-owned release drift after %v; handing off to bootstrap skip handler", stage, time.Since(stageStart).Round(time.Second))
+			return err
+		}
 		util.Msgf("Stage %s failed after %v", stage, time.Since(stageStart).Round(time.Second))
 		return err
 	}
