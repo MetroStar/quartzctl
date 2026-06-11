@@ -566,8 +566,12 @@ func TfApply(ctx context.Context, stage string, p *CommandParams) error {
 		return client.Apply(ctx, s, tofu.TofuApplyOpts{AllowDeferral: p.allowDeferral})
 	})
 
+	if err != nil {
+		util.Msgf("Stage %s failed after %v", stage, time.Since(stageStart).Round(time.Second))
+		return err
+	}
 	util.Msgf("Stage %s completed in %v", stage, time.Since(stageStart).Round(time.Second))
-	return err
+	return nil
 }
 
 // TfApplyTargeted runs `tofu apply` for a stage restricted to the given resource

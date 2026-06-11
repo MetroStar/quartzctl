@@ -19,7 +19,6 @@ import (
 	"fmt"
 	"slices"
 
-	"github.com/MetroStar/quartzctl/internal/log"
 	"github.com/MetroStar/quartzctl/internal/provider"
 	"github.com/urfave/cli/v3"
 )
@@ -77,9 +76,6 @@ func NewGetEksTokenCommand() AwsCommandResult {
 // Returns:
 //   - error: An error if the token retrieval fails, otherwise nil.
 func AwsGetEksToken(ctx context.Context, name string, region string) error {
-	log.Debug("Entering", "command", "aws:get-eks-token")
-	defer log.Debug("Completed", "command", "aws:get-eks-token")
-
 	aws, err := provider.NewLazyAwsClient(ctx, name, region)
 	if err != nil {
 		return err

@@ -121,12 +121,18 @@ func (c *TofuClient) Plan(ctx context.Context, stage schema.StageConfig) (bool, 
 		return false, err
 	}
 
-	var vars []tfexec.PlanOption
-	for _, v := range c.stageVars(ctx, stage) {
-		vars = append(vars, v)
+	stageVarFile, cleanup, err := c.stageVarFile(ctx, stage)
+	if err != nil {
+		return false, err
 	}
+	defer cleanup()
+
+	var vars []tfexec.PlanOption
 	if !stage.OverrideVars {
 		vars = append(vars, tfexec.VarFile(c.cfg.Config.TfVarFilePath()))
+	}
+	if stageVarFile != "" {
+		vars = append(vars, tfexec.VarFile(stageVarFile))
 	}
 	c.setStageEnv(tf, stage)
 	return tf.Plan(ctx, vars...)
@@ -152,12 +158,18 @@ func (c *TofuClient) Apply(ctx context.Context, stage schema.StageConfig, opts .
 		return err
 	}
 
-	var vars []tfexec.ApplyOption
-	for _, v := range c.stageVars(ctx, stage) {
-		vars = append(vars, v)
+	stageVarFile, cleanup, err := c.stageVarFile(ctx, stage)
+	if err != nil {
+		return err
 	}
+	defer cleanup()
+
+	var vars []tfexec.ApplyOption
 	if !stage.OverrideVars {
 		vars = append(vars, tfexec.VarFile(c.cfg.Config.TfVarFilePath()))
+	}
+	if stageVarFile != "" {
+		vars = append(vars, tfexec.VarFile(stageVarFile))
 	}
 
 	// Apply deferred actions flag if requested
@@ -199,15 +211,21 @@ func (c *TofuClient) Destroy(ctx context.Context, stage schema.StageConfig) erro
 		return err
 	}
 
+	stageVarFile, cleanup, err := c.stageVarFile(ctx, stage)
+	if err != nil {
+		return err
+	}
+	defer cleanup()
+
 	var vars []tfexec.DestroyOption
 	vars = append(vars, tfexec.Refresh(false))
 	// Short lock timeout: fail fast on stale locks so retry logic can force-unlock
 	vars = append(vars, tfexec.LockTimeout("10s"))
-	for _, v := range c.stageVars(ctx, stage) {
-		vars = append(vars, v)
-	}
 	if !stage.OverrideVars {
 		vars = append(vars, tfexec.VarFile(c.cfg.Config.TfVarFilePath()))
+	}
+	if stageVarFile != "" {
+		vars = append(vars, tfexec.VarFile(stageVarFile))
 	}
 
 	targets, found, err := targetsToDestroy(ctx, c, stage)
@@ -248,12 +266,18 @@ func (c *TofuClient) Refresh(ctx context.Context, stage schema.StageConfig) erro
 	}
 	c.setStageEnv(tf, stage)
 
-	var vars []tfexec.RefreshCmdOption
-	for _, v := range c.stageVars(ctx, stage) {
-		vars = append(vars, v)
+	stageVarFile, cleanup, err := c.stageVarFile(ctx, stage)
+	if err != nil {
+		return err
 	}
+	defer cleanup()
+
+	var vars []tfexec.RefreshCmdOption
 	if !stage.OverrideVars {
 		vars = append(vars, tfexec.VarFile(c.cfg.Config.TfVarFilePath()))
+	}
+	if stageVarFile != "" {
+		vars = append(vars, tfexec.VarFile(stageVarFile))
 	}
 
 	refreshErr := tf.Refresh(ctx, vars...)
@@ -354,12 +378,18 @@ func (c *TofuClient) Import(ctx context.Context, stage schema.StageConfig, addre
 		return err
 	}
 
-	var opts []tfexec.ImportOption
-	for _, v := range c.stageVars(ctx, stage) {
-		opts = append(opts, v)
+	stageVarFile, cleanup, err := c.stageVarFile(ctx, stage)
+	if err != nil {
+		return err
 	}
+	defer cleanup()
+
+	var opts []tfexec.ImportOption
 	if !stage.OverrideVars {
 		opts = append(opts, tfexec.VarFile(c.cfg.Config.TfVarFilePath()))
+	}
+	if stageVarFile != "" {
+		opts = append(opts, tfexec.VarFile(stageVarFile))
 	}
 
 	c.setStageEnv(tf, stage)
@@ -718,10 +748,10 @@ func ExtractLockID(errMsg string) (string, bool) {
 	return lockID, true
 }
 
-// stageVars generates the input variables for the specified stage based on its configuration.
+// stageVarValues generates the input variables for the specified stage based on its configuration.
 // It supports literal values, environment variables, configuration values, secrets, and outputs from other stages.
-func (c *TofuClient) stageVars(ctx context.Context, stage schema.StageConfig) []*tfexec.VarOption {
-	var vars []*tfexec.VarOption
+func (c *TofuClient) stageVarValues(ctx context.Context, stage schema.StageConfig) map[string]string {
+	vars := make(map[string]string)
 
 	outputs := make(map[string]map[string][]byte)
 
@@ -730,7 +760,7 @@ func (c *TofuClient) stageVars(ctx context.Context, stage schema.StageConfig) []
 	for k, v := range stage.Vars {
 		if v.Value != "" {
 			log.Debug("OpenTofu literal input var", "key", k, "val", redactSensitiveVar(k, v.Value))
-			vars = append(vars, tfexec.Var(fmt.Sprintf("%s=%s", k, v.Value)))
+			vars[k] = v.Value
 		} else if v.Env != "" {
 			val, found := os.LookupEnv(v.Env)
 			if !found {
@@ -738,7 +768,7 @@ func (c *TofuClient) stageVars(ctx context.Context, stage schema.StageConfig) []
 			}
 
 			log.Debug("OpenTofu env input var", "key", v.Env, "val", redactSensitiveVar(k, val))
-			vars = append(vars, tfexec.Var(fmt.Sprintf("%s=%s", k, val)))
+			vars[k] = val
 		} else if v.Config != "" {
 			val := c.cfg.ConfigString(v.Config)
 			if val == "" {
@@ -747,7 +777,7 @@ func (c *TofuClient) stageVars(ctx context.Context, stage schema.StageConfig) []
 			}
 
 			log.Debug("OpenTofu config var", "key", v.Config, "val", redactSensitiveVar(k, val))
-			vars = append(vars, tfexec.Var(fmt.Sprintf("%s=%s", k, val)))
+			vars[k] = val
 		} else if v.Secret != "" {
 			val := c.cfg.SecretString(v.Secret)
 			if val == "" {
@@ -756,7 +786,7 @@ func (c *TofuClient) stageVars(ctx context.Context, stage schema.StageConfig) []
 			}
 
 			log.Debug("OpenTofu secret input var", "key", v.Secret, "val", "[REDACTED]")
-			vars = append(vars, tfexec.Var(fmt.Sprintf("%s=%s", k, val)))
+			vars[k] = val
 		} else if v.Stage.Name != "" {
 			_, ok := outputs[v.Stage.Name]
 			if !ok {
@@ -777,11 +807,77 @@ func (c *TofuClient) stageVars(ctx context.Context, stage schema.StageConfig) []
 			}
 
 			log.Debug("OpenTofu stage input var", "stage", v.Stage.Name, "output", v.Stage.Output, "key", k, "val", redactSensitiveVar(k, val))
-			vars = append(vars, tfexec.Var(fmt.Sprintf("%s=%s", k, val)))
+			vars[k] = val
 		}
 	}
 
 	return vars
+}
+
+// stageVarFile writes stage variables to a temporary tfvars JSON file and
+// returns its path plus a cleanup function. Passing only -var-file=<path> keeps
+// secret values out of OpenTofu/terraform-exec DEBUG logs, which otherwise log
+// full CLI arguments for -var name=value.
+func (c *TofuClient) stageVarFile(ctx context.Context, stage schema.StageConfig) (string, func(), error) {
+	values := c.stageVarValues(ctx, stage)
+	cleanup := func() {}
+	if len(values) == 0 {
+		return "", cleanup, nil
+	}
+
+	dir := c.cfg.Config.Tmp
+	if dir == "" {
+		dir = os.TempDir()
+	}
+	if err := os.MkdirAll(dir, 0o750); err != nil {
+		return "", cleanup, fmt.Errorf("failed to create tofu variable temp directory: %w", err)
+	}
+
+	f, err := os.CreateTemp(dir, "quartz-"+safeStageVarFilePrefix(stage.Id)+"-*.tfvars.json")
+	if err != nil {
+		return "", cleanup, fmt.Errorf("failed to create temporary tofu variable file: %w", err)
+	}
+	path := f.Name()
+	cleanup = func() {
+		if err := os.Remove(path); err != nil && !os.IsNotExist(err) {
+			log.Debug("Failed to remove temporary tofu variable file", "path", path, "err", err)
+		}
+	}
+
+	if err := os.Chmod(path, 0o600); err != nil {
+		_ = f.Close()
+		cleanup()
+		return "", func() {}, fmt.Errorf("failed to secure temporary tofu variable file: %w", err)
+	}
+
+	enc := json.NewEncoder(f)
+	enc.SetEscapeHTML(false)
+	if err := enc.Encode(values); err != nil {
+		_ = f.Close()
+		cleanup()
+		return "", func() {}, fmt.Errorf("failed to write temporary tofu variable file: %w", err)
+	}
+	if err := f.Close(); err != nil {
+		cleanup()
+		return "", func() {}, fmt.Errorf("failed to close temporary tofu variable file: %w", err)
+	}
+
+	log.Debug("OpenTofu stage vars written to temporary var-file", "stage", stage.Id, "path", path, "keys", len(values))
+	return path, cleanup, nil
+}
+
+func safeStageVarFilePrefix(id string) string {
+	safe := strings.Map(func(r rune) rune {
+		if (r >= 'a' && r <= 'z') || (r >= 'A' && r <= 'Z') || (r >= '0' && r <= '9') || r == '-' || r == '_' {
+			return r
+		}
+		return '-'
+	}, id)
+	safe = strings.Trim(safe, "-")
+	if safe == "" {
+		return "stage"
+	}
+	return safe
 }
 
 // parseStageOutputValue parses a specific output value from the OpenTofu state of another stage.

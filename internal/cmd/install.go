@@ -806,6 +806,17 @@ func renderCleanupReport(name string, stageTiming map[string]time.Duration, tota
 		}
 	}
 
+	fmt.Fprintf(&b, "\nNext Action:\n")
+	if len(errs) > 0 {
+		fmt.Fprintf(&b, "  State backend: preserved because one or more stages failed.\n")
+		fmt.Fprintf(&b, "  Retry:         quartz clean --yes\n")
+		fmt.Fprintf(&b, "  Logs:          inspect the neighboring *.tf.log and *.tf.log.*.gz files for the failed stage.\n")
+	} else {
+		fmt.Fprintf(&b, "  State backend: destroyed after all stages completed.\n")
+		fmt.Fprintf(&b, "  Retry:         not needed.\n")
+		fmt.Fprintf(&b, "  Logs:          retained only for audit/troubleshooting.\n")
+	}
+
 	return b.String()
 }
 

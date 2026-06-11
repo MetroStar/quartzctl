@@ -263,6 +263,8 @@ func TestRenderCleanupReportSuccess(t *testing.T) {
 	assert.Contains(t, out, "TOTAL:")
 	// Sorted, deterministic order: destroy-network precedes init-refresh.
 	assert.Less(t, strings.Index(out, "destroy-network"), strings.Index(out, "init-refresh"))
+	assert.Contains(t, out, "Next Action:")
+	assert.Contains(t, out, "State backend: destroyed")
 	// No error section on a clean teardown.
 	assert.NotContains(t, out, "Destroy Errors:")
 }
@@ -281,6 +283,9 @@ func TestRenderCleanupReportWithErrors(t *testing.T) {
 	// Identical messages are grouped onto a single line with both stages.
 	assert.Contains(t, out, "[cluster, network] No cluster found")
 	assert.Contains(t, out, "[host] boom")
+	assert.Contains(t, out, "Next Action:")
+	assert.Contains(t, out, "State backend: preserved")
+	assert.Contains(t, out, "quartz clean --yes")
 }
 
 func TestPersistCleanupReport(t *testing.T) {

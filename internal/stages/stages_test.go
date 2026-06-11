@@ -15,6 +15,7 @@
 package stages
 
 import (
+	"os"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -102,6 +103,36 @@ func TestProcessStagePathHappy(t *testing.T) {
 		} else if !compare(ev, av) {
 			t.Errorf("incorrect stage value for input key %s, expected %v, got %v", ek, ev, av)
 		}
+	}
+}
+
+func TestProcessStagePathSkipsManualExampleDirs(t *testing.T) {
+	root := t.TempDir()
+	must := func(err error) {
+		if err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	must(os.Mkdir(filepath.Join(root, "10-default"), 0o750))
+	must(os.WriteFile(filepath.Join(root, "10-default", "main.tf"), nil, 0o640))
+
+	must(os.Mkdir(filepath.Join(root, "xx-region"), 0o750))
+	must(os.WriteFile(filepath.Join(root, "xx-region", "stage.yaml"), []byte("manual: true\n"), 0o640))
+
+	must(os.Mkdir(filepath.Join(root, "example-region"), 0o750))
+	must(os.WriteFile(filepath.Join(root, "example-region", "stage.yaml"), []byte("example: true\n"), 0o640))
+
+	actual, err := processStagePath(root)
+	if err != nil {
+		t.Fatalf("unexpected error, %v", err)
+	}
+
+	if _, ok := actual["default"]; !ok {
+		t.Fatalf("expected default stage to be loaded")
+	}
+	if _, ok := actual["region"]; ok {
+		t.Fatalf("manual/example stage should have been skipped: %v", actual["region"])
 	}
 }
 

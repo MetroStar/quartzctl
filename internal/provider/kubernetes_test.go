@@ -1419,6 +1419,17 @@ func TestClusterProgressSummary(t *testing.T) {
 	}
 }
 
+func TestHelmActionTimeout(t *testing.T) {
+	got := helmActionTimeout("Running 'install' action with timeout of 45m0s")
+	if got != 45*time.Minute {
+		t.Fatalf("helmActionTimeout() = %v, want 45m", got)
+	}
+
+	if got := helmActionTimeout("upgrade is progressing"); got != 0 {
+		t.Fatalf("helmActionTimeout() = %v, want 0", got)
+	}
+}
+
 func TestProviderKubernetesClientScrubStuckHelmReleaseSecrets(t *testing.T) {
 	helmSecret := func(ns, name, release, status string) *corev1.Secret {
 		return &corev1.Secret{

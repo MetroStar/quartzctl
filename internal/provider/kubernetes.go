@@ -21,6 +21,7 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"regexp"
 	"slices"
 	"strings"
 	"sync"
@@ -50,6 +51,26 @@ import (
 var defaultCache = &KubernetesLookupCache{
 	mutex: &sync.Mutex{},
 	kinds: map[string]schema.GroupVersionResource{},
+}
+
+var helmActionTimeoutPattern = regexp.MustCompile(`(?i)timeout(?: of)? ([0-9][0-9a-zA-Z.]*)`)
+
+func helmActionTimeout(msg string) time.Duration {
+	m := helmActionTimeoutPattern.FindStringSubmatch(msg)
+	if m == nil {
+		return 0
+	}
+	d, err := time.ParseDuration(m[1])
+	if err != nil {
+		return 0
+	}
+	return d
+}
+
+func logSnapshotFailure(action string, err error) {
+	if err != nil && !errors.Is(err, context.Canceled) {
+		log.Debug("Progress snapshot: "+action+" failed (non-fatal)", "err", err)
+	}
 }
 
 // KubernetesProviderClient defines the interface for Kubernetes provider clients.
@@ -846,6 +867,9 @@ func (c KubernetesClient) ClusterProgressSnapshot(ctx context.Context) (ClusterP
 					ctype, _ := m["type"].(string)
 					cstatus, _ := m["status"].(string)
 					cmsg, _ := m["message"].(string)
+					if d := helmActionTimeout(cmsg); d > detail.Timeout {
+						detail.Timeout = d
+					}
 					switch ctype {
 					case "Ready":
 						detail.Ready = cstatus == "True"
@@ -878,14 +902,8 @@ func (c KubernetesClient) ClusterProgressSnapshot(ctx context.Context) (ClusterP
 		// Propagate it so the caller can skip emitting a misleading "0/0 ready"
 		// instead of reporting partial counts as if they were authoritative.
 		if ferr != nil {
-			// A canceled context is the expected, benign case (the progress
-			// reporter is being stopped, e.g. a stage that completed quickly or
-			// the cluster API going away mid-teardown). Don't log it even at
-			// DEBUG — it's pure noise. Still propagate so the caller skips the
-			// unreliable snapshot.
-			if !errors.Is(ferr, context.Canceled) {
-				log.Debug("Progress snapshot: listing HelmReleases failed (non-fatal)", "err", ferr)
-			}
+			// A canceled context is expected when a progress reporter is stopped.
+			logSnapshotFailure("listing HelmReleases", ferr)
 			return progress, ferr
 		}
 	}
@@ -898,7 +916,7 @@ func (c KubernetesClient) ClusterProgressSnapshot(ctx context.Context) (ClusterP
 			}
 		}
 	} else {
-		log.Debug("Progress snapshot: listing namespaces failed (non-fatal)", "err", nsErr)
+		logSnapshotFailure("listing namespaces", nsErr)
 	}
 
 	// Unhealthy pods: not Running/Succeeded, or stuck in a failing waiting state.
@@ -910,7 +928,7 @@ func (c KubernetesClient) ClusterProgressSnapshot(ctx context.Context) (ClusterP
 			}
 		}
 	} else {
-		log.Debug("Progress snapshot: listing pods failed (non-fatal)", "err", podErr)
+		logSnapshotFailure("listing pods", podErr)
 	}
 
 	return progress, nil

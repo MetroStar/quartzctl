@@ -16,6 +16,7 @@ package tofu
 
 import (
 	"context"
+	"encoding/json"
 	"os"
 	"path/filepath"
 	"strings"
@@ -525,4 +526,56 @@ func newTestTfClient(t *testing.T) (TofuClient, error) {
 	}
 
 	return NewTofuClient(context.Background(), c)
+}
+
+func TestStageVarFileWritesSecretValuesOutsideCLIArgs(t *testing.T) {
+	tf, err := newTestTfClient(t)
+	if err != nil {
+		t.Fatalf("unexpected tofu client constructor error, %v", err)
+	}
+	defer tf.Cleanup(context.Background())
+
+	stage := schema.StageConfig{
+		Id: "secret-stage",
+		Vars: map[string]schema.StageVarsConfig{
+			"github_token": {Secret: "foo.bar"},
+			"domain":       {Config: "dns.domain"},
+		},
+	}
+
+	path, cleanup, err := tf.stageVarFile(context.Background(), stage)
+	if err != nil {
+		t.Fatalf("stageVarFile returned error: %v", err)
+	}
+	defer cleanup()
+
+	if path == "" {
+		t.Fatal("stageVarFile returned empty path")
+	}
+	if !strings.Contains(filepath.Base(path), "secret-stage") {
+		t.Fatalf("stage var file should include sanitized stage id, got %s", path)
+	}
+
+	info, err := os.Stat(path)
+	if err != nil {
+		t.Fatalf("stage var file missing: %v", err)
+	}
+	if got := info.Mode().Perm(); got != 0o600 {
+		t.Fatalf("stage var file mode = %v, want 0600", got)
+	}
+
+	data, err := os.ReadFile(path) // #nosec G304 -- test-owned temp file
+	if err != nil {
+		t.Fatalf("failed reading stage var file: %v", err)
+	}
+	var values map[string]string
+	if err := json.Unmarshal(data, &values); err != nil {
+		t.Fatalf("stage var file is not JSON: %v", err)
+	}
+	if values["github_token"] != "supersecretvalue" {
+		t.Fatalf("secret value was not written to temporary var-file")
+	}
+	if values["domain"] != "my-test-cluster.example.com" {
+		t.Fatalf("config value was not written to temporary var-file")
+	}
 }
