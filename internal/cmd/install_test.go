@@ -88,6 +88,19 @@ func (backendGoneCloud) StateBackendExists(context.Context) (bool, error) {
 	return false, nil
 }
 
+type failingAWSPreflightCloud struct {
+	provider.LocalClient
+	err error
+}
+
+func (c failingAWSPreflightCloud) ProviderName() string {
+	return provider.AWS_PROVIDER
+}
+
+func (c failingAWSPreflightCloud) CheckAccess(context.Context) provider.ProviderCheckResult {
+	return provider.AwsProviderCheckResult{Error: c.err}
+}
+
 func TestCmdCleanNoOpFastPath(t *testing.T) {
 	p := defaultTestConfig(t)
 	k8s, err := p.Provider().Kubernetes(context.Background())
@@ -108,6 +121,29 @@ func TestCmdCleanNoOpFastPath(t *testing.T) {
 	if err != nil {
 		t.Errorf("unexpected error in no-op clean fast path, %v", err)
 	}
+}
+
+func TestPreflightAwsMissingShellEnvMessage(t *testing.T) {
+	p := defaultTestConfig(t)
+	k8s, err := p.Provider().Kubernetes(context.Background())
+	if err != nil {
+		t.Fatalf("unexpected error getting kubernetes provider, %v", err)
+	}
+
+	p.provider = provider.NewProviderFactory(
+		p.Settings().Config,
+		p.Settings().Secrets,
+		provider.WithKubernetesProvider(k8s),
+		provider.WithCloudProvider(failingAWSPreflightCloud{
+			LocalClient: provider.LocalClient{Name: "test"},
+			err:         errors.New("failed to refresh cached credentials"),
+		}),
+	)
+
+	err = Preflight(context.Background(), p)
+	assert.Error(t, err)
+	assert.Contains(t, err.Error(), "AWS access check failed")
+	assert.Contains(t, err.Error(), "source ~/.bashrc")
 }
 
 func TestIsRetryableDestroyError(t *testing.T) {

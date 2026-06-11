@@ -16,6 +16,7 @@ package provider
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"testing"
 
@@ -89,6 +90,46 @@ func TestProviderAwsClientCurrentIdentity(t *testing.T) {
 		id.UserId != "testuserid" ||
 		id.UserName != "testusername" ||
 		id.AccountName != "testaccount" {
+		t.Errorf("unexpected aws client identity, %v", id)
+	}
+}
+
+func TestProviderAwsClientCurrentIdentityAliasLookupOptional(t *testing.T) {
+	c := NewAwsClient("", "", aws.Config{},
+		&AwsSdkClientMock{
+			stsClient: StsClientMock{account: "123456789", userid: "testuserid", arn: "arn:aws:iam::123456789:user/testusername"},
+			iamClient: IamClientMock{err: errors.New("access denied")},
+		})
+
+	id, err := c.CurrentIdentity(context.Background())
+	if err != nil {
+		t.Errorf("unexpected error from aws client identity lookup, %v", err)
+	}
+
+	if id.AccountId != "123456789" ||
+		id.UserId != "testuserid" ||
+		id.UserName != "testusername" ||
+		id.AccountName != "" {
+		t.Errorf("unexpected aws client identity, %v", id)
+	}
+}
+
+func TestProviderAwsClientCurrentIdentityRootArn(t *testing.T) {
+	c := NewAwsClient("", "", aws.Config{},
+		&AwsSdkClientMock{
+			stsClient: StsClientMock{account: "123456789", userid: "testuserid", arn: "arn:aws:iam::123456789:root"},
+			iamClient: IamClientMock{},
+		})
+
+	id, err := c.CurrentIdentity(context.Background())
+	if err != nil {
+		t.Errorf("unexpected error from aws client identity lookup, %v", err)
+	}
+
+	if id.AccountId != "123456789" ||
+		id.UserId != "testuserid" ||
+		id.UserName != "root" ||
+		id.AccountName != "" {
 		t.Errorf("unexpected aws client identity, %v", id)
 	}
 }

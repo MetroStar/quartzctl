@@ -355,7 +355,9 @@ func (c KubernetesClient) PrintClusterAppInfo(ctx context.Context, apps map[stri
 		return cmp.Compare(lhs[0], rhs[0])
 	})
 
-	util.PrintTable(headers, rows)
+	// Admin passwords are intentionally visible in the operator's terminal, but
+	// the sensitive-table path keeps the logger from ever recording cell values.
+	util.PrintSensitiveTable(headers, rows, "Admin Password")
 }
 
 // RefreshExternalSecrets triggers a refresh of external secrets in the cluster.

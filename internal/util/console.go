@@ -146,6 +146,14 @@ func PrintTable(headers []string, rows [][]string) {
 	printTableC(headers, rows, nil)
 }
 
+// PrintSensitiveTable prints a table whose cells may contain secrets. Only the
+// headers, row count, and sensitive column names are logged; cell values are
+// terminal-only.
+func PrintSensitiveTable(headers []string, rows [][]string, sensitiveColumns ...string) {
+	log.Debug("Formatted Sensitive Table", "headers", strings.Join(headers, ","), "rowCount", len(rows), "sensitiveColumns", strings.Join(sensitiveColumns, ","))
+	printTableC(headers, rows, nil)
+}
+
 // PrintRowStatusTable prints a formatted table with a status indicator column to the console.
 func PrintRowStatusTable(headers []string, rows [][]string, statusFunc func(i int, row []string) RowStatus) {
 	log.Debug("Formatted Status Table", "headers", strings.Join(headers, ","), "rowCount", len(rows))

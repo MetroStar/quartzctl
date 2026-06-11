@@ -111,14 +111,33 @@ func (c AwsClient) CurrentIdentity(ctx context.Context) (CloudProviderIdentity, 
 		return CloudProviderIdentity{}, err
 	}
 
-	aliases, _ := c.sdk.Iam().ListAccountAliases(ctx, &iam.ListAccountAliasesInput{})
+	var accountAliases []string
+	if aliases, aliasErr := c.sdk.Iam().ListAccountAliases(ctx, &iam.ListAccountAliasesInput{}); aliasErr != nil {
+		log.Debug("AWS account alias lookup failed; continuing without account alias", "err", aliasErr)
+	} else if aliases != nil {
+		accountAliases = aliases.AccountAliases
+	}
 
 	return CloudProviderIdentity{
-		AccountId:   *callerId.Account,
-		AccountName: strings.Join(aliases.AccountAliases, ", "),
-		UserId:      *callerId.UserId,
-		UserName:    strings.Split(*callerId.Arn, "/")[1],
+		AccountId:   aws.ToString(callerId.Account),
+		AccountName: strings.Join(accountAliases, ", "),
+		UserId:      aws.ToString(callerId.UserId),
+		UserName:    awsUserNameFromArn(aws.ToString(callerId.Arn)),
 	}, nil
+}
+
+func awsUserNameFromArn(arn string) string {
+	if arn == "" {
+		return ""
+	}
+	parts := strings.Split(arn, "/")
+	if len(parts) > 1 && parts[len(parts)-1] != "" {
+		return parts[len(parts)-1]
+	}
+	if i := strings.LastIndex(arn, ":"); i >= 0 && i+1 < len(arn) {
+		return arn[i+1:]
+	}
+	return arn
 }
 
 func (c AwsClient) StateBackendInfo(stage string) CloudProviderStateBackend {

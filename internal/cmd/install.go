@@ -582,7 +582,7 @@ func Preflight(ctx context.Context, p *CommandParams) error {
 	// Check for any failing rows
 	for _, row := range rows {
 		if row.Error != nil {
-			return fmt.Errorf("preflight: cloud access check failed: %w", row.Error)
+			return cloudPreflightError(cp, row.Error)
 		}
 	}
 
@@ -595,6 +595,19 @@ func Preflight(ctx context.Context, p *CommandParams) error {
 
 	util.Msg("  Preflight checks passed")
 	return nil
+}
+
+func cloudPreflightError(cp provider.CloudProviderClient, err error) error {
+	if cp != nil && strings.EqualFold(cp.ProviderName(), provider.AWS_PROVIDER) {
+		return fmt.Errorf(
+			"preflight: AWS access check failed: %w\n\n"+
+				"AWS credentials are not available or not authorized in this shell. "+
+				"Load your shell environment (for example, `source ~/.bashrc`) or export "+
+				"AWS_PROFILE/AWS_REGION/AWS_ACCESS_KEY_ID/AWS_SECRET_ACCESS_KEY/AWS_SESSION_TOKEN, then rerun `quartz install`.",
+			err,
+		)
+	}
+	return fmt.Errorf("preflight: cloud access check failed: %w", err)
 }
 
 // Clean tears down the Quartz environment, including all managed resources and data.
