@@ -83,6 +83,7 @@ type KubernetesProviderClient interface {
 	RefreshExternalSecrets(ctx context.Context) ([]KubernetesResource, error)
 	Export(ctx context.Context, cfg quartzSchema.ExportConfig) (map[string][]byte, error)
 	GetConfigMapValue(ctx context.Context, ns string, name string) (map[string]string, error)
+	GetCleanupStatus(ctx context.Context, ns string, name string) (CleanupStatus, error)
 	GetSecretValue(ctx context.Context, ns string, name string) (map[string]string, error)
 	Restart(ctx context.Context, kind schema.GroupVersionResource, ns string, name string) error
 	GetDaemonSetStatus(ctx context.Context, kind schema.GroupVersionResource, ns string, name string) (int64, int64, error)
@@ -127,6 +128,24 @@ type KubernetesAppConnectionInfo struct {
 	AdminUsername  string
 	AdminPassword  string
 	Error          error
+}
+
+// CleanupStatus contains the best-effort status breadcrumbs emitted by the
+// Quartz chart pre-delete hook. It is intentionally limited to non-secret
+// metadata so teardown reports can be persisted safely.
+type CleanupStatus struct {
+	Data   map[string]string
+	Events []CleanupEvent
+}
+
+// CleanupEvent is a compact, stable view of a Kubernetes Event emitted by the
+// Quartz cleanup hook.
+type CleanupEvent struct {
+	Reason        string
+	Type          string
+	Message       string
+	Count         int32
+	LastTimestamp time.Time
 }
 
 // KubernetesResource represents a Kubernetes resource.
@@ -543,6 +562,54 @@ func (c KubernetesClient) GetConfigMapValue(ctx context.Context, ns string, name
 	}
 
 	return res, nil
+}
+
+// GetCleanupStatus retrieves non-secret cleanup breadcrumbs emitted by the
+// Quartz chart pre-delete hook.
+func (c KubernetesClient) GetCleanupStatus(ctx context.Context, ns string, name string) (CleanupStatus, error) {
+	clientset, err := c.api.ClientSet()
+	if err != nil {
+		return CleanupStatus{}, err
+	}
+
+	cm, err := clientset.CoreV1().ConfigMaps(ns).Get(ctx, name, metav1.GetOptions{})
+	if err != nil {
+		return CleanupStatus{}, err
+	}
+
+	status := CleanupStatus{Data: make(map[string]string, len(cm.Data))}
+	for k, v := range cm.Data {
+		status.Data[k] = v
+	}
+
+	events, err := clientset.CoreV1().Events(ns).List(ctx, metav1.ListOptions{
+		LabelSelector: "app.kubernetes.io/name=quartz-cleanup",
+	})
+	if err != nil {
+		log.Debug("Cleanup status event lookup failed (non-fatal)", "namespace", ns, "error", err)
+		return status, nil
+	}
+
+	for _, e := range events.Items {
+		status.Events = append(status.Events, CleanupEvent{
+			Reason:        e.Reason,
+			Type:          e.Type,
+			Message:       e.Message,
+			Count:         e.Count,
+			LastTimestamp: e.LastTimestamp.Time,
+		})
+	}
+	slices.SortFunc(status.Events, func(a, b CleanupEvent) int {
+		if c := a.LastTimestamp.Compare(b.LastTimestamp); c != 0 {
+			return c
+		}
+		if c := cmp.Compare(a.Reason, b.Reason); c != 0 {
+			return c
+		}
+		return cmp.Compare(a.Message, b.Message)
+	})
+
+	return status, nil
 }
 
 // GetSecret retrieves a Secret from the cluster.

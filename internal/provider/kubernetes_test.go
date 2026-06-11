@@ -388,6 +388,45 @@ func TestProviderKubernetesClientGetConfigMapValue(t *testing.T) {
 	}
 }
 
+func TestProviderKubernetesClientGetCleanupStatus(t *testing.T) {
+	cm := corev1.ConfigMap{}
+	cm.Name = "quartz-cleanup-status"
+	cm.Namespace = "quartz"
+	cm.Data = map[string]string{
+		"phase":  "complete",
+		"status": "Succeeded",
+	}
+	event := corev1.Event{}
+	event.Name = "quartz-cleanup-abc"
+	event.Namespace = "quartz"
+	event.Labels = map[string]string{"app.kubernetes.io/name": "quartz-cleanup"}
+	event.Reason = "KarpenterFinalizerLag"
+	event.Type = "Warning"
+	event.Message = "finalizer lag"
+	event.Count = 2
+	event.LastTimestamp = metav1.NewTime(time.Date(2026, 6, 11, 12, 0, 0, 0, time.UTC))
+	api := NewKubernetesApiMock().WithClientObjects(&cm, &event)
+
+	c, err := NewKubernetesClient(api, KubeconfigInfo{}, schema.QuartzConfig{})
+	if err != nil {
+		t.Errorf("unexpected error from kubernetes client constructor, %v", err)
+		return
+	}
+
+	status, err := c.GetCleanupStatus(context.Background(), "quartz", "quartz-cleanup-status")
+	if err != nil {
+		t.Errorf("unexpected error from kubernetes client get cleanup status, %v", err)
+		return
+	}
+
+	if status.Data["status"] != "Succeeded" || status.Data["phase"] != "complete" {
+		t.Errorf("unexpected cleanup status data, %v", status.Data)
+	}
+	if len(status.Events) != 1 || status.Events[0].Reason != "KarpenterFinalizerLag" || status.Events[0].Count != 2 {
+		t.Errorf("unexpected cleanup events, %v", status.Events)
+	}
+}
+
 func TestProviderKubernetesClientGetSecretValue(t *testing.T) {
 	secret := corev1.Secret{}
 	secret.Name = "testsecret1"

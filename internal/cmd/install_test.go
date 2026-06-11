@@ -291,7 +291,7 @@ func TestRenderCleanupReportSuccess(t *testing.T) {
 		"init-refresh":    12 * time.Second,
 		"destroy-network": 90 * time.Second,
 	}
-	out := renderCleanupReport("pa-test", timing, 2*time.Minute, nil)
+	out := renderCleanupReport("pa-test", timing, 2*time.Minute, nil, nil)
 
 	assert.Contains(t, out, "Quartz Teardown Report")
 	assert.Contains(t, out, "Cluster:   pa-test")
@@ -301,6 +301,7 @@ func TestRenderCleanupReportSuccess(t *testing.T) {
 	assert.Less(t, strings.Index(out, "destroy-network"), strings.Index(out, "init-refresh"))
 	assert.Contains(t, out, "Next Action:")
 	assert.Contains(t, out, "State backend: destroyed")
+	assert.Contains(t, out, "Provider wait:")
 	// No error section on a clean teardown.
 	assert.NotContains(t, out, "Destroy Errors:")
 }
@@ -312,7 +313,7 @@ func TestRenderCleanupReportWithErrors(t *testing.T) {
 		fmt.Errorf("stage network: No cluster found"),
 		fmt.Errorf("stage host: boom"),
 	}
-	out := renderCleanupReport("pa-test", timing, time.Minute, errs)
+	out := renderCleanupReport("pa-test", timing, time.Minute, errs, nil)
 
 	assert.Contains(t, out, "Result:    FAILED (3 stage(s) did not destroy cleanly)")
 	assert.Contains(t, out, "Destroy Errors:")
@@ -324,6 +325,33 @@ func TestRenderCleanupReportWithErrors(t *testing.T) {
 	assert.Contains(t, out, "quartz clean --yes")
 }
 
+func TestRenderCleanupReportWithCleanupStatus(t *testing.T) {
+	timing := map[string]time.Duration{"destroy-core": 2 * time.Second}
+	status := &provider.CleanupStatus{
+		Data: map[string]string{
+			"status":         "Succeeded",
+			"phase":          "complete",
+			"detail":         "Pre-delete hook completed",
+			"updatedAt":      "2026-06-11T12:00:00Z",
+			"degraded":       "true",
+			"degradedDetail": "Karpenter finalizer lag detected",
+		},
+		Events: []provider.CleanupEvent{{
+			Reason:        "KarpenterFinalizerLag",
+			Type:          "Warning",
+			Message:       "All remaining NodeClaims report drain, volume detach, and instance termination requested.",
+			LastTimestamp: time.Date(2026, 6, 11, 12, 0, 1, 0, time.UTC),
+		}},
+	}
+
+	out := renderCleanupReport("pa-test", timing, time.Minute, nil, status)
+
+	assert.Contains(t, out, "Cleanup Hook:")
+	assert.Contains(t, out, "Status:     Succeeded")
+	assert.Contains(t, out, "Degraded:   Karpenter finalizer lag detected")
+	assert.Contains(t, out, "KarpenterFinalizerLag")
+}
+
 func TestPersistCleanupReport(t *testing.T) {
 	dir := t.TempDir()
 	p := defaultTestConfig(t)
@@ -331,7 +359,7 @@ func TestPersistCleanupReport(t *testing.T) {
 	p.Settings().Config.Log.File.Path = filepath.Join(dir, "$name.$date.log")
 
 	timing := map[string]time.Duration{"cleanup-final": time.Second}
-	path, err := persistCleanupReport(p, timing, time.Second, nil)
+	path, err := persistCleanupReport(p, timing, time.Second, nil, nil)
 	assert.NoError(t, err)
 	assert.FileExists(t, path)
 

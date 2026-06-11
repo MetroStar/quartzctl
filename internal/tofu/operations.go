@@ -755,7 +755,7 @@ func (c *TofuClient) stageVarValues(ctx context.Context, stage schema.StageConfi
 
 	outputs := make(map[string]map[string][]byte)
 
-	log.Debug("Adding stage vars", "stage", stage)
+	log.Debug("Adding stage vars", "stage", stage.Id)
 
 	for k, v := range stage.Vars {
 		if v.Value != "" {
@@ -764,7 +764,7 @@ func (c *TofuClient) stageVarValues(ctx context.Context, stage schema.StageConfi
 		} else if v.Env != "" {
 			val, found := os.LookupEnv(v.Env)
 			if !found {
-				log.Info("Stage env input not found", "stage", stage, "env", v.Env)
+				log.Info("Stage env input not found", "stage", stage.Id, "var", k, "env", v.Env)
 			}
 
 			log.Debug("OpenTofu env input var", "key", v.Env, "val", redactSensitiveVar(k, val))
@@ -772,7 +772,7 @@ func (c *TofuClient) stageVarValues(ctx context.Context, stage schema.StageConfi
 		} else if v.Config != "" {
 			val := c.cfg.ConfigString(v.Config)
 			if val == "" {
-				log.Info("Stage config input not found", "stage", stage, "config", v.Config)
+				log.Info("Stage config input not found", "stage", stage.Id, "var", k, "config", v.Config)
 				continue
 			}
 
@@ -781,7 +781,7 @@ func (c *TofuClient) stageVarValues(ctx context.Context, stage schema.StageConfi
 		} else if v.Secret != "" {
 			val := c.cfg.SecretString(v.Secret)
 			if val == "" {
-				log.Info("Stage secret input not found", "stage", stage, "secret", v.Secret)
+				log.Info("Stage secret input not found", "stage", stage.Id, "var", k, "secret", v.Secret)
 				continue
 			}
 

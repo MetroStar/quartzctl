@@ -33,6 +33,8 @@ import (
 	"github.com/urfave/cli/v3"
 )
 
+const cleanupStatusConfigMapName = "quartz-cleanup-status"
+
 // NewRootInstallCommand creates the "install" root command for the CLI.
 // This command performs a full installation or update of the Quartz system.
 //
@@ -636,6 +638,7 @@ func Clean(ctx context.Context, p *CommandParams) error {
 	cleanupStart := time.Now()
 	stageTiming := make(map[string]time.Duration)
 	var destroyErrors []error
+	var cleanupStatus *provider.CleanupStatus
 
 	stages := p.Settings().Config.StagesOrdered()
 
@@ -677,6 +680,21 @@ func Clean(ctx context.Context, p *CommandParams) error {
 			log.Warn("K8s pre-destroy cleanup failed (non-fatal)", "error", err)
 		}
 	}
+	captureCleanupStatus := func() {
+		if kube == nil {
+			return
+		}
+		ns := p.Settings().Config.State.ConfigMapNamespace
+		if ns == "" {
+			ns = "quartz"
+		}
+		status, err := kube.GetCleanupStatus(ctx, ns, cleanupStatusConfigMapName)
+		if err != nil {
+			log.Debug("Cleanup hook status not available", "namespace", ns, "name", cleanupStatusConfigMapName, "error", err)
+			return
+		}
+		cleanupStatus = &status
+	}
 	stageTiming["k8s-prep"] = time.Since(k8sCleanStart)
 
 	// Destroy stages in parallel where possible. Stages are grouped into
@@ -705,6 +723,8 @@ func Clean(ctx context.Context, p *CommandParams) error {
 			destroyErrors = append(destroyErrors, waveErrors...)
 		}
 
+		captureCleanupStatus()
+
 		// Inter-wave K8s cleanup
 		if kube != nil && waveIdx < len(destroyWaves)-1 {
 			interStart := time.Now()
@@ -712,8 +732,10 @@ func Clean(ctx context.Context, p *CommandParams) error {
 				log.Warn("Inter-stage K8s cleanup failed (non-fatal)", "error", cleanErr)
 			}
 			stageTiming[fmt.Sprintf("k8s-inter-wave-%d", waveIdx)] = time.Since(interStart)
+			captureCleanupStatus()
 		}
 	}
+	captureCleanupStatus()
 
 	// Only destroy the state backend if ALL stage destroys succeeded.
 	// If any stage failed, the backend must remain intact so operators can
@@ -751,7 +773,7 @@ func Clean(ctx context.Context, p *CommandParams) error {
 	// post-mortem is exactly what is needed to decide the next step. The report
 	// carries no secrets — only stage timings and de-duplicated error messages —
 	// so it is always safe to write, unlike the raw tofu destroy output.
-	if path, err := persistCleanupReport(p, stageTiming, totalDuration, destroyErrors); err != nil {
+	if path, err := persistCleanupReport(p, stageTiming, totalDuration, destroyErrors, cleanupStatus); err != nil {
 		log.Warn("Could not persist cleanup report (non-fatal)", "error", err)
 	} else if path != "" {
 		util.Msgf("Teardown report written to %s", path)
@@ -776,11 +798,19 @@ func cleanupReportDir(cfg schema.QuartzConfig) string {
 	return filepath.Dir(p)
 }
 
+func valueOrUnknown(v string) string {
+	v = strings.TrimSpace(v)
+	if v == "" {
+		return "unknown"
+	}
+	return v
+}
+
 // renderCleanupReport builds the plaintext teardown report: a header, the
 // per-phase timing table (sorted for deterministic output), and the grouped
 // destroy errors. It deliberately mirrors the console summary but emits no
 // color codes so the artifact stays grep- and diff-friendly.
-func renderCleanupReport(name string, stageTiming map[string]time.Duration, totalDuration time.Duration, errs []error) string {
+func renderCleanupReport(name string, stageTiming map[string]time.Duration, totalDuration time.Duration, errs []error, cleanupStatus *provider.CleanupStatus) string {
 	var b strings.Builder
 	result := "SUCCESS"
 	if len(errs) > 0 {
@@ -802,6 +832,43 @@ func renderCleanupReport(name string, stageTiming map[string]time.Duration, tota
 		fmt.Fprintf(&b, "  %-25s %v\n", k+":", stageTiming[k].Round(time.Second))
 	}
 	fmt.Fprintf(&b, "  %-25s %v\n", "TOTAL:", totalDuration.Round(time.Second))
+
+	if cleanupStatus != nil {
+		data := cleanupStatus.Data
+		fmt.Fprintf(&b, "\nCleanup Hook:\n")
+		fmt.Fprintf(&b, "  %-12s %s\n", "Status:", valueOrUnknown(data["status"]))
+		fmt.Fprintf(&b, "  %-12s %s\n", "Phase:", valueOrUnknown(data["phase"]))
+		fmt.Fprintf(&b, "  %-12s %s\n", "Detail:", valueOrUnknown(data["detail"]))
+		if data["updatedAt"] != "" {
+			fmt.Fprintf(&b, "  %-12s %s\n", "Updated:", data["updatedAt"])
+		}
+		if strings.EqualFold(data["degraded"], "true") {
+			fmt.Fprintf(&b, "  %-12s %s\n", "Degraded:", valueOrUnknown(data["degradedDetail"]))
+			if data["degradedAt"] != "" {
+				fmt.Fprintf(&b, "  %-12s %s\n", "DegradedAt:", data["degradedAt"])
+			}
+		}
+
+		if len(cleanupStatus.Events) > 0 {
+			fmt.Fprintf(&b, "  Events:\n")
+			events := cleanupStatus.Events
+			if len(events) > 10 {
+				events = events[len(events)-10:]
+			}
+			for _, e := range events {
+				last := "unknown"
+				if !e.LastTimestamp.IsZero() {
+					last = e.LastTimestamp.UTC().Format(time.RFC3339)
+				}
+				count := ""
+				if e.Count > 1 {
+					count = fmt.Sprintf(" x%d", e.Count)
+				}
+				fmt.Fprintf(&b, "    - [%s] %s%s at %s: %s\n",
+					valueOrUnknown(e.Type), valueOrUnknown(e.Reason), count, last, truncateDetail(e.Message, 180))
+			}
+		}
+	}
 
 	if len(errs) > 0 {
 		fmt.Fprintf(&b, "\nDestroy Errors:\n")
@@ -826,6 +893,7 @@ func renderCleanupReport(name string, stageTiming map[string]time.Duration, tota
 		fmt.Fprintf(&b, "  Logs:          inspect the neighboring *.tf.log and *.tf.log.*.gz files for the failed stage.\n")
 	} else {
 		fmt.Fprintf(&b, "  State backend: destroyed after all stages completed.\n")
+		fmt.Fprintf(&b, "  Provider wait: delayed provider-side deletion can continue after OpenTofu reports success.\n")
 		fmt.Fprintf(&b, "  Retry:         not needed.\n")
 		fmt.Fprintf(&b, "  Logs:          retained only for audit/troubleshooting.\n")
 	}
@@ -837,7 +905,7 @@ func renderCleanupReport(name string, stageTiming map[string]time.Duration, tota
 // run log directory and returns its path. The filename follows the same
 // "<name>.<date>.<kind>.<unix>" convention as the tofu logs so artifacts from a
 // single run sort together.
-func persistCleanupReport(p *CommandParams, stageTiming map[string]time.Duration, totalDuration time.Duration, errs []error) (string, error) {
+func persistCleanupReport(p *CommandParams, stageTiming map[string]time.Duration, totalDuration time.Duration, errs []error, cleanupStatus *provider.CleanupStatus) (string, error) {
 	cfg := p.Settings().Config
 	dir := cleanupReportDir(cfg)
 	if err := os.MkdirAll(dir, 0o750); err != nil {
@@ -851,7 +919,7 @@ func persistCleanupReport(p *CommandParams, stageTiming map[string]time.Duration
 	}
 	file := filepath.Join(dir, fmt.Sprintf("%s.%s.clean.%d.log", name, now.Format("2006-01-02"), now.Unix()))
 
-	report := renderCleanupReport(name, stageTiming, totalDuration, errs)
+	report := renderCleanupReport(name, stageTiming, totalDuration, errs, cleanupStatus)
 	if err := os.WriteFile(file, []byte(report), 0o640); err != nil {
 		return "", err
 	}
