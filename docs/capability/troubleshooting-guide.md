@@ -182,6 +182,8 @@ Expected behavior:
 - `clean` continues across stage failures.
 - The backend remains until all stages destroy successfully.
 - Re-running `quartz clean --yes` is the normal recovery path.
+- The cleanup report is cumulative, so earlier failures stay visible while
+  independent stages continue to destroy.
 
 Checks:
 
@@ -195,6 +197,9 @@ Fixes:
 - Resolve the failing stage shown in the cleanup report.
 - Use targeted `quartz tofu destroy --stage <stage> --init` if you need to isolate a stage.
 - Use `state rm` only after confirming the real resource is already gone or should be orphaned.
+- Do not delete the backend manually unless every remaining managed resource is
+  intentionally abandoned; the backend is what makes a follow-up clean
+  recoverable.
 
 ## Fast Diagnostics
 

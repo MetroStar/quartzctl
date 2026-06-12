@@ -167,6 +167,12 @@ quartz clean --yes
 
 `clean` destroys stages in reverse dependency order. If a stage fails, cleanup continues and reports the failures. The remote backend is kept until all stage destroys succeed so operators can re-run cleanup with recoverable state.
 
+Treat the final cleanup report as cumulative: earlier stage failures remain
+visible even when later stages continue to make progress. A remaining backend is
+not a leaked resource by itself; it means at least one stage still needs a
+successful destroy so state can stay available for recovery. Re-run
+`quartz clean --yes` after resolving the reported blocker.
+
 ## Procedure 14 - Build And Deploy A Local CLI
 
 For CLI developers:

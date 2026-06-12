@@ -92,7 +92,7 @@ quartz [command] [flags]
 ### Available Commands
 
 - `check`: Check environment, configuration and access for installer prerequisites.
-- `clean`: Perform a full cleanup/teardown of the system. Pass `--yes`/`-y` to skip the confirmation prompt (useful for CI). Cleanup destroys stages in reverse dependency order and preserves the state backend until all stages complete successfully.
+- `clean`: Perform a full cleanup/teardown of the system. Pass `--yes`/`-y` to skip the confirmation prompt (useful for CI). Cleanup destroys stages in reverse dependency order, continues across stage failures, reports cumulative status, and preserves the state backend until all stages complete successfully.
 - `export`: Export configured Kubernetes resources to yaml.
 - `info`: Output configuration info for the current cluster.
 - `install`: Perform a full install/update of the system. Pass `--resume-from`/`-r` to resume from a stage, `--allow-deferral` to enable OpenTofu deferred actions, and `--yes`/`-y` to skip confirmation prompts.
