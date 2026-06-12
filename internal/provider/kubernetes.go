@@ -17,6 +17,7 @@ package provider
 import (
 	"cmp"
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
@@ -134,8 +135,19 @@ type KubernetesAppConnectionInfo struct {
 // Quartz chart pre-delete hook. It is intentionally limited to non-secret
 // metadata so teardown reports can be persisted safely.
 type CleanupStatus struct {
-	Data   map[string]string
-	Events []CleanupEvent
+	Data       map[string]string
+	Events     []CleanupEvent
+	HookEvents []CleanupHookEvent
+}
+
+// CleanupHookEvent is one cumulative lifecycle breadcrumb appended by the
+// Quartz pre-delete hook into the cleanup status ConfigMap.
+type CleanupHookEvent struct {
+	At     time.Time `json:"at"`
+	Kind   string    `json:"kind"`
+	Phase  string    `json:"phase"`
+	Status string    `json:"status"`
+	Detail string    `json:"detail"`
 }
 
 // CleanupEvent is a compact, stable view of a Kubernetes Event emitted by the
@@ -580,6 +592,21 @@ func (c KubernetesClient) GetCleanupStatus(ctx context.Context, ns string, name 
 	status := CleanupStatus{Data: make(map[string]string, len(cm.Data))}
 	for k, v := range cm.Data {
 		status.Data[k] = v
+	}
+	if raw := strings.TrimSpace(status.Data["cleanupEvents"]); raw != "" {
+		if err := json.Unmarshal([]byte(raw), &status.HookEvents); err != nil {
+			log.Debug("Cleanup status history parse failed (non-fatal)", "namespace", ns, "name", name, "error", err)
+		} else {
+			slices.SortFunc(status.HookEvents, func(a, b CleanupHookEvent) int {
+				if c := a.At.Compare(b.At); c != 0 {
+					return c
+				}
+				if c := cmp.Compare(a.Phase, b.Phase); c != 0 {
+					return c
+				}
+				return cmp.Compare(a.Detail, b.Detail)
+			})
+		}
 	}
 
 	events, err := clientset.CoreV1().Events(ns).List(ctx, metav1.ListOptions{

@@ -762,6 +762,7 @@ func Clean(ctx context.Context, p *CommandParams) error {
 
 	totalDuration := time.Since(cleanupStart)
 	printCleanupTimingSummary(stageTiming, totalDuration)
+	printCleanupStatusSummary(cleanupStatus)
 
 	if len(destroyErrors) > 0 {
 		printDestroyErrors(destroyErrors)
@@ -849,6 +850,8 @@ func renderCleanupReport(name string, stageTiming map[string]time.Duration, tota
 			}
 		}
 
+		writeCleanupHookHistory(&b, cleanupStatus.HookEvents, "  ")
+
 		if len(cleanupStatus.Events) > 0 {
 			fmt.Fprintf(&b, "  Events:\n")
 			events := cleanupStatus.Events
@@ -899,6 +902,101 @@ func renderCleanupReport(name string, stageTiming map[string]time.Duration, tota
 	}
 
 	return b.String()
+}
+
+func printCleanupStatusSummary(cleanupStatus *provider.CleanupStatus) {
+	if cleanupStatus == nil {
+		return
+	}
+
+	data := cleanupStatus.Data
+	util.Hdr("Cleanup Hook Summary")
+	util.Msgf("  Status: %-10s Phase: %-18s Detail: %s",
+		valueOrUnknown(data["status"]),
+		valueOrUnknown(data["phase"]),
+		truncateDetail(valueOrUnknown(data["detail"]), 120),
+	)
+	if strings.EqualFold(data["degraded"], "true") {
+		util.Msgf("  Degraded: %s", truncateDetail(valueOrUnknown(data["degradedDetail"]), 140))
+	}
+
+	if len(cleanupStatus.HookEvents) > 0 {
+		total, degraded := cleanupHookHistoryCounts(cleanupStatus.HookEvents)
+		summary := fmt.Sprintf("  History:  %d recorded step(s)", total)
+		if degraded > 0 {
+			summary = fmt.Sprintf("%s, %d degraded", summary, degraded)
+		}
+		util.Msg(summary)
+		for _, e := range latestCleanupHookEvents(cleanupStatus.HookEvents, 5) {
+			util.Msgf("    - %s %-18s %-9s %s",
+				cleanupHookEventTime(e.At),
+				cleanupHookEventLabel(e),
+				valueOrUnknown(e.Status),
+				truncateDetail(valueOrUnknown(e.Detail), 120),
+			)
+		}
+	}
+}
+
+func writeCleanupHookHistory(b *strings.Builder, events []provider.CleanupHookEvent, indent string) {
+	if len(events) == 0 {
+		return
+	}
+
+	total, degraded := cleanupHookHistoryCounts(events)
+	summary := fmt.Sprintf("%sHook History: %d recorded step(s)", indent, total)
+	if degraded > 0 {
+		summary = fmt.Sprintf("%s, %d degraded", summary, degraded)
+	}
+	fmt.Fprintf(b, "%s\n", summary)
+
+	display := latestCleanupHookEvents(events, 12)
+	if len(display) < total {
+		fmt.Fprintf(b, "%s  Recent Steps (last %d):\n", indent, len(display))
+	} else {
+		fmt.Fprintf(b, "%s  Recent Steps:\n", indent)
+	}
+	for _, e := range display {
+		fmt.Fprintf(b, "%s    - %s %-18s %-9s %s\n",
+			indent,
+			cleanupHookEventTime(e.At),
+			cleanupHookEventLabel(e),
+			valueOrUnknown(e.Status),
+			truncateDetail(valueOrUnknown(e.Detail), 160),
+		)
+	}
+}
+
+func cleanupHookHistoryCounts(events []provider.CleanupHookEvent) (int, int) {
+	degraded := 0
+	for _, e := range events {
+		if strings.EqualFold(e.Kind, "degraded") || (e.Kind == "" && strings.EqualFold(e.Status, "Degraded")) {
+			degraded++
+		}
+	}
+	return len(events), degraded
+}
+
+func latestCleanupHookEvents(events []provider.CleanupHookEvent, limit int) []provider.CleanupHookEvent {
+	if limit <= 0 || len(events) <= limit {
+		return events
+	}
+	return events[len(events)-limit:]
+}
+
+func cleanupHookEventTime(t time.Time) string {
+	if t.IsZero() {
+		return "unknown"
+	}
+	return t.UTC().Format(time.RFC3339)
+}
+
+func cleanupHookEventLabel(e provider.CleanupHookEvent) string {
+	phase := valueOrUnknown(e.Phase)
+	if e.Kind == "" || strings.EqualFold(e.Kind, "status") {
+		return phase
+	}
+	return fmt.Sprintf("%s/%s", phase, e.Kind)
 }
 
 // persistCleanupReport writes the teardown report to a timestamped file in the

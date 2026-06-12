@@ -342,13 +342,31 @@ func TestRenderCleanupReportWithCleanupStatus(t *testing.T) {
 			Message:       "All remaining NodeClaims report drain, volume detach, and instance termination requested.",
 			LastTimestamp: time.Date(2026, 6, 11, 12, 0, 1, 0, time.UTC),
 		}},
+		HookEvents: []provider.CleanupHookEvent{
+			{
+				At:     time.Date(2026, 6, 11, 11, 59, 58, 0, time.UTC),
+				Kind:   "status",
+				Phase:  "flux",
+				Status: "Running",
+				Detail: "Suspending Flux reconciliation",
+			},
+			{
+				At:     time.Date(2026, 6, 11, 12, 0, 0, 0, time.UTC),
+				Kind:   "degraded",
+				Phase:  "nodeclaims",
+				Status: "Degraded",
+				Detail: "Karpenter finalizer lag detected",
+			},
+		},
 	}
 
 	out := renderCleanupReport("pa-test", timing, time.Minute, nil, status)
 
 	assert.Contains(t, out, "Cleanup Hook:")
-	assert.Contains(t, out, "Status:     Succeeded")
-	assert.Contains(t, out, "Degraded:   Karpenter finalizer lag detected")
+	assert.Contains(t, out, "Status:      Succeeded")
+	assert.Contains(t, out, "Degraded:    Karpenter finalizer lag detected")
+	assert.Contains(t, out, "Hook History: 2 recorded step(s), 1 degraded")
+	assert.Contains(t, out, "nodeclaims")
 	assert.Contains(t, out, "KarpenterFinalizerLag")
 }
 

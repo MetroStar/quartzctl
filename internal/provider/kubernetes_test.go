@@ -395,6 +395,10 @@ func TestProviderKubernetesClientGetCleanupStatus(t *testing.T) {
 	cm.Data = map[string]string{
 		"phase":  "complete",
 		"status": "Succeeded",
+		"cleanupEvents": `[
+			{"at":"2026-06-11T11:59:59Z","kind":"status","phase":"flux","status":"Running","detail":"Suspending Flux reconciliation"},
+			{"at":"2026-06-11T12:00:00Z","kind":"degraded","phase":"nodeclaims","status":"Degraded","detail":"Karpenter finalizer lag detected"}
+		]`,
 	}
 	event := corev1.Event{}
 	event.Name = "quartz-cleanup-abc"
@@ -424,6 +428,12 @@ func TestProviderKubernetesClientGetCleanupStatus(t *testing.T) {
 	}
 	if len(status.Events) != 1 || status.Events[0].Reason != "KarpenterFinalizerLag" || status.Events[0].Count != 2 {
 		t.Errorf("unexpected cleanup events, %v", status.Events)
+	}
+	if len(status.HookEvents) != 2 ||
+		status.HookEvents[0].Phase != "flux" ||
+		status.HookEvents[1].Kind != "degraded" ||
+		status.HookEvents[1].Status != "Degraded" {
+		t.Errorf("unexpected cleanup hook history, %v", status.HookEvents)
 	}
 }
 
