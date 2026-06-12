@@ -15,14 +15,17 @@
 package cmd
 
 import (
+	"compress/gzip"
 	"context"
 	"encoding/json"
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
 	"slices"
 	"strings"
 	"sync"
+	"syscall"
 	"time"
 
 	"github.com/MetroStar/quartzctl/internal/config/schema"
@@ -34,6 +37,12 @@ import (
 )
 
 const cleanupStatusConfigMapName = "quartz-cleanup-status"
+
+const (
+	logPreflightMinFreeBytes     = uint64(2 * 1024 * 1024 * 1024)
+	logPreflightCompressMinBytes = int64(100 * 1024 * 1024)
+	logPreflightCompressMinAge   = 24 * time.Hour
+)
 
 // NewRootInstallCommand creates the "install" root command for the CLI.
 // This command performs a full installation or update of the Quartz system.
@@ -117,6 +126,10 @@ func Install(ctx context.Context, p *CommandParams, resumeFrom string) error {
 	err := Confirm(ctx, "Would you like to install Quartz cluster?", p)
 	if err != nil {
 		// just means the user said no
+		return err
+	}
+
+	if err := LocalInstallPreflight(p); err != nil {
 		return err
 	}
 
@@ -258,7 +271,242 @@ func Install(ctx context.Context, p *CommandParams, resumeFrom string) error {
 		return err
 	}
 
+	ReportModelWarmerStatus(ctx, p)
+
 	return nil
+}
+
+// LocalInstallPreflight keeps local install prerequisites from failing late in
+// OpenTofu. It never deletes logs automatically; it only compresses large old
+// *.tf.log files and warns when the filesystem is still tight.
+func LocalInstallPreflight(p *CommandParams) error {
+	cfg := p.Settings().Config
+	logDirs := installLogDirs(cfg.Name, cfg.Log)
+	if len(logDirs) == 0 {
+		return nil
+	}
+
+	var compressed []string
+	for _, dir := range logDirs {
+		items, err := compressOldTofuLogs(dir, time.Now())
+		if err != nil {
+			log.Warn("Local log preflight failed", "path", dir, "error", err)
+			continue
+		}
+		compressed = append(compressed, items...)
+	}
+	if len(compressed) > 0 {
+		util.Msgf("Compressed %d old OpenTofu log file(s) to keep local disk space healthy", len(compressed))
+	}
+
+	if root, free, err := minFreeSpace(logDirs); err == nil && free < logPreflightMinFreeBytes {
+		util.Msgf("Local disk space is low at %s: %s free. Consider removing old logs or increasing disk before a large install.",
+			root, formatBytes(free))
+	} else if err != nil {
+		log.Debug("Local disk preflight free-space check failed", "error", err)
+	}
+
+	return nil
+}
+
+func installLogDirs(clusterName string, cfg log.LogOptionsConfig) []string {
+	paths := []string{cfg.File.Path, cfg.Tofu.Path}
+	seen := map[string]bool{}
+	var dirs []string
+	for _, p := range paths {
+		p = strings.TrimSpace(expandLogPath(p, clusterName))
+		if p == "" {
+			continue
+		}
+		dir := filepath.Dir(p)
+		if dir == "." || dir == "" {
+			dir = p
+		}
+		if !seen[dir] {
+			seen[dir] = true
+			dirs = append(dirs, dir)
+		}
+	}
+	return dirs
+}
+
+func expandLogPath(path string, clusterName string) string {
+	date := time.Now().Format("2006-01-02")
+	path = strings.ReplaceAll(path, "$name", clusterName)
+	path = strings.ReplaceAll(path, "$date", date)
+	return path
+}
+
+func compressOldTofuLogs(dir string, now time.Time) ([]string, error) {
+	entries, err := os.ReadDir(dir)
+	if os.IsNotExist(err) {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, err
+	}
+
+	var compressed []string
+	for _, entry := range entries {
+		if entry.IsDir() {
+			continue
+		}
+		name := entry.Name()
+		if !strings.HasSuffix(name, ".tf.log") {
+			continue
+		}
+		path := filepath.Join(dir, name)
+		info, err := entry.Info()
+		if err != nil {
+			return compressed, err
+		}
+		if info.Size() < logPreflightCompressMinBytes || now.Sub(info.ModTime()) < logPreflightCompressMinAge {
+			continue
+		}
+		if err := gzipFile(path); err != nil {
+			return compressed, err
+		}
+		compressed = append(compressed, path)
+	}
+	return compressed, nil
+}
+
+func gzipFile(path string) error {
+	in, err := os.Open(path) // #nosec G304 - operator-configured local log path
+	if err != nil {
+		return err
+	}
+	defer in.Close()
+
+	outPath := path + ".gz"
+	out, err := os.OpenFile(outPath, os.O_CREATE|os.O_EXCL|os.O_WRONLY, 0640) // #nosec G304
+	if err != nil {
+		if os.IsExist(err) {
+			return nil
+		}
+		return err
+	}
+	ok := false
+	defer func() {
+		out.Close()
+		if !ok {
+			os.Remove(outPath) //nolint:errcheck
+		}
+	}()
+
+	zw := gzip.NewWriter(out)
+	if _, err := io.Copy(zw, in); err != nil {
+		zw.Close() //nolint:errcheck
+		return err
+	}
+	if err := zw.Close(); err != nil {
+		return err
+	}
+	if err := out.Close(); err != nil {
+		return err
+	}
+	if err := os.Chtimes(outPath, time.Now(), time.Now()); err != nil {
+		return err
+	}
+	ok = true
+	return os.Remove(path)
+}
+
+func minFreeSpace(paths []string) (string, uint64, error) {
+	var minPath string
+	var minFree uint64
+	for _, path := range paths {
+		probe := path
+		for {
+			if _, err := os.Stat(probe); err == nil {
+				break
+			} else if os.IsNotExist(err) {
+				next := filepath.Dir(probe)
+				if next == probe {
+					break
+				}
+				probe = next
+			} else {
+				return "", 0, err
+			}
+		}
+		var stat syscall.Statfs_t
+		if err := syscall.Statfs(probe, &stat); err != nil {
+			return "", 0, err
+		}
+		free := stat.Bavail * uint64(stat.Bsize)
+		if minPath == "" || free < minFree {
+			minPath = probe
+			minFree = free
+		}
+	}
+	if minPath == "" {
+		return "", 0, fmt.Errorf("no log paths to inspect")
+	}
+	return minPath, minFree, nil
+}
+
+func formatBytes(n uint64) string {
+	const unit = 1024
+	if n < unit {
+		return fmt.Sprintf("%d B", n)
+	}
+	div, exp := uint64(unit), 0
+	for q := n / unit; q >= unit; q /= unit {
+		div *= unit
+		exp++
+	}
+	return fmt.Sprintf("%.1f %ciB", float64(n)/float64(div), "KMGTPE"[exp])
+}
+
+func ReportModelWarmerStatus(ctx context.Context, p *CommandParams) {
+	kube, err := p.Provider().Kubernetes(ctx)
+	if err != nil {
+		log.Debug("Model warmer status: cluster not reachable", "error", err)
+		return
+	}
+	data, err := kube.GetConfigMapValue(ctx, "ollama", "ollama-model-warmer-status")
+	if err != nil {
+		log.Debug("Model warmer status unavailable", "error", err)
+		return
+	}
+	raw := strings.TrimSpace(data["status.json"])
+	if raw == "" {
+		return
+	}
+	var status struct {
+		Phase         string `json:"phase"`
+		Step          string `json:"step"`
+		Model         string `json:"model"`
+		Detail        string `json:"detail"`
+		DesiredModels string `json:"desiredModels"`
+		PulledModels  string `json:"pulledModels"`
+		UpdatedAt     string `json:"updatedAt"`
+	}
+	if err := json.Unmarshal([]byte(raw), &status); err != nil {
+		log.Debug("Model warmer status parse failed", "error", err)
+		return
+	}
+	switch strings.ToLower(status.Phase) {
+	case "succeeded":
+		util.Msgf("Ollama model warmer complete: %s", fallback(status.PulledModels, status.DesiredModels))
+	case "failed":
+		util.Msgf("Ollama model warmer failed during %s for %s: %s", status.Step, status.Model, status.Detail)
+	default:
+		target := strings.TrimSpace(status.Model)
+		if target == "" {
+			target = status.DesiredModels
+		}
+		util.Msgf("Ollama model warming is still running in the background (%s %s: %s). AI endpoints may be up before every model is ready.",
+			status.Step, target, status.Detail)
+	}
+}
+
+func fallback(first, second string) string {
+	if strings.TrimSpace(first) != "" {
+		return first
+	}
+	return second
 }
 
 // stageIds returns a comma-separated list of stage IDs for error messages.

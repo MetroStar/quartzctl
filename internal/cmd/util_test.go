@@ -490,6 +490,7 @@ func defaultTestConfig(t *testing.T) *CommandParams {
 	// persistCleanupReport) into a per-test temp dir so Clean()-exercising tests
 	// don't litter the repo working tree with a log/ directory.
 	cfg.Config.Log.File.Path = filepath.Join(t.TempDir(), "$name.$date.log")
+	cfg.Config.Log.Tofu.Path = filepath.Join(t.TempDir(), "$name.$date.tf.log")
 
 	cm := &corev1.ConfigMap{
 		TypeMeta: metav1.TypeMeta{

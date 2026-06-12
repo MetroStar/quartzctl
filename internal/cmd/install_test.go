@@ -15,9 +15,11 @@
 package cmd
 
 import (
+	"compress/gzip"
 	"context"
 	"errors"
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
 	"strings"
@@ -144,6 +146,37 @@ func TestPreflightAwsMissingShellEnvMessage(t *testing.T) {
 	assert.Error(t, err)
 	assert.Contains(t, err.Error(), "AWS access check failed")
 	assert.Contains(t, err.Error(), "source ~/.bashrc")
+}
+
+func TestLocalInstallPreflightCompressesOldTofuLogs(t *testing.T) {
+	p := defaultTestConfig(t)
+	logDir := filepath.Join(t.TempDir(), "log")
+	assert.NoError(t, os.MkdirAll(logDir, 0755))
+
+	oldLog := filepath.Join(logDir, "old.tf.log")
+	assert.NoError(t, os.WriteFile(oldLog, []byte("quartz-log\n"), 0644))
+	assert.NoError(t, os.Truncate(oldLog, logPreflightCompressMinBytes+1))
+	oldTime := time.Now().Add(-2 * logPreflightCompressMinAge)
+	assert.NoError(t, os.Chtimes(oldLog, oldTime, oldTime))
+
+	p.Settings().Config.Log.Tofu.Path = filepath.Join(logDir, "$name.$date.tf.log")
+	p.Settings().Config.Log.File.Path = filepath.Join(logDir, "$name.$date.log")
+
+	assert.NoError(t, LocalInstallPreflight(p))
+	assert.NoFileExists(t, oldLog)
+
+	gzPath := oldLog + ".gz"
+	assert.FileExists(t, gzPath)
+	f, err := os.Open(gzPath)
+	assert.NoError(t, err)
+	defer f.Close()
+	zr, err := gzip.NewReader(f)
+	assert.NoError(t, err)
+	defer zr.Close()
+	prefix := make([]byte, len("quartz-log\n"))
+	_, err = io.ReadFull(zr, prefix)
+	assert.NoError(t, err)
+	assert.Equal(t, "quartz-log\n", string(prefix))
 }
 
 func TestIsRetryableDestroyError(t *testing.T) {
