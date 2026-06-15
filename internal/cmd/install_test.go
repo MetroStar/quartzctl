@@ -453,6 +453,28 @@ func TestModelWarmerWaitTimeout(t *testing.T) {
 	assert.Equal(t, time.Duration(0), modelWarmerWaitTimeout())
 }
 
+func TestSanitizeModelWarmerStatusJSON(t *testing.T) {
+	raw := "\x1b[0m\n {\"phase\":\"Running\",\"step\":\"pull\",\"detail\":\"downloading\"}\x00"
+	assert.Equal(t,
+		"{\"phase\":\"Running\",\"step\":\"pull\",\"detail\":\"downloading\"}",
+		sanitizeModelWarmerStatusJSON(raw),
+	)
+}
+
+func TestReadModelWarmerStatusSanitizesControlCharacters(t *testing.T) {
+	p := defaultTestConfig(t)
+	kube, err := p.Provider().Kubernetes(context.Background())
+	assert.NoError(t, err)
+
+	status, ok, err := readModelWarmerStatus(context.Background(), kube)
+	assert.NoError(t, err)
+	assert.True(t, ok)
+	assert.Equal(t, "Running", status.Phase)
+	assert.Equal(t, "pull", status.Step)
+	assert.Equal(t, "gemma4:12b", status.Model)
+	assert.Equal(t, "downloading", status.Detail)
+}
+
 func TestSlowestTimingEntries(t *testing.T) {
 	entries := slowestTimingEntries(map[string]time.Duration{
 		"stage-a": 10 * time.Second,

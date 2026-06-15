@@ -250,6 +250,7 @@ func ClusterInfo(ctx context.Context, p *CommandParams) error {
 
 	util.Msgf("export KUBECONFIG=%s", p.Settings().Config.KubeconfigPath())
 	util.Msg("CI/CD builds may take up to 15 minutes to complete following initial setup, progress may be tracked at the Jenkins and ArgoCD URL's above")
+	ReportModelWarmerStatus(ctx, p)
 
 	return err
 }

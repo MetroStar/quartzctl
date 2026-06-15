@@ -323,7 +323,9 @@ func Install(ctx context.Context, p *CommandParams, resumeFrom string) (err erro
 
 	if !installWaitForModels(p) {
 		stepStart = time.Now()
-		ReportModelWarmerStatus(ctx, p)
+		if !p.Settings().Config.Internal.Installer.Summary.Enabled {
+			ReportModelWarmerStatus(ctx, p)
+		}
 		installTiming["model-warmer-status"] = time.Since(stepStart)
 	}
 
@@ -560,7 +562,7 @@ func readModelWarmerStatus(ctx context.Context, kube provider.KubernetesProvider
 	if err != nil {
 		return modelWarmerStatus{}, false, err
 	}
-	raw := strings.TrimSpace(data["status.json"])
+	raw := sanitizeModelWarmerStatusJSON(data["status.json"])
 	if raw == "" {
 		return modelWarmerStatus{}, false, nil
 	}
@@ -569,6 +571,40 @@ func readModelWarmerStatus(ctx context.Context, kube provider.KubernetesProvider
 		return modelWarmerStatus{}, false, err
 	}
 	return status, true, nil
+}
+
+func sanitizeModelWarmerStatusJSON(raw string) string {
+	raw = strings.TrimSpace(raw)
+	if raw == "" {
+		return ""
+	}
+	var cleaned strings.Builder
+	cleaned.Grow(len(raw))
+	for i := 0; i < len(raw); i++ {
+		if raw[i] == 0x1b {
+			// Strip ANSI escape sequences such as "\x1b[0m" that can leak into
+			// ConfigMap-backed status output from shell-oriented scripts.
+			if i+1 < len(raw) && raw[i+1] == '[' {
+				i += 2
+				for ; i < len(raw); i++ {
+					if raw[i] >= 0x40 && raw[i] <= 0x7e {
+						break
+					}
+				}
+			}
+			continue
+		}
+		r := rune(raw[i])
+		if r == '\n' || r == '\r' || r == '\t' {
+			cleaned.WriteRune(r)
+			continue
+		}
+		if r < 0x20 || r == 0x7f {
+			continue
+		}
+		cleaned.WriteRune(r)
+	}
+	return strings.TrimSpace(cleaned.String())
 }
 
 func waitForModelWarmerIfRequested(ctx context.Context, p *CommandParams) error {

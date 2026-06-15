@@ -207,6 +207,18 @@ func TestCmdClusterInfo(t *testing.T) {
 	}
 }
 
+func TestCmdClusterInfoIncludesModelWarmerNote(t *testing.T) {
+	p := defaultTestConfig(t)
+
+	var buf bytes.Buffer
+	util.SetWriter(&buf)
+	t.Cleanup(func() { util.SetWriter(os.Stdout) })
+
+	err := ClusterInfo(context.Background(), p)
+	assert.NoError(t, err)
+	assert.Contains(t, buf.String(), "Ollama model warming is still running in the background")
+}
+
 func TestCmdClusterLogin(t *testing.T) {
 	p := defaultTestConfig(t)
 
@@ -611,6 +623,20 @@ func defaultTestConfig(t *testing.T) *CommandParams {
 		},
 	}
 
+	modelWarmerCM := &corev1.ConfigMap{
+		TypeMeta: metav1.TypeMeta{
+			Kind:       "ConfigMap",
+			APIVersion: "v1",
+		},
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      modelWarmerStatusCM,
+			Namespace: ollamaNamespace,
+		},
+		Data: map[string]string{
+			"status.json": "\x1b[0m" + `{"phase":"Running","step":"pull","model":"gemma4:12b","detail":"downloading","desiredModels":"gemma4:e4b,gemma4:12b","pulledModels":"gemma4:e4b"}` + "\x00",
+		},
+	}
+
 	deployment := &appsv1.Deployment{
 		TypeMeta: metav1.TypeMeta{
 			Kind:       "Deployment",
@@ -642,6 +668,7 @@ func defaultTestConfig(t *testing.T) *CommandParams {
 		},
 	).WithClientObjects(
 		cm,
+		modelWarmerCM,
 		deployment,
 	)
 
