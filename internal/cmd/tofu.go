@@ -719,7 +719,11 @@ func TfRefreshWithUnlock(ctx context.Context, stage string, p *CommandParams) er
 		}
 	}
 
-	log.Info("Error refreshing tofu", "stage", s.Id, "err", err)
+	if isFluxOwnedReleaseDrift(err) {
+		log.Debug("Refresh reported benign Flux-owned release version drift", "stage", s.Id, "err", err)
+	} else {
+		log.Info("Error refreshing tofu", "stage", s.Id, "err", err)
+	}
 	return err
 }
 

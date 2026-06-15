@@ -37,6 +37,10 @@ func TestNewRootInstallCommand(t *testing.T) {
 
 	assert.Equal(t, "install", cmd.Name)
 	assert.Equal(t, "Perform a full install/update of the system", cmd.Usage)
+	assert.Len(t, cmd.Flags, 4)
+
+	waitFlag := cmd.Flags[2].(*cli.BoolFlag)
+	assert.Equal(t, "wait-for-models", waitFlag.Name)
 
 	err := cmd.Action(context.Background(), &cli.Command{})
 	assert.NoError(t, err)
@@ -398,9 +402,67 @@ func TestRenderCleanupReportWithCleanupStatus(t *testing.T) {
 	assert.Contains(t, out, "Cleanup Hook:")
 	assert.Contains(t, out, "Status:      Succeeded")
 	assert.Contains(t, out, "Degraded:    Karpenter finalizer lag detected")
+	assert.Contains(t, out, "Recovery:    self-healed after Karpenter finalizer lag detected; cleanup hook finished successfully")
 	assert.Contains(t, out, "Hook History: 2 recorded step(s), 1 degraded")
 	assert.Contains(t, out, "nodeclaims")
 	assert.Contains(t, out, "KarpenterFinalizerLag")
+	assert.Contains(t, out, "Notes:")
+	assert.Contains(t, out, "No manual action is required for that hook condition")
+}
+
+func TestCleanupNotesDescribeLongCleanPhases(t *testing.T) {
+	notes := cleanupNotes(map[string]time.Duration{
+		"init-refresh": 3 * time.Minute,
+		"destroy-core": 6 * time.Minute,
+		"destroy-host": 18 * time.Minute,
+	}, nil, nil)
+
+	joined := strings.Join(notes, "\n")
+	assert.Contains(t, joined, "init-refresh runs stages in parallel")
+	assert.Contains(t, joined, "destroy-core includes the Helm pre-delete hook")
+	assert.Contains(t, joined, "destroy-host includes provider-side managed-service teardown")
+}
+
+func TestModelListContainsAll(t *testing.T) {
+	assert.True(t, modelListContainsAll("gemma4:e4b,gemma4:12b", "gemma4:12b, gemma4:e4b"))
+	assert.True(t, modelListContainsAll("", ""))
+	assert.False(t, modelListContainsAll("gemma4:e4b,gemma4:12b", "gemma4:e4b"))
+}
+
+func TestInstallWaitForModels(t *testing.T) {
+	p := defaultTestConfig(t)
+	t.Setenv("QUARTZ_WAIT_FOR_MODELS", "")
+	assert.False(t, installWaitForModels(p))
+
+	t.Setenv("QUARTZ_WAIT_FOR_MODELS", "true")
+	assert.True(t, installWaitForModels(p))
+
+	t.Setenv("QUARTZ_WAIT_FOR_MODELS", "false")
+	p.waitForModels = true
+	assert.True(t, installWaitForModels(p))
+}
+
+func TestModelWarmerWaitTimeout(t *testing.T) {
+	t.Setenv("QUARTZ_MODEL_WARMER_TIMEOUT", "")
+	assert.Equal(t, 90*time.Minute, modelWarmerWaitTimeout())
+
+	t.Setenv("QUARTZ_MODEL_WARMER_TIMEOUT", "2h")
+	assert.Equal(t, 2*time.Hour, modelWarmerWaitTimeout())
+
+	t.Setenv("QUARTZ_MODEL_WARMER_TIMEOUT", "0")
+	assert.Equal(t, time.Duration(0), modelWarmerWaitTimeout())
+}
+
+func TestSlowestTimingEntries(t *testing.T) {
+	entries := slowestTimingEntries(map[string]time.Duration{
+		"stage-a": 10 * time.Second,
+		"stage-b": time.Minute,
+		"stage-c": time.Minute,
+	}, 2)
+
+	assert.Len(t, entries, 2)
+	assert.Equal(t, "stage-b", entries[0].Name)
+	assert.Equal(t, "stage-c", entries[1].Name)
 }
 
 func TestPersistCleanupReport(t *testing.T) {

@@ -23,6 +23,7 @@ import (
 	"os"
 	"path/filepath"
 	"slices"
+	"strconv"
 	"strings"
 	"sync"
 	"syscall"
@@ -36,7 +37,11 @@ import (
 	"github.com/urfave/cli/v3"
 )
 
-const cleanupStatusConfigMapName = "quartz-cleanup-status"
+const (
+	cleanupStatusConfigMapName = "quartz-cleanup-status"
+	ollamaNamespace            = "ollama"
+	modelWarmerStatusCM        = "ollama-model-warmer-status"
+)
 
 const (
 	logPreflightMinFreeBytes     = uint64(2 * 1024 * 1024 * 1024)
@@ -60,12 +65,14 @@ func NewRootInstallCommand(p *CommandParams) RootCommandResult {
 			Flags: []cli.Flag{
 				&cli.StringFlag{Name: "resume-from", Aliases: []string{"r"}, Usage: "Resume installation from a specific stage ID (skips earlier stages)"},
 				&cli.BoolFlag{Name: "allow-deferral", Usage: "Enable OpenTofu deferred actions for resources that cannot be fully resolved in one pass"},
+				&cli.BoolFlag{Name: "wait-for-models", Usage: "Wait for Ollama model warming to finish before reporting install success"},
 				&cli.BoolFlag{Name: "yes", Aliases: []string{"y"}, Usage: "Skip the interactive confirmation prompt (assume yes)"},
 			},
 			Action: func(ctx context.Context, ccmd *cli.Command) error {
 				resumeFrom := ccmd.String("resume-from")
 				allowDeferral := ccmd.Bool("allow-deferral")
 				p.allowDeferral = allowDeferral
+				p.waitForModels = ccmd.Bool("wait-for-models")
 				p.assumeYes = ccmd.Bool("yes")
 				err := Install(ctx, p, resumeFrom)
 				if err != nil {
@@ -117,34 +124,49 @@ func NewRootCleanCommand(p *CommandParams) RootCommandResult {
 //
 // Returns:
 //   - error: An error if the installation fails, otherwise nil.
-func Install(ctx context.Context, p *CommandParams, resumeFrom string) error {
+func Install(ctx context.Context, p *CommandParams, resumeFrom string) (err error) {
 	log.Debug("Entering", "command", "install")
 	defer log.Debug("Completed", "command", "install")
 
 	Banner()
 
-	err := Confirm(ctx, "Would you like to install Quartz cluster?", p)
+	installStart := time.Now()
+	installTiming := make(map[string]time.Duration)
+	defer func() {
+		printInstallTimingSummary(installTiming, time.Since(installStart), err)
+	}()
+
+	err = Confirm(ctx, "Would you like to install Quartz cluster?", p)
 	if err != nil {
 		// just means the user said no
 		return err
 	}
 
-	if err := LocalInstallPreflight(p); err != nil {
+	stepStart := time.Now()
+	if err = LocalInstallPreflight(p); err != nil {
+		installTiming["local-preflight"] = time.Since(stepStart)
 		return err
 	}
+	installTiming["local-preflight"] = time.Since(stepStart)
 
 	// Preflight validation: check IAM credentials and cloud connectivity
+	stepStart = time.Now()
 	err = Preflight(ctx, p)
+	installTiming["cloud-preflight"] = time.Since(stepStart)
 	if err != nil {
 		return err
 	}
 
+	stepStart = time.Now()
 	err = PrepareAccount(ctx, p)
+	installTiming["prepare-account"] = time.Since(stepStart)
 	if err != nil {
 		return err
 	}
 
+	stepStart = time.Now()
 	err = TfCreateBackend(ctx, p)
+	installTiming["create-backend"] = time.Since(stepStart)
 	if err != nil {
 		return err
 	}
@@ -171,6 +193,14 @@ func Install(ctx context.Context, p *CommandParams, resumeFrom string) error {
 	cp := loadCheckpoint(p)
 
 	for _, s := range stages {
+		stageStart := time.Now()
+		stageKey := "stage-" + s.Id
+		finishStageTiming := func() {
+			if _, ok := installTiming[stageKey]; !ok {
+				installTiming[stageKey] = time.Since(stageStart)
+			}
+		}
+
 		if cp.isCompleted(s.Id) {
 			// A checkpointed stage is not blindly skipped. It may have drifted
 			// since it last completed (manual console edits, template/var
@@ -183,10 +213,12 @@ func Install(ctx context.Context, p *CommandParams, resumeFrom string) error {
 				// backend error), preserve the prior fast-resume behavior and
 				// skip rather than blocking the whole install.
 				util.Msgf("Stage %s already completed; drift check failed (%v), skipping", s.Id, derr)
+				finishStageTiming()
 				continue
 			}
 			if !drifted {
 				util.Msgf("Stage %s already completed and in sync, skipping", s.Id)
+				finishStageTiming()
 				continue
 			}
 			util.Msgf("Stage %s already completed but drift detected, re-applying", s.Id)
@@ -195,6 +227,7 @@ func Install(ctx context.Context, p *CommandParams, resumeFrom string) error {
 
 		err = TfInit(ctx, s.Id, p)
 		if err != nil {
+			finishStageTiming()
 			return err
 		}
 
@@ -229,6 +262,7 @@ func Install(ctx context.Context, p *CommandParams, resumeFrom string) error {
 					if cerr := TfApplyTargeted(ctx, s.Id, p, targets); cerr != nil {
 						log.Warn("Targeted convergence apply failed for Flux-owned stage",
 							"stage", s.Id, "targets", targets, "error", cerr)
+						finishStageTiming()
 						return cerr
 					}
 					util.Msgf("Stage %s co-resources converged via targeted apply", s.Id)
@@ -236,16 +270,21 @@ func Install(ctx context.Context, p *CommandParams, resumeFrom string) error {
 
 				cp.markCompleted(s.Id)
 				cp.save(p)
+				finishStageTiming()
 				continue
 			}
+			finishStageTiming()
 			return err
 		}
 
 		cp.markCompleted(s.Id)
 		cp.save(p)
+		finishStageTiming()
 	}
 
+	stepStart = time.Now()
 	err = RefreshSecrets(ctx, p)
+	installTiming["refresh-secrets"] = time.Since(stepStart)
 	if err != nil {
 		return err
 	}
@@ -258,7 +297,16 @@ func Install(ctx context.Context, p *CommandParams, resumeFrom string) error {
 	// external-secret-dependent releases have their inputs in place. The
 	// checkpoint is intentionally cleared only AFTER this gate passes so a
 	// failed convergence still allows a fast drift-aware resume.
+	stepStart = time.Now()
 	err = waitForClusterConvergence(ctx, p)
+	installTiming["cluster-convergence"] = time.Since(stepStart)
+	if err != nil {
+		return err
+	}
+
+	stepStart = time.Now()
+	err = waitForModelWarmerIfRequested(ctx, p)
+	installTiming["ollama-model-wait"] = time.Since(stepStart)
 	if err != nil {
 		return err
 	}
@@ -266,12 +314,18 @@ func Install(ctx context.Context, p *CommandParams, resumeFrom string) error {
 	// Clear checkpoint on successful completion.
 	cp.clear(p)
 
+	stepStart = time.Now()
 	err = ClusterInfo(ctx, p)
+	installTiming["cluster-info"] = time.Since(stepStart)
 	if err != nil {
 		return err
 	}
 
-	ReportModelWarmerStatus(ctx, p)
+	if !installWaitForModels(p) {
+		stepStart = time.Now()
+		ReportModelWarmerStatus(ctx, p)
+		installTiming["model-warmer-status"] = time.Since(stepStart)
+	}
 
 	return nil
 }
@@ -459,32 +513,23 @@ func formatBytes(n uint64) string {
 	return fmt.Sprintf("%.1f %ciB", float64(n)/float64(div), "KMGTPE"[exp])
 }
 
+type modelWarmerStatus struct {
+	Phase         string `json:"phase"`
+	Step          string `json:"step"`
+	Model         string `json:"model"`
+	Detail        string `json:"detail"`
+	DesiredModels string `json:"desiredModels"`
+	PulledModels  string `json:"pulledModels"`
+	UpdatedAt     string `json:"updatedAt"`
+}
+
 func ReportModelWarmerStatus(ctx context.Context, p *CommandParams) {
-	kube, err := p.Provider().Kubernetes(ctx)
-	if err != nil {
-		log.Debug("Model warmer status: cluster not reachable", "error", err)
-		return
-	}
-	data, err := kube.GetConfigMapValue(ctx, "ollama", "ollama-model-warmer-status")
+	status, ok, err := readModelWarmerStatusFromParams(ctx, p)
 	if err != nil {
 		log.Debug("Model warmer status unavailable", "error", err)
 		return
 	}
-	raw := strings.TrimSpace(data["status.json"])
-	if raw == "" {
-		return
-	}
-	var status struct {
-		Phase         string `json:"phase"`
-		Step          string `json:"step"`
-		Model         string `json:"model"`
-		Detail        string `json:"detail"`
-		DesiredModels string `json:"desiredModels"`
-		PulledModels  string `json:"pulledModels"`
-		UpdatedAt     string `json:"updatedAt"`
-	}
-	if err := json.Unmarshal([]byte(raw), &status); err != nil {
-		log.Debug("Model warmer status parse failed", "error", err)
+	if !ok {
 		return
 	}
 	switch strings.ToLower(status.Phase) {
@@ -500,6 +545,169 @@ func ReportModelWarmerStatus(ctx context.Context, p *CommandParams) {
 		util.Msgf("Ollama model warming is still running in the background (%s %s: %s). AI endpoints may be up before every model is ready.",
 			status.Step, target, status.Detail)
 	}
+}
+
+func readModelWarmerStatusFromParams(ctx context.Context, p *CommandParams) (modelWarmerStatus, bool, error) {
+	kube, err := p.Provider().Kubernetes(ctx)
+	if err != nil {
+		return modelWarmerStatus{}, false, fmt.Errorf("cluster not reachable: %w", err)
+	}
+	return readModelWarmerStatus(ctx, kube)
+}
+
+func readModelWarmerStatus(ctx context.Context, kube provider.KubernetesProviderClient) (modelWarmerStatus, bool, error) {
+	data, err := kube.GetConfigMapValue(ctx, ollamaNamespace, modelWarmerStatusCM)
+	if err != nil {
+		return modelWarmerStatus{}, false, err
+	}
+	raw := strings.TrimSpace(data["status.json"])
+	if raw == "" {
+		return modelWarmerStatus{}, false, nil
+	}
+	var status modelWarmerStatus
+	if err := json.Unmarshal([]byte(raw), &status); err != nil {
+		return modelWarmerStatus{}, false, err
+	}
+	return status, true, nil
+}
+
+func waitForModelWarmerIfRequested(ctx context.Context, p *CommandParams) error {
+	if !installWaitForModels(p) {
+		return nil
+	}
+
+	kube, err := p.Provider().Kubernetes(ctx)
+	if err != nil {
+		return fmt.Errorf("wait for Ollama models: cluster not reachable: %w", err)
+	}
+
+	timeout := modelWarmerWaitTimeout()
+	if timeout == 0 {
+		util.Msg("Ollama model wait disabled (QUARTZ_MODEL_WARMER_TIMEOUT=0)")
+		return nil
+	}
+	interval := modelWarmerWaitInterval()
+	deadline := time.Now().Add(timeout)
+	lastProgress := ""
+
+	util.Hdr("Waiting for Ollama models")
+	for {
+		status, ok, readErr := readModelWarmerStatus(ctx, kube)
+		if readErr != nil {
+			log.Debug("Model warmer status unavailable while waiting", "error", readErr)
+		}
+		if ok {
+			switch strings.ToLower(status.Phase) {
+			case "succeeded":
+				if !modelListContainsAll(status.DesiredModels, status.PulledModels) {
+					return fmt.Errorf("Ollama model warmer succeeded but pulled models %q do not include desired models %q",
+						status.PulledModels, status.DesiredModels)
+				}
+				util.Msgf("Ollama model warmer complete: %s", fallback(status.PulledModels, status.DesiredModels))
+				return nil
+			case "failed":
+				return fmt.Errorf("Ollama model warmer failed during %s for %s: %s",
+					status.Step, status.Model, status.Detail)
+			default:
+				progress := modelWarmerProgress(status)
+				if progress != "" && progress != lastProgress {
+					util.Msgf("Ollama model warming: %s", progress)
+					lastProgress = progress
+				}
+			}
+		} else if lastProgress == "" {
+			util.Msgf("Waiting for %s/%s to publish model warmer status", ollamaNamespace, modelWarmerStatusCM)
+			lastProgress = "waiting-for-status"
+		}
+
+		if time.Now().After(deadline) {
+			return fmt.Errorf("timed out after %s waiting for Ollama model warmer to complete", timeout)
+		}
+
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		case <-time.After(interval):
+		}
+	}
+}
+
+func installWaitForModels(p *CommandParams) bool {
+	if p != nil && p.waitForModels {
+		return true
+	}
+	raw := strings.TrimSpace(os.Getenv("QUARTZ_WAIT_FOR_MODELS"))
+	if raw == "" {
+		return false
+	}
+	enabled, err := strconv.ParseBool(raw)
+	return err == nil && enabled
+}
+
+func modelWarmerWaitTimeout() time.Duration {
+	const def = 90 * time.Minute
+	if raw := strings.TrimSpace(os.Getenv("QUARTZ_MODEL_WARMER_TIMEOUT")); raw != "" {
+		if d, err := time.ParseDuration(raw); err == nil && d >= 0 {
+			return d
+		}
+	}
+	return def
+}
+
+func modelWarmerWaitInterval() time.Duration {
+	const def = 30 * time.Second
+	if raw := strings.TrimSpace(os.Getenv("QUARTZ_MODEL_WARMER_INTERVAL")); raw != "" {
+		if d, err := time.ParseDuration(raw); err == nil && d > 0 {
+			return d
+		}
+	}
+	return def
+}
+
+func modelWarmerProgress(status modelWarmerStatus) string {
+	target := strings.TrimSpace(status.Model)
+	if target == "" {
+		target = status.DesiredModels
+	}
+	detail := strings.TrimSpace(status.Detail)
+	switch {
+	case target != "" && detail != "":
+		return fmt.Sprintf("%s %s: %s", status.Step, target, detail)
+	case target != "":
+		return fmt.Sprintf("%s %s", status.Step, target)
+	case detail != "":
+		return fmt.Sprintf("%s: %s", status.Step, detail)
+	default:
+		return strings.TrimSpace(status.Step)
+	}
+}
+
+func splitModelList(raw string) []string {
+	var models []string
+	for _, part := range strings.Split(raw, ",") {
+		model := strings.TrimSpace(part)
+		if model != "" {
+			models = append(models, model)
+		}
+	}
+	return models
+}
+
+func modelListContainsAll(desiredRaw string, pulledRaw string) bool {
+	desired := splitModelList(desiredRaw)
+	if len(desired) == 0 {
+		return true
+	}
+	pulled := map[string]bool{}
+	for _, model := range splitModelList(pulledRaw) {
+		pulled[model] = true
+	}
+	for _, model := range desired {
+		if !pulled[model] {
+			return false
+		}
+	}
+	return true
 }
 
 func fallback(first, second string) string {
@@ -1011,6 +1219,7 @@ func Clean(ctx context.Context, p *CommandParams) error {
 	totalDuration := time.Since(cleanupStart)
 	printCleanupTimingSummary(stageTiming, totalDuration)
 	printCleanupStatusSummary(cleanupStatus)
+	printCleanupNotes(stageTiming, cleanupStatus, destroyErrors)
 
 	if len(destroyErrors) > 0 {
 		printDestroyErrors(destroyErrors)
@@ -1096,6 +1305,9 @@ func renderCleanupReport(name string, stageTiming map[string]time.Duration, tota
 			if data["degradedAt"] != "" {
 				fmt.Fprintf(&b, "  %-12s %s\n", "DegradedAt:", data["degradedAt"])
 			}
+			if recovery := cleanupHookRecoverySummary(cleanupStatus); recovery != "" {
+				fmt.Fprintf(&b, "  %-12s %s\n", "Recovery:", recovery)
+			}
 		}
 
 		writeCleanupHookHistory(&b, cleanupStatus.HookEvents, "  ")
@@ -1120,6 +1332,8 @@ func renderCleanupReport(name string, stageTiming map[string]time.Duration, tota
 			}
 		}
 	}
+
+	writeCleanupNotes(&b, stageTiming, cleanupStatus, errs)
 
 	if len(errs) > 0 {
 		fmt.Fprintf(&b, "\nDestroy Errors:\n")
@@ -1166,6 +1380,9 @@ func printCleanupStatusSummary(cleanupStatus *provider.CleanupStatus) {
 	)
 	if strings.EqualFold(data["degraded"], "true") {
 		util.Msgf("  Degraded: %s", truncateDetail(valueOrUnknown(data["degradedDetail"]), 140))
+		if recovery := cleanupHookRecoverySummary(cleanupStatus); recovery != "" {
+			util.Msgf("  Recovery: %s", truncateDetail(recovery, 140))
+		}
 	}
 
 	if len(cleanupStatus.HookEvents) > 0 {
@@ -1183,6 +1400,80 @@ func printCleanupStatusSummary(cleanupStatus *provider.CleanupStatus) {
 				truncateDetail(valueOrUnknown(e.Detail), 120),
 			)
 		}
+	}
+}
+
+func cleanupHookRecoverySummary(cleanupStatus *provider.CleanupStatus) string {
+	if cleanupStatus == nil {
+		return ""
+	}
+	data := cleanupStatus.Data
+	if !strings.EqualFold(data["degraded"], "true") {
+		return ""
+	}
+
+	status := strings.TrimSpace(data["status"])
+	phase := strings.TrimSpace(data["phase"])
+	hookComplete := strings.EqualFold(status, "Succeeded") ||
+		strings.EqualFold(status, "Complete") ||
+		strings.EqualFold(status, "Completed") ||
+		strings.EqualFold(phase, "complete")
+	if !hookComplete {
+		return ""
+	}
+
+	detail := valueOrUnknown(data["degradedDetail"])
+	if detail == "unknown" {
+		return "self-healed; cleanup hook finished successfully after an earlier degraded signal"
+	}
+	return fmt.Sprintf("self-healed after %s; cleanup hook finished successfully", detail)
+}
+
+func cleanupNotes(stageTiming map[string]time.Duration, cleanupStatus *provider.CleanupStatus, errs []error) []string {
+	var notes []string
+
+	if recovery := cleanupHookRecoverySummary(cleanupStatus); recovery != "" {
+		note := "Cleanup hook recovery: " + recovery + "."
+		if len(errs) == 0 {
+			note += " No manual action is required for that hook condition."
+		}
+		notes = append(notes, note)
+	}
+
+	if d, ok := stageTiming["init-refresh"]; ok && d >= 2*time.Minute {
+		notes = append(notes, "init-refresh runs stages in parallel; long time here is usually provider refresh/module initialization and does not block later destroy attempts.")
+	}
+	if d, ok := stageTiming["destroy-core"]; ok && d >= 5*time.Minute {
+		notes = append(notes, "destroy-core includes the Helm pre-delete hook and in-cluster drain/PV/LoadBalancer cleanup; several minutes can be normal while NodeClaims and storage settle.")
+	}
+	if d, ok := stageTiming["destroy-host"]; ok && d >= 5*time.Minute {
+		notes = append(notes, "destroy-host includes provider-side managed-service teardown such as EKS, RDS, and network resources; long waits here are usually provider deletion progress.")
+	}
+
+	return notes
+}
+
+func writeCleanupNotes(b *strings.Builder, stageTiming map[string]time.Duration, cleanupStatus *provider.CleanupStatus, errs []error) {
+	notes := cleanupNotes(stageTiming, cleanupStatus, errs)
+	if len(notes) == 0 {
+		return
+	}
+
+	fmt.Fprintf(b, "\nNotes:\n")
+	for _, note := range notes {
+		fmt.Fprintf(b, "  - %s\n", note)
+	}
+}
+
+func printCleanupNotes(stageTiming map[string]time.Duration, cleanupStatus *provider.CleanupStatus, errs []error) {
+	notes := cleanupNotes(stageTiming, cleanupStatus, errs)
+	if len(notes) == 0 {
+		return
+	}
+
+	util.Hdr("Cleanup Notes")
+	for _, note := range notes {
+		util.Msgf("  - %s", note)
 	}
 }
 
@@ -1337,6 +1628,51 @@ func printCleanupTimingSummary(stageTiming map[string]time.Duration, totalDurati
 	slices.Sort(keys)
 	for _, stage := range keys {
 		util.Msgf("  %-25s %v", stage+":", stageTiming[stage].Round(time.Second))
+	}
+	util.Msgf("  %-25s %v", "TOTAL:", totalDuration.Round(time.Second))
+}
+
+type timingEntry struct {
+	Name     string
+	Duration time.Duration
+}
+
+func slowestTimingEntries(stageTiming map[string]time.Duration, limit int) []timingEntry {
+	entries := make([]timingEntry, 0, len(stageTiming))
+	for name, duration := range stageTiming {
+		entries = append(entries, timingEntry{Name: name, Duration: duration})
+	}
+	slices.SortFunc(entries, func(a, b timingEntry) int {
+		if a.Duration > b.Duration {
+			return -1
+		}
+		if a.Duration < b.Duration {
+			return 1
+		}
+		return strings.Compare(a.Name, b.Name)
+	})
+	if limit > 0 && len(entries) > limit {
+		return entries[:limit]
+	}
+	return entries
+}
+
+func printInstallTimingSummary(stageTiming map[string]time.Duration, totalDuration time.Duration, installErr error) {
+	if len(stageTiming) == 0 {
+		return
+	}
+
+	util.Hdr("Install Timing Summary")
+	if installErr != nil {
+		util.Msg("  Result: incomplete; timings show work completed before the failure")
+	}
+
+	const limit = 8
+	for _, entry := range slowestTimingEntries(stageTiming, limit) {
+		util.Msgf("  %-25s %v", entry.Name+":", entry.Duration.Round(time.Second))
+	}
+	if omitted := len(stageTiming) - limit; omitted > 0 {
+		util.Msgf("  %-25s %d additional phase(s) omitted", "...", omitted)
 	}
 	util.Msgf("  %-25s %v", "TOTAL:", totalDuration.Round(time.Second))
 }

@@ -142,7 +142,11 @@ func (c *TofuClient) getTf(dir string) (*tfexec.Terraform, error) {
 
 // newTf creates a new OpenTofu instance for the specified directory with default options.
 func (c *TofuClient) newTf(dir string) (*tfexec.Terraform, error) {
-	return c.newTfOpts(&TfOpts{dir: dir, stdout: os.Stdout, stderr: os.Stderr})
+	return c.newTfOpts(&TfOpts{
+		dir:    dir,
+		stdout: newProgressAnnotatingWriter(os.Stdout),
+		stderr: newProgressAnnotatingWriter(os.Stderr),
+	})
 }
 
 // newTfOpts creates a new OpenTofu instance with the specified options.
