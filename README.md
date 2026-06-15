@@ -91,7 +91,7 @@ quartz [command] [flags]
 
 ### Available Commands
 
-- `check`: Check environment, configuration and access for installer prerequisites.
+- `check`: Check environment, configuration and access for installer prerequisites. Use `quartz check --ai-telemetry` on a live Quartz cluster to verify Agent Gateway Prometheus scrape health, recent request volume, recent 2xx/5xx responses, and recent model-not-found/404 responses.
 - `clean`: Perform a full cleanup/teardown of the system. Pass `--yes`/`-y` to skip the confirmation prompt (useful for CI). Cleanup destroys stages in reverse dependency order, continues across stage failures, reports cumulative status, and preserves the state backend until all stages complete successfully.
 - `export`: Export configured Kubernetes resources to yaml.
 - `info`: Output configuration info for the current cluster.

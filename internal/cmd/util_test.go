@@ -74,6 +74,10 @@ func TestNewRootCheckCommand(t *testing.T) {
 
 	assert.Equal(t, "check", cmd.Name)
 	assert.Equal(t, "Check environment and configuration for required values", cmd.Usage)
+	assert.Len(t, cmd.Flags, 1)
+
+	flag := cmd.Flags[0].(*cli.BoolFlag)
+	assert.Equal(t, "ai-telemetry", flag.Name)
 
 	err := cmd.Action(context.Background(), &cli.Command{})
 	assert.NoError(t, err)
@@ -239,6 +243,56 @@ func TestIsClusterNotFoundError(t *testing.T) {
 func TestCmdCheck(t *testing.T) {
 	p := defaultTestConfig(t)
 	Check(context.Background(), p)
+}
+
+func TestLoadAITelemetryConfigFromConfigMap(t *testing.T) {
+	api := provider.NewKubernetesApiMock().WithClientObjects(&corev1.ConfigMap{
+		ObjectMeta: metav1.ObjectMeta{
+			Namespace: "agentgateway",
+			Name:      "agentgateway-telemetry-queries",
+		},
+		Data: map[string]string{
+			"prometheusNamespace": "obs",
+			"prometheusService":   "prom",
+			"prometheusPort":      "9091",
+			"window":              "30m",
+			"query.scrape_up":     "vector(1)",
+		},
+	})
+	k8s, err := provider.NewKubernetesClient(api, provider.KubeconfigInfo{}, schema.QuartzConfig{})
+	assert.NoError(t, err)
+
+	cfg := loadAITelemetryConfig(context.Background(), k8s)
+
+	assert.Equal(t, "obs", cfg.PrometheusNamespace)
+	assert.Equal(t, "prom", cfg.PrometheusService)
+	assert.Equal(t, 9091, cfg.PrometheusPort)
+	assert.Equal(t, "30m", cfg.Window)
+	assert.Equal(t, "vector(1)", cfg.Queries["scrape_up"])
+	assert.NotEmpty(t, cfg.Queries["recent_requests"])
+}
+
+func TestAITelemetryStatus(t *testing.T) {
+	tests := []struct {
+		key        string
+		value      float64
+		wantStatus string
+	}{
+		{key: "scrape_up", value: 1, wantStatus: "OK"},
+		{key: "scrape_up", value: 0, wantStatus: "Missing"},
+		{key: "recent_requests", value: 0, wantStatus: "No traffic"},
+		{key: "recent_5xx", value: 0, wantStatus: "OK"},
+		{key: "recent_5xx", value: 2, wantStatus: "Errors"},
+		{key: "model_not_found", value: 0, wantStatus: "OK"},
+		{key: "model_not_found", value: 1, wantStatus: "Errors"},
+	}
+
+	for _, tt := range tests {
+		t.Run(fmt.Sprintf("%s/%f", tt.key, tt.value), func(t *testing.T) {
+			status, _ := aiTelemetryStatus(tt.key, tt.value)
+			assert.Equal(t, tt.wantStatus, status)
+		})
+	}
 }
 
 func TestCmdRefreshSecrets(t *testing.T) {

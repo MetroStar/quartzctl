@@ -24,6 +24,7 @@ import (
 	"os"
 	"regexp"
 	"slices"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -84,6 +85,7 @@ type KubernetesProviderClient interface {
 	RefreshExternalSecrets(ctx context.Context) ([]KubernetesResource, error)
 	Export(ctx context.Context, cfg quartzSchema.ExportConfig) (map[string][]byte, error)
 	GetConfigMapValue(ctx context.Context, ns string, name string) (map[string]string, error)
+	QueryPrometheus(ctx context.Context, ns string, service string, port int, query string) (PrometheusQueryResponse, error)
 	GetCleanupStatus(ctx context.Context, ns string, name string) (CleanupStatus, error)
 	GetSecretValue(ctx context.Context, ns string, name string) (map[string]string, error)
 	Restart(ctx context.Context, kind schema.GroupVersionResource, ns string, name string) error
@@ -174,6 +176,41 @@ type VirtualServiceInfo struct {
 	Namespace string
 	Hosts     []string
 	Gateways  []string
+}
+
+type PrometheusQueryResponse struct {
+	Status    string              `json:"status"`
+	Data      PrometheusQueryData `json:"data"`
+	ErrorType string              `json:"errorType,omitempty"`
+	Error     string              `json:"error,omitempty"`
+}
+
+type PrometheusQueryData struct {
+	ResultType string                  `json:"resultType"`
+	Result     []PrometheusQueryResult `json:"result"`
+}
+
+type PrometheusQueryResult struct {
+	Metric map[string]string `json:"metric"`
+	Value  []any             `json:"value"`
+}
+
+func (r PrometheusQueryResponse) ScalarValue() (float64, bool) {
+	if len(r.Data.Result) == 0 || len(r.Data.Result[0].Value) < 2 {
+		return 0, false
+	}
+
+	switch v := r.Data.Result[0].Value[1].(type) {
+	case string:
+		f, err := strconv.ParseFloat(v, 64)
+		return f, err == nil
+	case float64:
+		return v, true
+	case int:
+		return float64(v), true
+	default:
+		return 0, false
+	}
 }
 
 type KubernetesProviderCheckResult struct {
@@ -571,6 +608,37 @@ func (c KubernetesClient) GetConfigMapValue(ctx context.Context, ns string, name
 	res := make(map[string]string)
 	for k, v := range cm.Data {
 		res[k] = v
+	}
+
+	return res, nil
+}
+
+func (c KubernetesClient) QueryPrometheus(ctx context.Context, ns string, service string, port int, query string) (PrometheusQueryResponse, error) {
+	clientset, err := c.api.ClientSet()
+	if err != nil {
+		return PrometheusQueryResponse{}, err
+	}
+
+	name := fmt.Sprintf("http:%s:%d", service, port)
+	raw, err := clientset.CoreV1().RESTClient().
+		Get().
+		Namespace(ns).
+		Resource("services").
+		Name(name).
+		SubResource("proxy").
+		Suffix("api", "v1", "query").
+		Param("query", query).
+		DoRaw(ctx)
+	if err != nil {
+		return PrometheusQueryResponse{}, err
+	}
+
+	var res PrometheusQueryResponse
+	if err := json.Unmarshal(raw, &res); err != nil {
+		return PrometheusQueryResponse{}, err
+	}
+	if res.Status != "" && res.Status != "success" {
+		return res, fmt.Errorf("prometheus query failed: %s %s", res.ErrorType, res.Error)
 	}
 
 	return res, nil

@@ -1479,6 +1479,29 @@ func TestHelmActionTimeout(t *testing.T) {
 	}
 }
 
+func TestPrometheusQueryResponseScalarValue(t *testing.T) {
+	res := PrometheusQueryResponse{
+		Data: PrometheusQueryData{
+			Result: []PrometheusQueryResult{
+				{Value: []any{1718390000.0, "42.5"}},
+			},
+		},
+	}
+
+	got, ok := res.ScalarValue()
+	if !ok {
+		t.Fatalf("expected scalar value")
+	}
+	if got != 42.5 {
+		t.Fatalf("ScalarValue() = %v, want 42.5", got)
+	}
+
+	empty := PrometheusQueryResponse{}
+	if got, ok := empty.ScalarValue(); ok || got != 0 {
+		t.Fatalf("empty ScalarValue() = %v/%v, want 0/false", got, ok)
+	}
+}
+
 func TestProviderKubernetesClientScrubStuckHelmReleaseSecrets(t *testing.T) {
 	helmSecret := func(ns, name, release, status string) *corev1.Secret {
 		return &corev1.Secret{

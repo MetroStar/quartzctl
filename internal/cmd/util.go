@@ -77,7 +77,13 @@ func NewRootCheckCommand(p *CommandParams) RootCommandResult {
 		Command: &cli.Command{
 			Name:  "check",
 			Usage: "Check environment and configuration for required values",
+			Flags: []cli.Flag{
+				&cli.BoolFlag{Name: "ai-telemetry", Usage: "Check Agent Gateway AI telemetry in Prometheus"},
+			},
 			Action: func(ctx context.Context, ccmd *cli.Command) error {
+				if ccmd.Bool("ai-telemetry") {
+					return CheckAITelemetry(ctx, p)
+				}
 				Check(ctx, p)
 				return nil
 			},
@@ -490,6 +496,199 @@ func Check(ctx context.Context, p *CommandParams) {
 
 	opts := provider.NewProviderCheckOpts(ctx, *p.Provider())
 	provider.Check(ctx, &opts)
+}
+
+type aiTelemetryConfig struct {
+	PrometheusNamespace string
+	PrometheusService   string
+	PrometheusPort      int
+	Window              string
+	Queries             map[string]string
+}
+
+type aiTelemetryMetric struct {
+	Key    string
+	Name   string
+	Value  float64
+	Error  error
+	Status string
+	Detail string
+}
+
+var aiTelemetryQueryKeys = []string{
+	"scrape_up",
+	"recent_requests",
+	"recent_2xx",
+	"recent_5xx",
+	"model_not_found",
+}
+
+func defaultAITelemetryConfig() aiTelemetryConfig {
+	return aiTelemetryConfig{
+		PrometheusNamespace: "monitoring",
+		PrometheusService:   "prometheus-operated",
+		PrometheusPort:      9090,
+		Window:              "15m",
+		Queries: map[string]string{
+			"scrape_up":       `sum(up{namespace="agentgateway", job=~"quartz-agentgateway.*|agentgateway.*"}) or vector(0)`,
+			"recent_requests": `sum(increase({namespace="agentgateway",__name__=~".*(request|http|genai|llm|chat|completion).*(total|count).*"}[15m])) or vector(0)`,
+			"recent_2xx":      `(sum(increase({namespace="agentgateway",__name__=~".*(request|http|genai|llm|chat|completion).*(total|count).*",code=~"2.."}[15m])) or vector(0)) + (sum(increase({namespace="agentgateway",__name__=~".*(request|http|genai|llm|chat|completion).*(total|count).*",status=~"2.."}[15m])) or vector(0)) + (sum(increase({namespace="agentgateway",__name__=~".*(request|http|genai|llm|chat|completion).*(total|count).*",status_code=~"2.."}[15m])) or vector(0)) + (sum(increase({namespace="agentgateway",__name__=~".*(request|http|genai|llm|chat|completion).*(total|count).*",response_code=~"2.."}[15m])) or vector(0))`,
+			"recent_5xx":      `(sum(increase({namespace="agentgateway",__name__=~".*(request|http|genai|llm|chat|completion).*(total|count).*",code=~"5.."}[15m])) or vector(0)) + (sum(increase({namespace="agentgateway",__name__=~".*(request|http|genai|llm|chat|completion).*(total|count).*",status=~"5.."}[15m])) or vector(0)) + (sum(increase({namespace="agentgateway",__name__=~".*(request|http|genai|llm|chat|completion).*(total|count).*",status_code=~"5.."}[15m])) or vector(0)) + (sum(increase({namespace="agentgateway",__name__=~".*(request|http|genai|llm|chat|completion).*(total|count).*",response_code=~"5.."}[15m])) or vector(0))`,
+			"model_not_found": `(sum(increase({namespace="agentgateway",__name__=~".*(request|http|genai|llm|chat|completion).*(total|count).*",code="404"}[15m])) or vector(0)) + (sum(increase({namespace="agentgateway",__name__=~".*(request|http|genai|llm|chat|completion).*(total|count).*",status="404"}[15m])) or vector(0)) + (sum(increase({namespace="agentgateway",__name__=~".*(request|http|genai|llm|chat|completion).*(total|count).*",status_code="404"}[15m])) or vector(0)) + (sum(increase({namespace="agentgateway",__name__=~".*(request|http|genai|llm|chat|completion).*(total|count).*",response_code="404"}[15m])) or vector(0)) + (sum(increase({namespace="agentgateway",__name__=~".*(request|http|genai|llm|chat|completion).*(total|count).*",error=~".*(model|not.?found|not_found).*"}[15m])) or vector(0)) + (sum(increase({namespace="agentgateway",__name__=~".*(request|http|genai|llm|chat|completion).*(total|count).*",error_type=~".*(model|not.?found|not_found).*"}[15m])) or vector(0))`,
+		},
+	}
+}
+
+func loadAITelemetryConfig(ctx context.Context, k8s provider.KubernetesProviderClient) aiTelemetryConfig {
+	cfg := defaultAITelemetryConfig()
+
+	data, err := k8s.GetConfigMapValue(ctx, "agentgateway", "agentgateway-telemetry-queries")
+	if err != nil {
+		log.Debug("Using default Agent Gateway telemetry queries", "err", err)
+		return cfg
+	}
+
+	if v := strings.TrimSpace(data["prometheusNamespace"]); v != "" {
+		cfg.PrometheusNamespace = v
+	}
+	if v := strings.TrimSpace(data["prometheusService"]); v != "" {
+		cfg.PrometheusService = v
+	}
+	if v := strings.TrimSpace(data["prometheusPort"]); v != "" {
+		if port, err := strconv.Atoi(v); err == nil && port > 0 {
+			cfg.PrometheusPort = port
+		}
+	}
+	if v := strings.TrimSpace(data["window"]); v != "" {
+		cfg.Window = v
+	}
+	for _, key := range aiTelemetryQueryKeys {
+		if q := strings.TrimSpace(data["query."+key]); q != "" {
+			cfg.Queries[key] = q
+		}
+	}
+
+	return cfg
+}
+
+func CheckAITelemetry(ctx context.Context, p *CommandParams) error {
+	log.Debug("Entering", "command", "checkAITelemetry")
+	defer log.Debug("Completed", "command", "checkAITelemetry")
+
+	k8s, err := p.Provider().Kubernetes(ctx)
+	if err != nil {
+		return err
+	}
+
+	cfg := loadAITelemetryConfig(ctx, k8s)
+
+	util.Hdr("Agent Gateway AI telemetry")
+	util.Msgf("Prometheus: %s/%s:%d", cfg.PrometheusNamespace, cfg.PrometheusService, cfg.PrometheusPort)
+
+	metrics := []aiTelemetryMetric{
+		queryAITelemetryMetric(ctx, k8s, cfg, "scrape_up", "Scrape targets up"),
+		queryAITelemetryMetric(ctx, k8s, cfg, "recent_requests", fmt.Sprintf("Requests (%s)", cfg.Window)),
+		queryAITelemetryMetric(ctx, k8s, cfg, "recent_2xx", fmt.Sprintf("2xx responses (%s)", cfg.Window)),
+		queryAITelemetryMetric(ctx, k8s, cfg, "recent_5xx", fmt.Sprintf("5xx responses (%s)", cfg.Window)),
+		queryAITelemetryMetric(ctx, k8s, cfg, "model_not_found", fmt.Sprintf("Model-not-found/404 (%s)", cfg.Window)),
+	}
+
+	rows := make([][]string, 0, len(metrics))
+	queryFailures := 0
+	for _, m := range metrics {
+		if m.Error != nil {
+			queryFailures++
+			rows = append(rows, []string{m.Name, "-", "Query failed", truncateDetail(m.Error.Error(), 80)})
+			continue
+		}
+
+		rows = append(rows, []string{m.Name, formatTelemetryValue(m.Value), m.Status, m.Detail})
+	}
+
+	util.PrintRowStatusTable(
+		[]string{"Metric", "Value", "Status", "Detail"},
+		rows,
+		func(_ int, row []string) util.RowStatus {
+			switch row[2] {
+			case "OK":
+				return util.StatusOk
+			case "No traffic":
+				return util.StatusWarning
+			default:
+				return util.StatusError
+			}
+		},
+	)
+
+	if queryFailures == len(metrics) {
+		return fmt.Errorf("all Agent Gateway telemetry queries failed")
+	}
+
+	return nil
+}
+
+func queryAITelemetryMetric(ctx context.Context, k8s provider.KubernetesProviderClient, cfg aiTelemetryConfig, key string, name string) aiTelemetryMetric {
+	query := cfg.Queries[key]
+	if strings.TrimSpace(query) == "" {
+		return aiTelemetryMetric{Key: key, Name: name, Error: fmt.Errorf("missing Prometheus query %q", key)}
+	}
+
+	res, err := k8s.QueryPrometheus(ctx, cfg.PrometheusNamespace, cfg.PrometheusService, cfg.PrometheusPort, query)
+	if err != nil {
+		return aiTelemetryMetric{Key: key, Name: name, Error: err}
+	}
+
+	value, ok := res.ScalarValue()
+	if !ok {
+		return aiTelemetryMetric{Key: key, Name: name, Error: fmt.Errorf("Prometheus query %q returned no scalar value", key)}
+	}
+
+	status, detail := aiTelemetryStatus(key, value)
+	return aiTelemetryMetric{
+		Key:    key,
+		Name:   name,
+		Value:  value,
+		Status: status,
+		Detail: detail,
+	}
+}
+
+func aiTelemetryStatus(key string, value float64) (string, string) {
+	switch key {
+	case "scrape_up":
+		if value > 0 {
+			return "OK", "Prometheus is scraping Agent Gateway metrics"
+		}
+		return "Missing", "No live Agent Gateway scrape target is up"
+	case "recent_requests":
+		if value > 0 {
+			return "OK", "Recent AI traffic reached Agent Gateway"
+		}
+		return "No traffic", "Generate Open-WebUI, Kagent, K8sGPT, Epyon, or Jenkins traffic and rerun"
+	case "recent_2xx":
+		if value > 0 {
+			return "OK", "Recent successful responses were observed"
+		}
+		return "No traffic", "No recent successful responses were observed"
+	case "recent_5xx":
+		if value == 0 {
+			return "OK", "No recent server-side Agent Gateway failures"
+		}
+		return "Errors", "Recent 5xx responses were observed"
+	case "model_not_found":
+		if value == 0 {
+			return "OK", "No recent 404/model-not-found responses"
+		}
+		return "Errors", "Recent 404/model-not-found responses were observed"
+	default:
+		return "OK", ""
+	}
+}
+
+func formatTelemetryValue(v float64) string {
+	s := fmt.Sprintf("%.2f", v)
+	s = strings.TrimRight(s, "0")
+	return strings.TrimRight(s, ".")
 }
 
 // RefreshSecrets triggers an immediate refresh of all external secrets.
