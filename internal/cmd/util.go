@@ -17,6 +17,7 @@ package cmd
 import (
 	"cmp"
 	"context"
+	"errors"
 	"fmt"
 	"os"
 	"path"
@@ -523,6 +524,16 @@ var aiTelemetryQueryKeys = []string{
 	"model_not_found",
 }
 
+func aiTelemetryQueryTimeout() time.Duration {
+	const def = 8 * time.Second
+	if raw := strings.TrimSpace(os.Getenv("QUARTZ_AI_TELEMETRY_TIMEOUT")); raw != "" {
+		if d, err := time.ParseDuration(raw); err == nil && d > 0 {
+			return d
+		}
+	}
+	return def
+}
+
 func defaultAITelemetryConfig() aiTelemetryConfig {
 	return aiTelemetryConfig{
 		PrometheusNamespace: "monitoring",
@@ -633,9 +644,17 @@ func queryAITelemetryMetric(ctx context.Context, k8s provider.KubernetesProvider
 		return aiTelemetryMetric{Key: key, Name: name, Error: fmt.Errorf("missing Prometheus query %q", key)}
 	}
 
-	res, err := k8s.QueryPrometheus(ctx, cfg.PrometheusNamespace, cfg.PrometheusService, cfg.PrometheusPort, query)
+	timeout := aiTelemetryQueryTimeout()
+	queryCtx, cancel := context.WithTimeout(ctx, timeout)
+	defer cancel()
+
+	res, err := k8s.QueryPrometheus(queryCtx, cfg.PrometheusNamespace, cfg.PrometheusService, cfg.PrometheusPort, query)
 	if err != nil {
-		return aiTelemetryMetric{Key: key, Name: name, Error: err}
+		return aiTelemetryMetric{
+			Key:   key,
+			Name:  name,
+			Error: summarizeAITelemetryError(err, cfg, timeout),
+		}
 	}
 
 	value, ok := res.ScalarValue()
@@ -650,6 +669,27 @@ func queryAITelemetryMetric(ctx context.Context, k8s provider.KubernetesProvider
 		Value:  value,
 		Status: status,
 		Detail: detail,
+	}
+}
+
+func summarizeAITelemetryError(err error, cfg aiTelemetryConfig, timeout time.Duration) error {
+	if err == nil {
+		return nil
+	}
+
+	target := fmt.Sprintf("%s/%s:%d", cfg.PrometheusNamespace, cfg.PrometheusService, cfg.PrometheusPort)
+	msg := err.Error()
+	lower := strings.ToLower(msg)
+
+	switch {
+	case errors.Is(err, context.DeadlineExceeded) || strings.Contains(lower, "context deadline exceeded"):
+		return fmt.Errorf("Prometheus service proxy %s timed out after %s; Prometheus may be unavailable or the Kubernetes API service proxy is under pressure", target, timeout)
+	case strings.Contains(lower, "not found") && strings.Contains(lower, "services"):
+		return fmt.Errorf("Prometheus service proxy %s was not found; verify monitoring is installed and the telemetry ConfigMap points at the right service", target)
+	case strings.Contains(lower, "service unavailable") || strings.Contains(lower, "currently unable to handle the request") || strings.Contains(lower, "503"):
+		return fmt.Errorf("Prometheus service proxy %s returned service unavailable; monitoring may still be starting or the API service proxy may be overloaded", target)
+	default:
+		return fmt.Errorf("Prometheus service proxy %s query failed: %w", target, err)
 	}
 }
 

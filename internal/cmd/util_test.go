@@ -295,6 +295,57 @@ func TestAITelemetryStatus(t *testing.T) {
 	}
 }
 
+func TestAITelemetryQueryTimeout(t *testing.T) {
+	t.Setenv("QUARTZ_AI_TELEMETRY_TIMEOUT", "11s")
+	assert.Equal(t, 11*time.Second, aiTelemetryQueryTimeout())
+
+	t.Setenv("QUARTZ_AI_TELEMETRY_TIMEOUT", "bogus")
+	assert.Equal(t, 8*time.Second, aiTelemetryQueryTimeout())
+}
+
+func TestSummarizeAITelemetryError(t *testing.T) {
+	cfg := aiTelemetryConfig{
+		PrometheusNamespace: "monitoring",
+		PrometheusService:   "prometheus-operated",
+		PrometheusPort:      9090,
+	}
+
+	tests := []struct {
+		name string
+		err  error
+		want string
+	}{
+		{
+			name: "deadline",
+			err:  context.DeadlineExceeded,
+			want: "timed out after 8s",
+		},
+		{
+			name: "not found",
+			err:  errors.New(`services "http:prometheus-operated:9090" not found`),
+			want: "was not found",
+		},
+		{
+			name: "service unavailable",
+			err:  errors.New("the server is currently unable to handle the request"),
+			want: "returned service unavailable",
+		},
+		{
+			name: "generic",
+			err:  errors.New("x509: certificate signed by unknown authority"),
+			want: "query failed",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			err := summarizeAITelemetryError(tt.err, cfg, 8*time.Second)
+			assert.ErrorContains(t, err, "monitoring/prometheus-operated:9090")
+			assert.ErrorContains(t, err, tt.want)
+		})
+	}
+}
+
 func TestCmdRefreshSecrets(t *testing.T) {
 	p := defaultTestConfig(t)
 
