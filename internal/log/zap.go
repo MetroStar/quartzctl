@@ -111,6 +111,10 @@ func (l *ZapLogger) Error(msg interface{}, keyvals ...interface{}) {
 
 // LogEvent logs an fxevent.Event using the underlying fxevent.Logger.
 func (l *ZapLogger) LogEvent(event fxevent.Event) {
+	if shouldSuppressFxEvent(event) {
+		return
+	}
+
 	l.fx.LogEvent(event)
 }
 

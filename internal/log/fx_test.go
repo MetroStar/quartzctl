@@ -37,6 +37,32 @@ func TestNewFxLogger_NonDebugMode(t *testing.T) {
 	assert.IsType(t, &fxevent.NopLogger, logger.fallbackLogger)
 }
 
+func TestShouldSuppressFxEvent(t *testing.T) {
+	t.Setenv("DEBUG", "false")
+
+	tests := []struct {
+		name       string
+		event      fxevent.Event
+		suppressed bool
+	}{
+		{name: "on stop executing", event: &fxevent.OnStopExecuting{}, suppressed: true},
+		{name: "on stop executed", event: &fxevent.OnStopExecuted{}, suppressed: true},
+		{name: "stopping", event: &fxevent.Stopping{}, suppressed: true},
+		{name: "invoked", event: &fxevent.Invoked{}, suppressed: false},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			assert.Equal(t, tt.suppressed, shouldSuppressFxEvent(tt.event))
+		})
+	}
+}
+
+func TestShouldSuppressFxEvent_DebugMode(t *testing.T) {
+	t.Setenv("DEBUG", "true")
+	assert.False(t, shouldSuppressFxEvent(&fxevent.Stopping{}))
+}
+
 func TestFxLogger_LogEvent_WithDefaultLogger(t *testing.T) {
 	// Mock defaultLogger
 	mockLogger := &mockFxEventLogger{}
@@ -64,6 +90,17 @@ func TestFxLogger_LogEvent_WithFallbackLogger(t *testing.T) {
 
 	assert.Equal(t, 1, mockFallbackLogger.logEventCallCount)
 	assert.Equal(t, event, mockFallbackLogger.lastEvent)
+}
+
+func TestFxLogger_LogEvent_SuppressedEventSkipped(t *testing.T) {
+	t.Setenv("DEBUG", "false")
+	defaultLogger = nil
+
+	mockFallbackLogger := &mockFxEventLogger{}
+	logger := &FxLogger{fallbackLogger: mockFallbackLogger}
+	logger.LogEvent(&fxevent.Stopping{})
+
+	assert.Equal(t, 0, mockFallbackLogger.logEventCallCount)
 }
 
 // mockFxEventLogger is a mock implementation of fxevent.Logger for testing purposes.
