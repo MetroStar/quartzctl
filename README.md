@@ -135,6 +135,13 @@ quartz [command] [flags]
 quartz --config=quartz.yaml install
 ```
 
+`quartz install` reports cluster success once the HelmRelease convergence gate is
+green. On AI-enabled clusters, Ollama model pulling can continue in the
+background after that point; the CLI now distinguishes between the durable
+model store being ready and the later best-effort GPU warm-up pass. Use
+`quartz install --wait-for-models` when you want the CLI itself to block until
+the desired models are fully persisted.
+
 ---
 
 ## ⚙️ Configuration

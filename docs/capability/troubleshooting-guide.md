@@ -120,6 +120,11 @@ Fixes:
 - For `http` checks, confirm the endpoint, status codes, TLS setting, and content key.
 - For `daemonset` checks, confirm enough nodes are schedulable.
 - For `oidc` checks, confirm the secret path and client credentials exist.
+- On AI-enabled clusters, distinguish `quartz install` finishing from Ollama
+  model warming finishing. If the CLI says the model store is ready, the models
+  are already durable on the PVC even when GPU warm-up is still running in the
+  background. Use `quartz install --wait-for-models` when you want the CLI to
+  block until the warmer completes.
 
 ## 5 - `kubectl` Unauthorized Or Kubeconfig Missing
 

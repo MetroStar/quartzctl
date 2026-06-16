@@ -173,6 +173,11 @@ not a leaked resource by itself; it means at least one stage still needs a
 successful destroy so state can stay available for recovery. Re-run
 `quartz clean --yes` after resolving the reported blocker.
 
+While the cluster is still reachable, `quartz clean` now streams the Quartz
+pre-delete hook's cumulative breadcrumbs as they change, including degraded but
+still-progressing signals and the latest residual-resource snapshot reported by
+the hook.
+
 ## Procedure 14 - Build And Deploy A Local CLI
 
 For CLI developers:

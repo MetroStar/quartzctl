@@ -516,14 +516,21 @@ func formatBytes(n uint64) string {
 }
 
 type modelWarmerStatus struct {
-	Phase         string `json:"phase"`
-	Step          string `json:"step"`
-	Model         string `json:"model"`
-	Detail        string `json:"detail"`
-	DesiredModels string `json:"desiredModels"`
-	PulledModels  string `json:"pulledModels"`
-	CompletedAt   string `json:"completedAt"`
-	UpdatedAt     string `json:"updatedAt"`
+	Phase                string `json:"phase"`
+	Step                 string `json:"step"`
+	Model                string `json:"model"`
+	Detail               string `json:"detail"`
+	DesiredModels        string `json:"desiredModels"`
+	DesiredCount         int    `json:"desiredCount"`
+	PulledModels         string `json:"pulledModels"`
+	PulledCount          int    `json:"pulledCount"`
+	WarmedModels         string `json:"warmedModels"`
+	WarmedCount          int    `json:"warmedCount"`
+	SkippedGpuWarmModels string `json:"skippedGpuWarmModels"`
+	SkippedGpuWarmCount  int    `json:"skippedGpuWarmCount"`
+	PersistentReady      bool   `json:"persistentReady"`
+	CompletedAt          string `json:"completedAt"`
+	UpdatedAt            string `json:"updatedAt"`
 }
 
 func ReportModelWarmerStatus(ctx context.Context, p *CommandParams) {
@@ -538,24 +545,36 @@ func ReportModelWarmerStatus(ctx context.Context, p *CommandParams) {
 	switch strings.ToLower(status.Phase) {
 	case "succeeded":
 		completedAt := modelWarmerCompletionTime(status)
+		summary := modelWarmerReadinessSummary(status)
 		if completedAt != "" {
-			util.Msgf("Ollama model warmer complete at %s: %s", completedAt, fallback(status.PulledModels, status.DesiredModels))
+			util.Msgf("Ollama model warmer complete at %s: %s", completedAt, summary)
 		} else {
-			util.Msgf("Ollama model warmer complete: %s", fallback(status.PulledModels, status.DesiredModels))
+			util.Msgf("Ollama model warmer complete: %s", summary)
 		}
 	case "failed":
-		util.Msgf("Ollama model warmer failed during %s for %s: %s", status.Step, status.Model, status.Detail)
+		util.Msgf(
+			"Ollama model warmer failed during %s for %s: %s (%s)",
+			status.Step, status.Model, status.Detail, modelWarmerReadinessSummary(status),
+		)
 	default:
-		target := strings.TrimSpace(status.Model)
-		if target == "" {
-			target = status.DesiredModels
-		}
+		progress := modelWarmerProgress(status)
+		readiness := modelWarmerReadinessSummary(status)
 		if updatedAt := strings.TrimSpace(status.UpdatedAt); updatedAt != "" {
-			util.Msgf("Ollama model warming is still running in the background (%s %s: %s, last update %s). AI endpoints may be up before every model is ready.",
-				status.Step, target, status.Detail, updatedAt)
+			if status.PersistentReady {
+				util.Msgf("Ollama model store is ready (%s); best-effort GPU warm is still running in the background (%s, last update %s).",
+					readiness, progress, updatedAt)
+			} else {
+				util.Msgf("Ollama model warming is still running in the background (%s, %s, last update %s). AI endpoints may be up before every model is ready.",
+					readiness, progress, updatedAt)
+			}
 		} else {
-			util.Msgf("Ollama model warming is still running in the background (%s %s: %s). AI endpoints may be up before every model is ready.",
-				status.Step, target, status.Detail)
+			if status.PersistentReady {
+				util.Msgf("Ollama model store is ready (%s); best-effort GPU warm is still running in the background (%s).",
+					readiness, progress)
+			} else {
+				util.Msgf("Ollama model warming is still running in the background (%s, %s). AI endpoints may be up before every model is ready.",
+					readiness, progress)
+			}
 		}
 	}
 }
@@ -657,7 +676,7 @@ func waitForModelWarmerIfRequested(ctx context.Context, p *CommandParams) error 
 					return fmt.Errorf("Ollama model warmer succeeded but pulled models %q do not include desired models %q",
 						status.PulledModels, status.DesiredModels)
 				}
-				util.Msgf("Ollama model warmer complete: %s", fallback(status.PulledModels, status.DesiredModels))
+				util.Msgf("Ollama model warmer complete: %s", modelWarmerReadinessSummary(status))
 				return nil
 			case "failed":
 				return fmt.Errorf("Ollama model warmer failed during %s for %s: %s",
@@ -665,7 +684,7 @@ func waitForModelWarmerIfRequested(ctx context.Context, p *CommandParams) error 
 			default:
 				progress := modelWarmerProgress(status)
 				if progress != "" && progress != lastProgress {
-					util.Msgf("Ollama model warming: %s", progress)
+					util.Msgf("Ollama model warming: %s (%s)", progress, modelWarmerReadinessSummary(status))
 					lastProgress = progress
 				}
 			}
@@ -734,6 +753,48 @@ func modelWarmerProgress(status modelWarmerStatus) string {
 	default:
 		return strings.TrimSpace(status.Step)
 	}
+}
+
+func modelWarmerReadinessSummary(status modelWarmerStatus) string {
+	desiredCount := status.DesiredCount
+	if desiredCount == 0 {
+		desiredCount = len(splitModelList(status.DesiredModels))
+	}
+	pulledCount := status.PulledCount
+	if pulledCount == 0 {
+		pulledCount = len(splitModelList(status.PulledModels))
+	}
+	warmedCount := status.WarmedCount
+	if warmedCount == 0 {
+		warmedCount = len(splitModelList(status.WarmedModels))
+	}
+	skippedCount := status.SkippedGpuWarmCount
+	if skippedCount == 0 {
+		skippedCount = len(splitModelList(status.SkippedGpuWarmModels))
+	}
+
+	totalPersistedTarget := desiredCount
+	if pulledCount > totalPersistedTarget {
+		totalPersistedTarget = pulledCount
+	}
+	persisted := fmt.Sprintf("%d/%d persisted", pulledCount, totalPersistedTarget)
+	if desiredCount == 0 {
+		persisted = fallback(status.PulledModels, status.DesiredModels)
+	}
+
+	var parts []string
+	parts = append(parts, persisted)
+	if desiredCount > 0 {
+		parts = append(parts, fmt.Sprintf("%d/%d GPU-warmed", warmedCount, desiredCount))
+	}
+	if skippedCount > 0 {
+		parts = append(parts, fmt.Sprintf("%d skipped GPU warm", skippedCount))
+	}
+	models := fallback(status.PulledModels, status.DesiredModels)
+	if strings.TrimSpace(models) != "" {
+		parts = append(parts, models)
+	}
+	return strings.Join(parts, "; ")
 }
 
 func splitModelList(raw string) []string {
@@ -1149,6 +1210,7 @@ func Clean(ctx context.Context, p *CommandParams) error {
 	stageTiming := make(map[string]time.Duration)
 	var destroyErrors []error
 	var cleanupStatus *provider.CleanupStatus
+	var cleanupDisplay cleanupStatusDisplayState
 
 	stages := p.Settings().Config.StagesOrdered()
 
@@ -1204,6 +1266,7 @@ func Clean(ctx context.Context, p *CommandParams) error {
 			return
 		}
 		cleanupStatus = &status
+		printCleanupStatusProgress(cleanupStatus, &cleanupDisplay)
 	}
 	stageTiming["k8s-prep"] = time.Since(k8sCleanStart)
 
@@ -1364,6 +1427,9 @@ func renderCleanupReport(name string, stageTiming map[string]time.Duration, tota
 				fmt.Fprintf(&b, "  %-12s %s\n", "Recovery:", recovery)
 			}
 		}
+		if residual := strings.TrimSpace(data["residualHuman"]); residual != "" {
+			fmt.Fprintf(&b, "  %-12s %s\n", "Residual:", residual)
+		}
 
 		writeCleanupHookHistory(&b, cleanupStatus.HookEvents, "  ")
 
@@ -1439,6 +1505,9 @@ func printCleanupStatusSummary(cleanupStatus *provider.CleanupStatus) {
 			util.Msgf("  Recovery: %s", truncateDetail(recovery, 140))
 		}
 	}
+	if residual := strings.TrimSpace(data["residualHuman"]); residual != "" {
+		util.Msgf("  Residual: %s", truncateDetail(residual, 140))
+	}
 
 	if len(cleanupStatus.HookEvents) > 0 {
 		total, degraded := cleanupHookHistoryCounts(cleanupStatus.HookEvents)
@@ -1456,6 +1525,59 @@ func printCleanupStatusSummary(cleanupStatus *provider.CleanupStatus) {
 			)
 		}
 	}
+}
+
+type cleanupStatusDisplayState struct {
+	Phase          string
+	Status         string
+	Detail         string
+	DegradedDetail string
+	Residual       string
+	HookEventCount int
+}
+
+func printCleanupStatusProgress(cleanupStatus *provider.CleanupStatus, state *cleanupStatusDisplayState) {
+	if cleanupStatus == nil || state == nil {
+		return
+	}
+
+	data := cleanupStatus.Data
+	phase := valueOrUnknown(data["phase"])
+	status := valueOrUnknown(data["status"])
+	detail := valueOrUnknown(data["detail"])
+	if phase != state.Phase || status != state.Status || detail != state.Detail {
+		util.Msgf("Cleanup hook: %-10s %-18s %s",
+			status,
+			phase,
+			truncateDetail(detail, 120),
+		)
+		state.Phase = phase
+		state.Status = status
+		state.Detail = detail
+	}
+
+	if degraded := strings.TrimSpace(data["degradedDetail"]); degraded != "" && degraded != state.DegradedDetail {
+		util.Msgf("  Cleanup degraded but still progressing: %s", truncateDetail(degraded, 140))
+		state.DegradedDetail = degraded
+	}
+
+	if residual := strings.TrimSpace(data["residualHuman"]); residual != "" && residual != state.Residual {
+		util.Msgf("  Cleanup residual snapshot: %s", truncateDetail(residual, 140))
+		state.Residual = residual
+	}
+
+	if len(cleanupStatus.HookEvents) <= state.HookEventCount {
+		return
+	}
+	for _, e := range cleanupStatus.HookEvents[state.HookEventCount:] {
+		util.Msgf("  Cleanup step: %s %-18s %-9s %s",
+			cleanupHookEventTime(e.At),
+			cleanupHookEventLabel(e),
+			valueOrUnknown(e.Status),
+			truncateDetail(valueOrUnknown(e.Detail), 120),
+		)
+	}
+	state.HookEventCount = len(cleanupStatus.HookEvents)
 }
 
 func cleanupHookRecoverySummary(cleanupStatus *provider.CleanupStatus) string {

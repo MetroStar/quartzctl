@@ -15,6 +15,7 @@
 package cmd
 
 import (
+	"bytes"
 	"compress/gzip"
 	"context"
 	"errors"
@@ -27,6 +28,7 @@ import (
 	"time"
 
 	"github.com/MetroStar/quartzctl/internal/provider"
+	"github.com/MetroStar/quartzctl/internal/util"
 	"github.com/stretchr/testify/assert"
 	"github.com/urfave/cli/v3"
 )
@@ -127,6 +129,78 @@ func TestCmdCleanNoOpFastPath(t *testing.T) {
 	if err != nil {
 		t.Errorf("unexpected error in no-op clean fast path, %v", err)
 	}
+}
+
+func TestModelWarmerReadinessSummary(t *testing.T) {
+	status := modelWarmerStatus{
+		DesiredModels:        "gemma4:e4b,gemma4:12b",
+		DesiredCount:         2,
+		PulledModels:         "gemma4:e4b,gemma4:12b",
+		PulledCount:          2,
+		WarmedModels:         "gemma4:e4b",
+		WarmedCount:          1,
+		SkippedGpuWarmModels: "gemma4:12b",
+		SkippedGpuWarmCount:  1,
+	}
+
+	summary := modelWarmerReadinessSummary(status)
+	assert.Contains(t, summary, "2/2 persisted")
+	assert.Contains(t, summary, "1/2 GPU-warmed")
+	assert.Contains(t, summary, "1 skipped GPU warm")
+	assert.Contains(t, summary, "gemma4:e4b,gemma4:12b")
+}
+
+func TestPrintCleanupStatusProgress(t *testing.T) {
+	var buf bytes.Buffer
+	util.SetWriter(&buf)
+	t.Cleanup(func() { util.SetWriter(os.Stdout) })
+
+	state := cleanupStatusDisplayState{}
+	printCleanupStatusProgress(&provider.CleanupStatus{
+		Data: map[string]string{
+			"phase":          "nodeclaims",
+			"status":         "Degraded",
+			"detail":         "Waiting for NodeClaims to clear",
+			"degradedDetail": "Karpenter finalizer lag detected",
+			"residualHuman":  "workloads=0, loadBalancers=0, nodeClaims=1, nodePools=1, ec2NodeClasses=1, pvc=0, pv=0",
+		},
+		HookEvents: []provider.CleanupHookEvent{
+			{
+				At:     time.Date(2026, 6, 16, 12, 0, 0, 0, time.UTC),
+				Kind:   "status",
+				Phase:  "nodeclaims",
+				Status: "Degraded",
+				Detail: "Waiting for NodeClaims to clear",
+			},
+		},
+	}, &state)
+
+	out := buf.String()
+	assert.Contains(t, out, "Cleanup hook:")
+	assert.Contains(t, out, "Cleanup degraded but still progressing")
+	assert.Contains(t, out, "Cleanup residual snapshot")
+	assert.Contains(t, out, "Cleanup step:")
+
+	buf.Reset()
+	printCleanupStatusProgress(&provider.CleanupStatus{
+		Data: map[string]string{
+			"phase":          "nodeclaims",
+			"status":         "Degraded",
+			"detail":         "Waiting for NodeClaims to clear",
+			"degradedDetail": "Karpenter finalizer lag detected",
+			"residualHuman":  "workloads=0, loadBalancers=0, nodeClaims=1, nodePools=1, ec2NodeClasses=1, pvc=0, pv=0",
+		},
+		HookEvents: []provider.CleanupHookEvent{
+			{
+				At:     time.Date(2026, 6, 16, 12, 0, 0, 0, time.UTC),
+				Kind:   "status",
+				Phase:  "nodeclaims",
+				Status: "Degraded",
+				Detail: "Waiting for NodeClaims to clear",
+			},
+		},
+	}, &state)
+	assert.Empty(t, buf.String())
 }
 
 func TestPreflightAwsMissingShellEnvMessage(t *testing.T) {
