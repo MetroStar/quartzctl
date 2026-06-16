@@ -27,6 +27,7 @@ import (
 	fakeDynamicClient "k8s.io/client-go/dynamic/fake"
 	"k8s.io/client-go/kubernetes"
 	fakeClientSet "k8s.io/client-go/kubernetes/fake"
+	"k8s.io/client-go/rest"
 )
 
 // KubernetesApiMock is a mock implementation of the IKubernetesApi interface for testing purposes.
@@ -98,19 +99,19 @@ func (api KubernetesApiMock) DynamicClient() (dynamic.Interface, error) {
 	// Register list kinds for all CRDs that PrepareForDestroy may query.
 	// The fake dynamic client panics on List() if the GVR isn't registered.
 	gvrToListKind := map[schema.GroupVersionResource]string{
-		{Group: "helm.toolkit.fluxcd.io", Version: "v2", Resource: "helmreleases"}:              "HelmReleaseList",
-		{Group: "source.toolkit.fluxcd.io", Version: "v1", Resource: "gitrepositories"}:         "GitRepositoryList",
-		{Group: "source.toolkit.fluxcd.io", Version: "v1", Resource: "helmrepositories"}:        "HelmRepositoryList",
-		{Group: "source.toolkit.fluxcd.io", Version: "v1", Resource: "helmcharts"}:              "HelmChartList",
-		{Group: "kustomize.toolkit.fluxcd.io", Version: "v1", Resource: "kustomizations"}:       "KustomizationList",
-		{Group: "notification.toolkit.fluxcd.io", Version: "v1beta3", Resource: "alerts"}:       "AlertList",
-		{Group: "notification.toolkit.fluxcd.io", Version: "v1", Resource: "receivers"}:         "ReceiverList",
-		{Group: "notification.toolkit.fluxcd.io", Version: "v1beta3", Resource: "providers"}:    "ProviderList",
-		{Group: "karpenter.sh", Version: "v1", Resource: "nodeclaims"}:                          "NodeClaimList",
-		{Group: "karpenter.sh", Version: "v1", Resource: "nodepools"}:                           "NodePoolList",
-		{Group: "external-secrets.io", Version: "v1beta1", Resource: "externalsecrets"}:         "ExternalSecretList",
-		{Group: "apps", Version: "v1", Resource: "deployments"}:                                 "DeploymentList",
-		{Group: "networking.istio.io", Version: "v1beta1", Resource: "virtualservices"}:          "VirtualServiceList",
+		{Group: "helm.toolkit.fluxcd.io", Version: "v2", Resource: "helmreleases"}:           "HelmReleaseList",
+		{Group: "source.toolkit.fluxcd.io", Version: "v1", Resource: "gitrepositories"}:      "GitRepositoryList",
+		{Group: "source.toolkit.fluxcd.io", Version: "v1", Resource: "helmrepositories"}:     "HelmRepositoryList",
+		{Group: "source.toolkit.fluxcd.io", Version: "v1", Resource: "helmcharts"}:           "HelmChartList",
+		{Group: "kustomize.toolkit.fluxcd.io", Version: "v1", Resource: "kustomizations"}:    "KustomizationList",
+		{Group: "notification.toolkit.fluxcd.io", Version: "v1beta3", Resource: "alerts"}:    "AlertList",
+		{Group: "notification.toolkit.fluxcd.io", Version: "v1", Resource: "receivers"}:      "ReceiverList",
+		{Group: "notification.toolkit.fluxcd.io", Version: "v1beta3", Resource: "providers"}: "ProviderList",
+		{Group: "karpenter.sh", Version: "v1", Resource: "nodeclaims"}:                       "NodeClaimList",
+		{Group: "karpenter.sh", Version: "v1", Resource: "nodepools"}:                        "NodePoolList",
+		{Group: "external-secrets.io", Version: "v1beta1", Resource: "externalsecrets"}:      "ExternalSecretList",
+		{Group: "apps", Version: "v1", Resource: "deployments"}:                              "DeploymentList",
+		{Group: "networking.istio.io", Version: "v1beta1", Resource: "virtualservices"}:      "VirtualServiceList",
 	}
 
 	// Auto-register GVRs from dynamic objects so tests don't need to manually
@@ -143,4 +144,9 @@ func (api KubernetesApiMock) DiscoveryClient() (discovery.DiscoveryInterface, er
 	}
 
 	return d, api.err
+}
+
+// RESTConfig returns nil for the fake API; tests can stub higher-level helpers.
+func (api KubernetesApiMock) RESTConfig() *rest.Config {
+	return nil
 }

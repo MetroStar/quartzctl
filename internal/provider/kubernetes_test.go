@@ -30,10 +30,62 @@ import (
 	"github.com/MetroStar/quartzctl/internal/util"
 	admissionregistrationv1 "k8s.io/api/admissionregistration/v1"
 	corev1 "k8s.io/api/core/v1"
+	discoveryv1 "k8s.io/api/discovery/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	k8sSchema "k8s.io/apimachinery/pkg/runtime/schema"
 )
+
+func ptr[T any](v T) *T {
+	return &v
+}
+
+func TestProviderPrometheusProxyPodName(t *testing.T) {
+	port := int32(9090)
+	api := NewKubernetesApiMock().WithClientObjects(&discoveryv1.EndpointSlice{
+		ObjectMeta: metav1.ObjectMeta{
+			Namespace: "monitoring",
+			Name:      "monitoring-monitoring-kube-prometheus-abc12",
+			Labels: map[string]string{
+				"kubernetes.io/service-name": "monitoring-monitoring-kube-prometheus",
+			},
+		},
+		Ports: []discoveryv1.EndpointPort{
+			{
+				Name:     ptr("http-web"),
+				Port:     &port,
+				Protocol: ptr(corev1.ProtocolTCP),
+			},
+		},
+		Endpoints: []discoveryv1.Endpoint{
+			{
+				TargetRef: &corev1.ObjectReference{
+					Kind:      "Pod",
+					Namespace: "monitoring",
+					Name:      "prometheus-0",
+				},
+			},
+		},
+	})
+	c, err := NewKubernetesClient(api, KubeconfigInfo{}, schema.QuartzConfig{})
+	if err != nil {
+		t.Fatalf("unexpected error constructing kubernetes client: %v", err)
+	}
+
+	clientset, err := c.api.ClientSet()
+	if err != nil {
+		t.Fatalf("unexpected error constructing clientset: %v", err)
+	}
+
+	podName, err := prometheusProxyPodName(context.Background(), clientset, "monitoring", "monitoring-monitoring-kube-prometheus", 9090)
+	if err != nil {
+		t.Fatalf("unexpected lookup error: %v", err)
+	}
+
+	if podName != "prometheus-0" {
+		t.Fatalf("unexpected pod name %q", podName)
+	}
+}
 
 func TestProviderKubernetesClientCtor(t *testing.T) {
 	t.Setenv("KUBECONFIG", "")

@@ -15,12 +15,15 @@
 package provider
 
 import (
+	"bytes"
 	"cmp"
 	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
+	"net/http"
+	"net/url"
 	"os"
 	"regexp"
 	"slices"
@@ -46,8 +49,12 @@ import (
 	"k8s.io/client-go/kubernetes"
 	"k8s.io/client-go/rest"
 	"k8s.io/client-go/restmapper"
+	"k8s.io/client-go/tools/portforward"
+	"k8s.io/client-go/transport/spdy"
 	"kmodules.xyz/client-go/tools/wait"
 	"sigs.k8s.io/yaml"
+
+	"github.com/moby/spdystream"
 )
 
 var defaultCache = &KubernetesLookupCache{
@@ -56,6 +63,11 @@ var defaultCache = &KubernetesLookupCache{
 }
 
 var helmActionTimeoutPattern = regexp.MustCompile(`(?i)timeout(?: of)? ([0-9][0-9a-zA-Z.]*)`)
+
+var queryPrometheusViaPortForward = queryPrometheusViaPortForwardImpl
+var suppressSpdyDebugOnce sync.Once
+
+const prometheusPortForwardTimeout = 8 * time.Second
 
 func helmActionTimeout(msg string) time.Duration {
 	m := helmActionTimeoutPattern.FindStringSubmatch(msg)
@@ -630,6 +642,117 @@ func (c KubernetesClient) QueryPrometheus(ctx context.Context, ns string, servic
 		Param("query", query).
 		DoRaw(ctx)
 	if err != nil {
+		fallbackCtx, cancel := prometheusPortForwardContext(ctx)
+		defer cancel()
+
+		res, pfErr := queryPrometheusViaPortForward(fallbackCtx, c.api, clientset, ns, service, port, query)
+		if pfErr == nil {
+			return res, nil
+		}
+		return PrometheusQueryResponse{}, fmt.Errorf("%w; port-forward fallback also failed: %v", err, pfErr)
+	}
+
+	var res PrometheusQueryResponse
+	if err := json.Unmarshal(raw, &res); err != nil {
+		return PrometheusQueryResponse{}, err
+	}
+	if res.Status != "" && res.Status != "success" {
+		return res, fmt.Errorf("prometheus query failed: %s %s", res.ErrorType, res.Error)
+	}
+
+	return res, nil
+}
+
+func prometheusPortForwardContext(ctx context.Context) (context.Context, context.CancelFunc) {
+	if deadline, ok := ctx.Deadline(); ok && time.Until(deadline) > time.Second {
+		return ctx, func() {}
+	}
+	return context.WithTimeout(context.WithoutCancel(ctx), prometheusPortForwardTimeout)
+}
+
+func queryPrometheusViaPortForwardImpl(ctx context.Context, api KubernetesApi, clientset kubernetes.Interface, ns string, service string, port int, query string) (PrometheusQueryResponse, error) {
+	podName, err := prometheusProxyPodName(ctx, clientset, ns, service, port)
+	if err != nil {
+		return PrometheusQueryResponse{}, err
+	}
+
+	rc := api.RESTConfig()
+	if rc == nil {
+		return PrometheusQueryResponse{}, fmt.Errorf("no Kubernetes REST config available for Prometheus port-forward fallback")
+	}
+
+	transport, upgrader, err := spdy.RoundTripperFor(rest.CopyConfig(rc))
+	if err != nil {
+		return PrometheusQueryResponse{}, err
+	}
+
+	serverURL, err := url.Parse(rc.Host)
+	if err != nil {
+		return PrometheusQueryResponse{}, err
+	}
+	serverURL.Path = fmt.Sprintf("/api/v1/namespaces/%s/pods/%s/portforward", ns, podName)
+
+	suppressSpdyDebugLogs()
+
+	dialer := spdy.NewDialer(upgrader, &http.Client{Transport: transport}, http.MethodPost, serverURL)
+	stopCh := make(chan struct{})
+	readyCh := make(chan struct{})
+	defer close(stopCh)
+
+	var stdout, stderr bytes.Buffer
+	fw, err := portforward.New(dialer, []string{fmt.Sprintf("0:%d", port)}, stopCh, readyCh, &stdout, &stderr)
+	if err != nil {
+		return PrometheusQueryResponse{}, err
+	}
+
+	forwardErrCh := make(chan error, 1)
+	go func() {
+		forwardErrCh <- fw.ForwardPorts()
+	}()
+
+	select {
+	case <-readyCh:
+	case err := <-forwardErrCh:
+		if strings.TrimSpace(stderr.String()) != "" {
+			return PrometheusQueryResponse{}, fmt.Errorf("%w: %s", err, strings.TrimSpace(stderr.String()))
+		}
+		return PrometheusQueryResponse{}, err
+	case <-ctx.Done():
+		return PrometheusQueryResponse{}, ctx.Err()
+	}
+
+	ports, err := fw.GetPorts()
+	if err != nil {
+		return PrometheusQueryResponse{}, err
+	}
+	if len(ports) == 0 {
+		return PrometheusQueryResponse{}, fmt.Errorf("Prometheus port-forward returned no local ports")
+	}
+
+	reqURL := fmt.Sprintf("http://127.0.0.1:%d/api/v1/query?query=%s", ports[0].Local, url.QueryEscape(query))
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, reqURL, nil)
+	if err != nil {
+		return PrometheusQueryResponse{}, err
+	}
+
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		return PrometheusQueryResponse{}, err
+	}
+	defer func() {
+		_ = resp.Body.Close()
+	}()
+
+	if resp.StatusCode >= 400 {
+		body, _ := io.ReadAll(io.LimitReader(resp.Body, 2048))
+		if trimmed := strings.TrimSpace(string(body)); trimmed != "" {
+			return PrometheusQueryResponse{}, fmt.Errorf("port-forward query returned HTTP %d: %s", resp.StatusCode, trimmed)
+		}
+		return PrometheusQueryResponse{}, fmt.Errorf("port-forward query returned HTTP %d", resp.StatusCode)
+	}
+
+	raw, err := io.ReadAll(resp.Body)
+	if err != nil {
 		return PrometheusQueryResponse{}, err
 	}
 
@@ -642,6 +765,53 @@ func (c KubernetesClient) QueryPrometheus(ctx context.Context, ns string, servic
 	}
 
 	return res, nil
+}
+
+func prometheusProxyPodName(ctx context.Context, clientset kubernetes.Interface, ns string, service string, port int) (string, error) {
+	slices, err := clientset.DiscoveryV1().EndpointSlices(ns).List(ctx, metav1.ListOptions{
+		LabelSelector: "kubernetes.io/service-name=" + service,
+	})
+	if err != nil {
+		return "", err
+	}
+
+	var fallbackPod string
+	for _, slice := range slices.Items {
+		portMatch := len(slice.Ports) == 0
+		for _, slicePort := range slice.Ports {
+			if slicePort.Port != nil && int(*slicePort.Port) == port {
+				portMatch = true
+				break
+			}
+		}
+		if !portMatch && len(slice.Ports) > 0 {
+			continue
+		}
+
+		for _, endpoint := range slice.Endpoints {
+			if endpoint.TargetRef == nil || !strings.EqualFold(endpoint.TargetRef.Kind, "Pod") || strings.TrimSpace(endpoint.TargetRef.Name) == "" {
+				continue
+			}
+			if portMatch {
+				return endpoint.TargetRef.Name, nil
+			}
+			if fallbackPod == "" {
+				fallbackPod = endpoint.TargetRef.Name
+			}
+		}
+	}
+
+	if fallbackPod != "" {
+		return fallbackPod, nil
+	}
+
+	return "", fmt.Errorf("service %s/%s has no pod-backed endpoint slice for port %d", ns, service, port)
+}
+
+func suppressSpdyDebugLogs() {
+	suppressSpdyDebugOnce.Do(func() {
+		spdystream.DEBUG = ""
+	})
 }
 
 // GetCleanupStatus retrieves non-secret cleanup breadcrumbs emitted by the

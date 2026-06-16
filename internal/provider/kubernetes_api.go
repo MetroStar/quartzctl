@@ -33,6 +33,8 @@ type KubernetesApi interface {
 	DynamicClient() (dynamic.Interface, error)
 	// DiscoveryClient returns a discovery client for querying API server metadata.
 	DiscoveryClient() (discovery.DiscoveryInterface, error)
+	// RESTConfig returns the Kubernetes REST config backing this API client.
+	RESTConfig() *rest.Config
 }
 
 // KubernetesApiImpl is an implementation of KubernetesApi using a REST configuration.
@@ -66,6 +68,11 @@ func (api KubernetesApiImpl) DynamicClient() (dynamic.Interface, error) {
 // DiscoveryClient returns a discovery client for querying API server metadata.
 func (api KubernetesApiImpl) DiscoveryClient() (discovery.DiscoveryInterface, error) {
 	return discovery.NewDiscoveryClientForConfig(api.restConfig)
+}
+
+// RESTConfig returns the REST config backing this Kubernetes API client.
+func (api KubernetesApiImpl) RESTConfig() *rest.Config {
+	return rest.CopyConfig(api.restConfig)
 }
 
 // newRestConfig creates a new REST configuration for Kubernetes API access.

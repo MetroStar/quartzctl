@@ -284,6 +284,16 @@ func TestLoadAITelemetryConfigFromConfigMap(t *testing.T) {
 	assert.NotEmpty(t, cfg.Queries["recent_requests"])
 }
 
+func TestDefaultAITelemetryConfig(t *testing.T) {
+	cfg := defaultAITelemetryConfig()
+
+	assert.Equal(t, "monitoring", cfg.PrometheusNamespace)
+	assert.Equal(t, "monitoring-monitoring-kube-prometheus", cfg.PrometheusService)
+	assert.Equal(t, 9090, cfg.PrometheusPort)
+	assert.Contains(t, cfg.Queries["recent_requests"], "agentgateway_requests_total")
+	assert.Contains(t, cfg.Queries["recent_requests"], "agentgateway_gen_ai_server_request_duration_count")
+}
+
 func TestAITelemetryStatus(t *testing.T) {
 	tests := []struct {
 		key        string
@@ -318,7 +328,7 @@ func TestAITelemetryQueryTimeout(t *testing.T) {
 func TestSummarizeAITelemetryError(t *testing.T) {
 	cfg := aiTelemetryConfig{
 		PrometheusNamespace: "monitoring",
-		PrometheusService:   "prometheus-operated",
+		PrometheusService:   "monitoring-monitoring-kube-prometheus",
 		PrometheusPort:      9090,
 	}
 
@@ -352,7 +362,7 @@ func TestSummarizeAITelemetryError(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			err := summarizeAITelemetryError(tt.err, cfg, 8*time.Second)
-			assert.ErrorContains(t, err, "monitoring/prometheus-operated:9090")
+			assert.ErrorContains(t, err, "monitoring/monitoring-monitoring-kube-prometheus:9090")
 			assert.ErrorContains(t, err, tt.want)
 		})
 	}
