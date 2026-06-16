@@ -248,7 +248,7 @@ func Install(ctx context.Context, p *CommandParams, resumeFrom string) (err erro
 			if isFluxOwnedReleaseDrift(err) {
 				log.Debug("Apply reported Flux-owned release version drift; treating stage as complete",
 					"stage", s.Id, "error", err)
-				util.Msgf("Stage %s is owned by Flux (release already adopted), skipping bootstrap apply", s.Id)
+				util.Msgf("Stage %s bootstrap Helm release is already owned by Flux; the local chart version mismatch is expected and not an install failure", s.Id)
 
 				// The bootstrap apply is a no-op, but the stage's co-resources
 				// (e.g. the values overlay Secret consumed by the release via
@@ -522,6 +522,7 @@ type modelWarmerStatus struct {
 	Detail        string `json:"detail"`
 	DesiredModels string `json:"desiredModels"`
 	PulledModels  string `json:"pulledModels"`
+	CompletedAt   string `json:"completedAt"`
 	UpdatedAt     string `json:"updatedAt"`
 }
 
@@ -536,7 +537,12 @@ func ReportModelWarmerStatus(ctx context.Context, p *CommandParams) {
 	}
 	switch strings.ToLower(status.Phase) {
 	case "succeeded":
-		util.Msgf("Ollama model warmer complete: %s", fallback(status.PulledModels, status.DesiredModels))
+		completedAt := modelWarmerCompletionTime(status)
+		if completedAt != "" {
+			util.Msgf("Ollama model warmer complete at %s: %s", completedAt, fallback(status.PulledModels, status.DesiredModels))
+		} else {
+			util.Msgf("Ollama model warmer complete: %s", fallback(status.PulledModels, status.DesiredModels))
+		}
 	case "failed":
 		util.Msgf("Ollama model warmer failed during %s for %s: %s", status.Step, status.Model, status.Detail)
 	default:
@@ -544,9 +550,21 @@ func ReportModelWarmerStatus(ctx context.Context, p *CommandParams) {
 		if target == "" {
 			target = status.DesiredModels
 		}
-		util.Msgf("Ollama model warming is still running in the background (%s %s: %s). AI endpoints may be up before every model is ready.",
-			status.Step, target, status.Detail)
+		if updatedAt := strings.TrimSpace(status.UpdatedAt); updatedAt != "" {
+			util.Msgf("Ollama model warming is still running in the background (%s %s: %s, last update %s). AI endpoints may be up before every model is ready.",
+				status.Step, target, status.Detail, updatedAt)
+		} else {
+			util.Msgf("Ollama model warming is still running in the background (%s %s: %s). AI endpoints may be up before every model is ready.",
+				status.Step, target, status.Detail)
+		}
 	}
+}
+
+func modelWarmerCompletionTime(status modelWarmerStatus) string {
+	if completedAt := strings.TrimSpace(status.CompletedAt); completedAt != "" {
+		return completedAt
+	}
+	return strings.TrimSpace(status.UpdatedAt)
 }
 
 func readModelWarmerStatusFromParams(ctx context.Context, p *CommandParams) (modelWarmerStatus, bool, error) {
@@ -1194,6 +1212,7 @@ func Clean(ctx context.Context, p *CommandParams) error {
 	// can be destroyed first (highest order numbers), then their dependencies.
 	destroyWaves := buildDestroyWaves(stages)
 	for waveIdx, wave := range destroyWaves {
+		printDestroyWavePreamble(wave)
 		if len(wave) == 1 {
 			// Single stage — no parallelism needed
 			s := wave[0]
@@ -1487,6 +1506,27 @@ func cleanupNotes(stageTiming map[string]time.Duration, cleanupStatus *provider.
 	}
 
 	return notes
+}
+
+func destroyStagePreamble(stageID string) string {
+	switch stageID {
+	case "host":
+		return "Destroy host tears down provider-managed services such as EKS, RDS, and VPC resources. Ten to twenty-plus minutes here can be normal while AWS finishes background deletion."
+	default:
+		return ""
+	}
+}
+
+func printDestroyWavePreamble(wave []schema.StageConfig) {
+	seen := map[string]bool{}
+	for _, stage := range wave {
+		note := destroyStagePreamble(stage.Id)
+		if note == "" || seen[note] {
+			continue
+		}
+		seen[note] = true
+		util.Msgf("Note: %s", note)
+	}
 }
 
 func writeCleanupNotes(b *strings.Builder, stageTiming map[string]time.Duration, cleanupStatus *provider.CleanupStatus, errs []error) {

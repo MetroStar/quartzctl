@@ -116,10 +116,16 @@ func (c *TofuClient) Format(ctx context.Context, stage schema.StageConfig) error
 // It runs `tofu plan` with the configured input variables and returns whether changes are required.
 func (c *TofuClient) Plan(ctx context.Context, stage schema.StageConfig) (bool, error) {
 	log.Debug("tofu plan", "stage", stage)
-	tf, err := c.getTf(stage.Path)
+	stdout := newNoiseFilterWriter(os.Stdout)
+	stderr := newNoiseFilterWriter(os.Stderr)
+	tf, err := c.newTfOpts(&TfOpts{dir: stage.Path, stdout: stdout, stderr: stderr})
 	if err != nil {
 		return false, err
 	}
+	defer func() {
+		_ = stdout.Flush()
+		_ = stderr.Flush()
+	}()
 
 	stageVarFile, cleanup, err := c.stageVarFile(ctx, stage)
 	if err != nil {
@@ -153,10 +159,16 @@ func (c *TofuClient) Apply(ctx context.Context, stage schema.StageConfig, opts .
 	}
 
 	log.Debug("tofu apply", "stage", stage)
-	tf, err := c.getTf(stage.Path)
+	stdout := newNoiseFilterWriter(os.Stdout)
+	stderr := newNoiseFilterWriter(os.Stderr)
+	tf, err := c.newTfOpts(&TfOpts{dir: stage.Path, stdout: stdout, stderr: stderr})
 	if err != nil {
 		return err
 	}
+	defer func() {
+		_ = stdout.Flush()
+		_ = stderr.Flush()
+	}()
 
 	stageVarFile, cleanup, err := c.stageVarFile(ctx, stage)
 	if err != nil {

@@ -461,6 +461,28 @@ func TestSanitizeModelWarmerStatusJSON(t *testing.T) {
 	)
 }
 
+func TestModelWarmerCompletionTime(t *testing.T) {
+	assert.Equal(t,
+		"2026-06-16T12:05:00Z",
+		modelWarmerCompletionTime(modelWarmerStatus{
+			CompletedAt: "2026-06-16T12:05:00Z",
+			UpdatedAt:   "2026-06-16T12:04:00Z",
+		}),
+	)
+	assert.Equal(t,
+		"2026-06-16T12:04:00Z",
+		modelWarmerCompletionTime(modelWarmerStatus{
+			UpdatedAt: "2026-06-16T12:04:00Z",
+		}),
+	)
+	assert.Equal(t, "", modelWarmerCompletionTime(modelWarmerStatus{}))
+}
+
+func TestDestroyStagePreamble(t *testing.T) {
+	assert.Contains(t, destroyStagePreamble("host"), "provider-managed services")
+	assert.Equal(t, "", destroyStagePreamble("core"))
+}
+
 func TestReadModelWarmerStatusSanitizesControlCharacters(t *testing.T) {
 	p := defaultTestConfig(t)
 	kube, err := p.Provider().Kubernetes(context.Background())
