@@ -148,6 +148,23 @@ the desired models are fully persisted.
 
 The `quartz.yaml` file defines the stages and their configurations.
 
+For Quartz platform environments, application delivery now treats these fields as first-class:
+
+```yaml
+applications:
+  my-api:
+    repo_url: https://github.com/MetroStar/my-api.git
+    branch: main
+    path: deploy
+    settings:
+      post_deploy:
+        enabled: true
+        gate_environments: [stage, prod]
+        trigger_environments: [dev, stage, prod]
+```
+
+`path` defaults to `deploy`. `settings.post_deploy` defaults to the policy shown above, which lets Quartz trigger app-owned verification hooks after deployment and use those results to gate `stage` and `prod` advancement without mutating Git. `gitops.apps` is now optional and deprecated for application delivery.
+
 ### Sample Cluster Configuration (Minimal)
 
 ```yaml

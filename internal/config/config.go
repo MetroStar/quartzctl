@@ -228,7 +228,6 @@ func checkCloudConfig(ctx context.Context, k *koanf.Koanf) error {
 
 // setGitopsDefaults sets default values for GitOps configuration.
 func setGitopsDefaults(k *koanf.Koanf) {
-	name := k.String("name")
 	p := k.String("providers.source_control")
 
 	var sc schema.GithubConfig
@@ -243,11 +242,7 @@ func setGitopsDefaults(k *koanf.Koanf) {
 
 	org := sc.Organization
 
-	if gitops.Apps.Branch == "" {
-		gitops.Apps.Branch = name
-	}
-
-	for _, r := range []*schema.RepositoryConfig{&gitops.Core, &gitops.Apps} {
+	applyRepoDefaults := func(r *schema.RepositoryConfig) {
 		if r.Provider == "" {
 			r.Provider = p
 		}
@@ -260,9 +255,15 @@ func setGitopsDefaults(k *koanf.Koanf) {
 			r.Branch = "main"
 		}
 
-		if r.RepoUrl == "" {
+		if r.RepoUrl == "" && r.Name != "" {
 			r.RepoUrl = githubRepoUrl(r.Organization, r.Name)
 		}
+	}
+
+	applyRepoDefaults(&gitops.Core)
+
+	if gitops.Apps.Name != "" || gitops.Apps.RepoUrl != "" || gitops.Apps.Branch != "" || gitops.Apps.Provider != "" || gitops.Apps.Organization != "" {
+		applyRepoDefaults(&gitops.Apps)
 	}
 
 	k2 := koanf.New(".")
@@ -331,6 +332,10 @@ func setAppDefaults(k *koanf.Koanf) {
 			a.Branch = "main"
 		}
 
+		if a.Path == "" {
+			a.Path = "deploy"
+		}
+
 		if a.Type == "" {
 			s := strings.Split(a.Name, "-")
 			if len(s) >= 2 {
@@ -348,10 +353,60 @@ func setAppDefaults(k *koanf.Koanf) {
 			a.Settings = make(map[string]interface{})
 		}
 
+		a.Settings["post_deploy"] = defaultApplicationPostDeploySettings(a.Settings["post_deploy"])
+
 		k2 := koanf.New(".")
 		k2.Load(structs.Provider(a, "koanf"), nil)
 
 		k.MergeAt(k2, "applications."+key)
+	}
+}
+
+
+func defaultApplicationPostDeploySettings(raw interface{}) map[string]interface{} {
+	defaults := schema.DefaultApplicationPostDeployConfig()
+	result := map[string]interface{}{
+		"enabled":              defaults.Enabled,
+		"gate_environments":    append([]string{}, defaults.GateEnvironments...),
+		"trigger_environments": append([]string{}, defaults.TriggerEnvironments...),
+	}
+
+	switch v := raw.(type) {
+	case nil:
+		return result
+	case bool:
+		result["enabled"] = v
+		return result
+	case map[string]interface{}:
+		if enabled, ok := v["enabled"].(bool); ok {
+			result["enabled"] = enabled
+		}
+		if envs := toStringSlice(v["gate_environments"]); len(envs) > 0 {
+			result["gate_environments"] = envs
+		}
+		if envs := toStringSlice(v["trigger_environments"]); len(envs) > 0 {
+			result["trigger_environments"] = envs
+		}
+		return result
+	default:
+		return result
+	}
+}
+
+func toStringSlice(raw interface{}) []string {
+	switch v := raw.(type) {
+	case []string:
+		return append([]string{}, v...)
+	case []interface{}:
+		res := make([]string, 0, len(v))
+		for _, item := range v {
+			if s, ok := item.(string); ok && s != "" {
+				res = append(res, s)
+			}
+		}
+		return res
+	default:
+		return nil
 	}
 }
 

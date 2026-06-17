@@ -271,6 +271,98 @@ tmp: %s
 	}
 }
 
+func TestConfigApplicationDefaults(t *testing.T) {
+	tmp := t.TempDir()
+	cfgContent := []byte(fmt.Sprintf(`
+name: mytest
+dns:
+  zone: example.com
+providers:
+  cloud: local
+tmp: %s
+applications:
+  app1:
+    settings: {}
+  app2:
+    settings:
+      post_deploy: false
+  app3:
+    path: custom/deploy
+    settings:
+      post_deploy:
+        trigger_environments:
+        - dev
+`, tmp))
+	cfgFile := filepath.Join(tmp, "test-config.yaml")
+	os.WriteFile(cfgFile, cfgContent, 0664)
+
+	actual, err := Load(context.Background(), cfgFile, "")
+	if err != nil {
+		t.Fatalf("failed loading config, %v", err)
+	}
+
+	app1 := actual.Config.Applications["app1"]
+	if app1.Path != "deploy" {
+		t.Fatalf("expected default app path deploy, found %q", app1.Path)
+	}
+
+	app1PostDeploy, ok := app1.Settings["post_deploy"].(map[string]interface{})
+	if !ok {
+		t.Fatalf("expected typed post_deploy defaults in app1 settings, found %#v", app1.Settings["post_deploy"])
+	}
+	if enabled, ok := app1PostDeploy["enabled"].(bool); !ok || !enabled {
+		t.Fatalf("expected app1 post_deploy.enabled=true, found %#v", app1PostDeploy["enabled"])
+	}
+
+	app2PostDeploy := actual.Config.Applications["app2"].Settings["post_deploy"].(map[string]interface{})
+	if enabled, ok := app2PostDeploy["enabled"].(bool); !ok || enabled {
+		t.Fatalf("expected app2 post_deploy.enabled=false, found %#v", app2PostDeploy["enabled"])
+	}
+
+	app3 := actual.Config.Applications["app3"]
+	if app3.Path != "custom/deploy" {
+		t.Fatalf("expected custom app path to be preserved, found %q", app3.Path)
+	}
+	app3PostDeploy := app3.Settings["post_deploy"].(map[string]interface{})
+	trigger, ok := app3PostDeploy["trigger_environments"].([]string)
+	if !ok || len(trigger) != 1 || trigger[0] != "dev" {
+		t.Fatalf("expected app3 trigger_environments=[dev], found %#v", app3PostDeploy["trigger_environments"])
+	}
+	gate, ok := app3PostDeploy["gate_environments"].([]string)
+	if !ok || len(gate) != 2 || gate[0] != "stage" || gate[1] != "prod" {
+		t.Fatalf("expected default gate environments, found %#v", app3PostDeploy["gate_environments"])
+	}
+}
+
+func TestConfigGitopsAppsOptional(t *testing.T) {
+	tmp := t.TempDir()
+	cfgContent := []byte(fmt.Sprintf(`
+name: mytest
+dns:
+  zone: example.com
+providers:
+  cloud: local
+tmp: %s
+gitops:
+  core:
+    repo: quartz
+applications:
+  app1:
+    repo_url: https://github.com/example/app1.git
+`, tmp))
+	cfgFile := filepath.Join(tmp, "test-config.yaml")
+	os.WriteFile(cfgFile, cfgContent, 0664)
+
+	actual, err := Load(context.Background(), cfgFile, "")
+	if err != nil {
+		t.Fatalf("failed loading config, %v", err)
+	}
+
+	if actual.Config.Gitops.Apps.Name != "" || actual.Config.Gitops.Apps.RepoUrl != "" || actual.Config.Gitops.Apps.Branch != "" {
+		t.Fatalf("expected gitops.apps to remain optional/empty, found %#v", actual.Config.Gitops.Apps)
+	}
+}
+
 func TestConfigKubeconfigPathOverride(t *testing.T) {
 	tmp := t.TempDir()
 	cfgContent := []byte(fmt.Sprintf(`

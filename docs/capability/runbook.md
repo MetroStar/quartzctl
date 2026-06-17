@@ -32,6 +32,22 @@ If OpenTofu needs deferred actions for a specific install:
 quartz install --allow-deferral --yes
 ```
 
+## Procedure 2A - Confirm Application Delivery Inputs
+
+Before a full install, render and confirm any app-owned delivery settings:
+
+```bash
+quartz render --out ./out/quartz.generated.yaml
+```
+
+Check that each application includes:
+
+- `repo_url` pointing at the app repository
+- `path` pointing at the app-owned manifest entrypoint (defaults to `deploy`)
+- `settings.post_deploy` with the expected enablement / gate policy
+
+Quartz treats `gitops.apps` as optional and deprecated for application delivery. If it is omitted, that is expected.
+
 ## Procedure 3 - Plan Or Apply A Single Stage
 
 ```bash

@@ -210,9 +210,9 @@ func (r GithubProviderCheckResult) ToTable() ([]string, []ProviderCheckResultRow
 
 // Repositories retrieves the list of repositories configured in the Quartz configuration.
 func (c GithubClient) Repositories() []schema.RepositoryConfig {
-	repositories := []schema.RepositoryConfig{
-		c.cfg.Gitops.Core,
-		c.cfg.Gitops.Apps,
+	repositories := []schema.RepositoryConfig{c.cfg.Gitops.Core}
+	if c.cfg.Gitops.Apps.Name != "" || c.cfg.Gitops.Apps.RepoUrl != "" {
+		repositories = append(repositories, c.cfg.Gitops.Apps)
 	}
 
 	for _, app := range c.cfg.Applications {
