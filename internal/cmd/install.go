@@ -1427,6 +1427,9 @@ func renderCleanupReport(name string, stageTiming map[string]time.Duration, tota
 				fmt.Fprintf(&b, "  %-12s %s\n", "Recovery:", recovery)
 			}
 		}
+		if foundationSafe := strings.TrimSpace(data["foundationSafeHuman"]); foundationSafe != "" {
+			fmt.Fprintf(&b, "  %-12s %s\n", "Handoff:", foundationSafe)
+		}
 		if residual := strings.TrimSpace(data["residualHuman"]); residual != "" {
 			fmt.Fprintf(&b, "  %-12s %s\n", "Residual:", residual)
 		}
@@ -1505,6 +1508,9 @@ func printCleanupStatusSummary(cleanupStatus *provider.CleanupStatus) {
 			util.Msgf("  Recovery: %s", truncateDetail(recovery, 140))
 		}
 	}
+	if foundationSafe := strings.TrimSpace(data["foundationSafeHuman"]); foundationSafe != "" {
+		util.Msgf("  Handoff:  %s", truncateDetail(foundationSafe, 140))
+	}
 	if residual := strings.TrimSpace(data["residualHuman"]); residual != "" {
 		util.Msgf("  Residual: %s", truncateDetail(residual, 140))
 	}
@@ -1532,6 +1538,7 @@ type cleanupStatusDisplayState struct {
 	Status         string
 	Detail         string
 	DegradedDetail string
+	Handoff        string
 	Residual       string
 	HookEventCount int
 }
@@ -1559,6 +1566,11 @@ func printCleanupStatusProgress(cleanupStatus *provider.CleanupStatus, state *cl
 	if degraded := strings.TrimSpace(data["degradedDetail"]); degraded != "" && degraded != state.DegradedDetail {
 		util.Msgf("  Cleanup degraded but still progressing: %s", truncateDetail(degraded, 140))
 		state.DegradedDetail = degraded
+	}
+
+	if handoff := strings.TrimSpace(data["foundationSafeHuman"]); handoff != "" && handoff != state.Handoff {
+		util.Msgf("  Cleanup handoff ready: %s", truncateDetail(handoff, 140))
+		state.Handoff = handoff
 	}
 
 	if residual := strings.TrimSpace(data["residualHuman"]); residual != "" && residual != state.Residual {
@@ -1615,6 +1627,11 @@ func cleanupNotes(stageTiming map[string]time.Duration, cleanupStatus *provider.
 			note += " No manual action is required for that hook condition."
 		}
 		notes = append(notes, note)
+	}
+	if cleanupStatus != nil {
+		if handoff := strings.TrimSpace(cleanupStatus.Data["foundationSafeHuman"]); handoff != "" {
+			notes = append(notes, "Foundation handoff ready: "+handoff+".")
+		}
 	}
 
 	if d, ok := stageTiming["init-refresh"]; ok && d >= 2*time.Minute {

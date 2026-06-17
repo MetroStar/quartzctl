@@ -480,12 +480,13 @@ func TestRenderCleanupReportWithCleanupStatus(t *testing.T) {
 	timing := map[string]time.Duration{"destroy-core": 2 * time.Second}
 	status := &provider.CleanupStatus{
 		Data: map[string]string{
-			"status":         "Succeeded",
-			"phase":          "complete",
-			"detail":         "Pre-delete hook completed",
-			"updatedAt":      "2026-06-11T12:00:00Z",
-			"degraded":       "true",
-			"degradedDetail": "Karpenter finalizer lag detected",
+			"status":             "Succeeded",
+			"phase":              "complete",
+			"detail":             "Pre-delete hook completed",
+			"updatedAt":          "2026-06-11T12:00:00Z",
+			"degraded":           "true",
+			"degradedDetail":     "Karpenter finalizer lag detected",
+			"foundationSafeHuman": "external-secrets, cert-manager",
 		},
 		Events: []provider.CleanupEvent{{
 			Reason:        "KarpenterFinalizerLag",
@@ -517,11 +518,13 @@ func TestRenderCleanupReportWithCleanupStatus(t *testing.T) {
 	assert.Contains(t, out, "Status:      Succeeded")
 	assert.Contains(t, out, "Degraded:    Karpenter finalizer lag detected")
 	assert.Contains(t, out, "Recovery:    self-healed after Karpenter finalizer lag detected; cleanup hook finished successfully")
+	assert.Contains(t, out, "Handoff:     external-secrets, cert-manager")
 	assert.Contains(t, out, "Hook History: 2 recorded step(s), 1 degraded")
 	assert.Contains(t, out, "nodeclaims")
 	assert.Contains(t, out, "KarpenterFinalizerLag")
 	assert.Contains(t, out, "Notes:")
 	assert.Contains(t, out, "No manual action is required for that hook condition")
+	assert.Contains(t, out, "Foundation handoff ready: external-secrets, cert-manager.")
 }
 
 func TestCleanupNotesDescribeLongCleanPhases(t *testing.T) {
@@ -529,9 +532,14 @@ func TestCleanupNotesDescribeLongCleanPhases(t *testing.T) {
 		"init-refresh": 3 * time.Minute,
 		"destroy-core": 6 * time.Minute,
 		"destroy-host": 18 * time.Minute,
-	}, nil, nil)
+	}, &provider.CleanupStatus{
+		Data: map[string]string{
+			"foundationSafeHuman": "external-secrets",
+		},
+	}, nil)
 
 	joined := strings.Join(notes, "\n")
+	assert.Contains(t, joined, "Foundation handoff ready: external-secrets")
 	assert.Contains(t, joined, "init-refresh runs stages in parallel")
 	assert.Contains(t, joined, "destroy-core includes the Helm pre-delete hook")
 	assert.Contains(t, joined, "destroy-host includes provider-side managed-service teardown")
