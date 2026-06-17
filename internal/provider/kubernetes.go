@@ -105,6 +105,7 @@ type KubernetesProviderClient interface {
 	CleanupStuckTerminatingPods(ctx context.Context, timeout time.Duration) ([]string, error)
 	ReapOrphanedAdmissionWebhooks(ctx context.Context) ([]string, error)
 	ScrubStuckHelmReleaseSecrets(ctx context.Context, minAge time.Duration) ([]string, error)
+	AssessExternalSecretsTeardown(ctx context.Context) (ExternalSecretsTeardownAssessment, error)
 	ClusterProgressSnapshot(ctx context.Context) (ClusterProgress, error)
 	ListVirtualServices(ctx context.Context) ([]VirtualServiceInfo, error)
 	PrepareForDestroy(ctx context.Context) error
@@ -134,6 +135,16 @@ type KubeconfigInfo struct {
 	CertificateAuthority string
 	Token                string
 	Expiration           time.Time
+}
+
+// ExternalSecretsTeardownAssessment summarizes whether the external-secrets
+// release has effectively been torn down even if Helm timed out deleting its
+// own bookkeeping.
+type ExternalSecretsTeardownAssessment struct {
+	Recoverable        bool
+	HelmReleaseSecrets []string
+	RemainingResources []string
+	Summary            string
 }
 
 // KubernetesAppConnectionInfo contains information about an application's connection in Kubernetes.
@@ -1475,6 +1486,91 @@ func (c KubernetesClient) ScrubStuckHelmReleaseSecrets(ctx context.Context, minA
 	}
 
 	return scrubbed, nil
+}
+
+// AssessExternalSecretsTeardown determines whether a timed-out
+// external-secrets Helm uninstall is only a stale bookkeeping problem or
+// whether real release resources still remain. Missing CRDs are treated as
+// already-cleaned-up, which is the expected steady state late in teardown.
+func (c KubernetesClient) AssessExternalSecretsTeardown(ctx context.Context) (ExternalSecretsTeardownAssessment, error) {
+	const namespace = "external-secrets"
+
+	assessment := ExternalSecretsTeardownAssessment{}
+
+	clientset, err := c.api.ClientSet()
+	if err != nil {
+		return assessment, err
+	}
+
+	secrets, err := clientset.CoreV1().Secrets(namespace).List(ctx, metav1.ListOptions{
+		LabelSelector: "owner=helm",
+	})
+	if err != nil && !apierrors.IsNotFound(err) {
+		return assessment, err
+	}
+	if err == nil {
+		for _, s := range secrets.Items {
+			if s.Type != "helm.sh/release.v1" {
+				continue
+			}
+			if release := s.Labels["name"]; release != "" && release != "external-secrets" {
+				continue
+			}
+			assessment.HelmReleaseSecrets = append(assessment.HelmReleaseSecrets, fmt.Sprintf("%s/%s", s.Namespace, s.Name))
+		}
+	}
+
+	type resourceProbe struct {
+		kind       string
+		namespaced bool
+	}
+
+	probes := []resourceProbe{
+		{kind: "ExternalSecret", namespaced: true},
+		{kind: "SecretStore", namespaced: true},
+		{kind: "PushSecret", namespaced: true},
+		{kind: "ClusterSecretStore", namespaced: false},
+		{kind: "ClusterPushSecret", namespaced: false},
+		{kind: "ClusterExternalSecret", namespaced: false},
+	}
+
+	for _, probe := range probes {
+		gvr, lookupErr := c.LookupKind(ctx, probe.kind)
+		if lookupErr != nil {
+			continue
+		}
+
+		scope := ""
+		if probe.namespaced {
+			scope = namespace
+		}
+
+		listErr := c.ForEachDynamicResources(ctx, gvr, scope, func(item unstructured.Unstructured) {
+			name := item.GetName()
+			if ns := item.GetNamespace(); ns != "" {
+				assessment.RemainingResources = append(assessment.RemainingResources, fmt.Sprintf("%s %s/%s", probe.kind, ns, name))
+				return
+			}
+			assessment.RemainingResources = append(assessment.RemainingResources, fmt.Sprintf("%s %s", probe.kind, name))
+		})
+		if listErr != nil && !apierrors.IsNotFound(listErr) {
+			return assessment, listErr
+		}
+	}
+
+	switch {
+	case len(assessment.HelmReleaseSecrets) == 0 && len(assessment.RemainingResources) == 0:
+		assessment.Recoverable = true
+		assessment.Summary = "no Helm release secrets or External Secrets resources remain"
+	case len(assessment.HelmReleaseSecrets) > 0 && len(assessment.RemainingResources) == 0:
+		assessment.Summary = fmt.Sprintf("%d Helm release secret(s) remain", len(assessment.HelmReleaseSecrets))
+	case len(assessment.HelmReleaseSecrets) == 0 && len(assessment.RemainingResources) > 0:
+		assessment.Summary = fmt.Sprintf("%d External Secrets resource(s) remain", len(assessment.RemainingResources))
+	default:
+		assessment.Summary = fmt.Sprintf("%d Helm release secret(s) and %d External Secrets resource(s) remain", len(assessment.HelmReleaseSecrets), len(assessment.RemainingResources))
+	}
+
+	return assessment, nil
 }
 
 type PodHealthStatus struct {

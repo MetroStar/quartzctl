@@ -1956,6 +1956,23 @@ func TfDestroyWithRetry(ctx context.Context, stage string, p *CommandParams, max
 			}
 		}
 
+		// Recover a foundation-stage false negative where the external-secrets
+		// pre-delete cleanup finished, but Helm timed out deleting its own
+		// release record before reporting success back to OpenTofu.
+		if isRecoverableExternalSecretsDestroyTimeout(stage, errStr) {
+			recovered, recoverErr := recoverTimedOutExternalSecretsDestroy(ctx, stage, p, errStr)
+			if recoverErr != nil {
+				log.Warn("Failed to recover timed-out external-secrets destroy", "stage", stage, "error", recoverErr)
+			} else if recovered {
+				if retryErr := TfDestroy(ctx, stage, p); retryErr == nil {
+					return nil
+				} else {
+					lastErr = retryErr
+					errStr = retryErr.Error()
+				}
+			}
+		}
+
 		// Check if this is a retryable error
 		if !isRetryableDestroyError(errStr) {
 			log.Warn("Non-retryable error during destroy", "stage", stage, "error", lastErr)
@@ -2037,6 +2054,20 @@ func isHelmReleaseRecordError(errStr string) bool {
 	return false
 }
 
+func isRecoverableExternalSecretsDestroyTimeout(stage string, errStr string) bool {
+	if stage != "foundation" || len(errStr) == 0 {
+		return false
+	}
+	if !strings.Contains(errStr, "external-secrets") {
+		return false
+	}
+	if !isHelmReleaseRecordError(errStr) {
+		return false
+	}
+	return strings.Contains(errStr, "context deadline exceeded") ||
+		strings.Contains(errStr, "timeout while waiting")
+}
+
 // clusterAbsent reports whether the target EKS cluster is confirmed gone. It is
 // used to gate destructive state surgery (dropping orphaned in-cluster resources)
 // so we only do so when the cluster genuinely no longer exists — never on a
@@ -2058,6 +2089,69 @@ func clearOrphanedClusterState(ctx context.Context, stage string, p *CommandPara
 	client := tofu.Instance(ctx, *p.Settings())
 	s := p.Settings().Config.Stages[stage]
 	return client.StateRemoveOrphanedClusterResources(ctx, s)
+}
+
+// recoverTimedOutExternalSecretsDestroy converts a timed-out external-secrets
+// uninstall into a clean retry when Quartz can prove the release is already
+// gone and only stale Helm bookkeeping remains.
+func recoverTimedOutExternalSecretsDestroy(ctx context.Context, stage string, p *CommandParams, errStr string) (bool, error) {
+	if !isRecoverableExternalSecretsDestroyTimeout(stage, errStr) {
+		return false, nil
+	}
+
+	k8s, err := p.Provider().Kubernetes(ctx)
+	if err != nil {
+		return false, err
+	}
+
+	scrubbed, scrubErr := k8s.ScrubStuckHelmReleaseSecrets(ctx, 0)
+	if scrubErr != nil {
+		log.Warn("Failed to scrub stuck Helm release secrets during external-secrets recovery", "stage", stage, "error", scrubErr)
+	}
+
+	assessment, err := k8s.AssessExternalSecretsTeardown(ctx)
+	if err != nil {
+		return false, err
+	}
+	if !assessment.Recoverable {
+		log.Info("Timed-out external-secrets destroy is not yet recoverable",
+			"stage", stage,
+			"summary", assessment.Summary,
+			"helmReleaseSecrets", assessment.HelmReleaseSecrets,
+			"remainingResources", assessment.RemainingResources)
+		return false, nil
+	}
+
+	removed, err := clearTimedOutExternalSecretsState(ctx, stage, p)
+	if err != nil {
+		return false, err
+	}
+	if removed == 0 {
+		return false, nil
+	}
+
+	extra := ""
+	if len(scrubbed) > 0 {
+		extra = fmt.Sprintf(" after scrubbing %d stuck Helm record(s)", len(scrubbed))
+	}
+	util.Msgf("External Secrets uninstall timed out, but Quartz verified teardown completed%s; removed %d stale state record(s) from stage %s and retrying destroy", extra, removed, stage)
+	return true, nil
+}
+
+func clearTimedOutExternalSecretsState(ctx context.Context, stage string, p *CommandParams) (int, error) {
+	client := tofu.Instance(ctx, *p.Settings())
+	s := p.Settings().Config.Stages[stage]
+	addrs, err := client.StateList(ctx, s, "helm_release.external_secrets")
+	if err != nil {
+		return 0, err
+	}
+	if len(addrs) == 0 {
+		return 0, nil
+	}
+	if err := client.StateRemove(ctx, s, addrs...); err != nil {
+		return 0, err
+	}
+	return len(addrs), nil
 }
 
 // isGitRefAbsentError reports whether a destroy error stems from deleting a git

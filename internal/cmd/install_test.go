@@ -376,6 +376,46 @@ func TestIsHelmReleaseRecordError(t *testing.T) {
 	}
 }
 
+func TestIsRecoverableExternalSecretsDestroyTimeout(t *testing.T) {
+	tests := []struct {
+		name     string
+		stage    string
+		errStr   string
+		expected bool
+	}{
+		{
+			name:     "foundation external-secrets timeout",
+			stage:    "foundation",
+			errStr:   "Unable to uninstall Helm release external-secrets: uninstallation completed with 1 error(s): context deadline exceeded",
+			expected: true,
+		},
+		{
+			name:     "wrong stage",
+			stage:    "core",
+			errStr:   "Unable to uninstall Helm release external-secrets: context deadline exceeded",
+			expected: false,
+		},
+		{
+			name:     "wrong release",
+			stage:    "foundation",
+			errStr:   "Unable to uninstall Helm release sonarqube: context deadline exceeded",
+			expected: false,
+		},
+		{
+			name:     "no timeout",
+			stage:    "foundation",
+			errStr:   "Unable to uninstall Helm release external-secrets: forbidden",
+			expected: false,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			assert.Equal(t, tt.expected, isRecoverableExternalSecretsDestroyTimeout(tt.stage, tt.errStr))
+		})
+	}
+}
+
 func TestSplitStageError(t *testing.T) {
 	tests := []struct {
 		name      string

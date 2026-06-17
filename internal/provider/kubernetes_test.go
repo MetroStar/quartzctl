@@ -1614,3 +1614,80 @@ func TestProviderKubernetesClientScrubStuckHelmReleaseSecrets(t *testing.T) {
 		t.Errorf("a freshly-created pending record (active reconcile) must not be scrubbed within the grace window, got %v", scrubbed)
 	}
 }
+
+func TestProviderKubernetesClientAssessExternalSecretsTeardown(t *testing.T) {
+	helmSecret := func(ns, name, release, status string) *corev1.Secret {
+		return &corev1.Secret{
+			ObjectMeta: metav1.ObjectMeta{
+				Namespace: ns,
+				Name:      name,
+				Labels:    map[string]string{"owner": "helm", "name": release, "status": status},
+			},
+			Type: "helm.sh/release.v1",
+		}
+	}
+
+	t.Run("recoverable when release secrets and CRs are gone", func(t *testing.T) {
+		api := NewKubernetesApiMock()
+		c, err := NewKubernetesClient(api, KubeconfigInfo{}, schema.QuartzConfig{})
+		if err != nil {
+			t.Fatalf("unexpected error from kubernetes client constructor, %v", err)
+		}
+
+		assessment, err := c.AssessExternalSecretsTeardown(context.Background())
+		if err != nil {
+			t.Fatalf("unexpected error from AssessExternalSecretsTeardown, %v", err)
+		}
+
+		if !assessment.Recoverable {
+			t.Fatalf("expected recoverable assessment, got %#v", assessment)
+		}
+		if len(assessment.HelmReleaseSecrets) != 0 || len(assessment.RemainingResources) != 0 {
+			t.Fatalf("expected no lingering resources, got %#v", assessment)
+		}
+	})
+
+	t.Run("not recoverable while helm release secret remains", func(t *testing.T) {
+		api := NewKubernetesApiMock().WithClientObjects(
+			helmSecret("external-secrets", "sh.helm.release.v1.external-secrets.v1", "external-secrets", "uninstalling"),
+		)
+		c, err := NewKubernetesClient(api, KubeconfigInfo{}, schema.QuartzConfig{})
+		if err != nil {
+			t.Fatalf("unexpected error from kubernetes client constructor, %v", err)
+		}
+
+		assessment, err := c.AssessExternalSecretsTeardown(context.Background())
+		if err != nil {
+			t.Fatalf("unexpected error from AssessExternalSecretsTeardown, %v", err)
+		}
+
+		if assessment.Recoverable {
+			t.Fatalf("expected non-recoverable assessment, got %#v", assessment)
+		}
+		if len(assessment.HelmReleaseSecrets) != 1 {
+			t.Fatalf("expected one lingering helm secret, got %#v", assessment)
+		}
+	})
+
+	t.Run("not recoverable while external secret resource remains", func(t *testing.T) {
+		api := NewKubernetesApiMock().WithDynamicObjects(
+			newK8sObject("external-secrets.io/v1beta1", "ExternalSecret", "external-secrets", "example"),
+		)
+		c, err := NewKubernetesClient(api, KubeconfigInfo{}, schema.QuartzConfig{})
+		if err != nil {
+			t.Fatalf("unexpected error from kubernetes client constructor, %v", err)
+		}
+
+		assessment, err := c.AssessExternalSecretsTeardown(context.Background())
+		if err != nil {
+			t.Fatalf("unexpected error from AssessExternalSecretsTeardown, %v", err)
+		}
+
+		if assessment.Recoverable {
+			t.Fatalf("expected non-recoverable assessment, got %#v", assessment)
+		}
+		if len(assessment.RemainingResources) != 1 || !strings.Contains(assessment.RemainingResources[0], "ExternalSecret external-secrets/example") {
+			t.Fatalf("expected lingering external secret, got %#v", assessment)
+		}
+	})
+}
