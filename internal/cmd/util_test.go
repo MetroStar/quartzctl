@@ -355,7 +355,7 @@ func TestSummarizeAITelemetryError(t *testing.T) {
 		{
 			name: "generic",
 			err:  errors.New("x509: certificate signed by unknown authority"),
-			want: "query failed",
+			want: "failed",
 		},
 	}
 

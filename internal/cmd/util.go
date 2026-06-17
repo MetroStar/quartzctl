@@ -684,13 +684,13 @@ func summarizeAITelemetryError(err error, cfg aiTelemetryConfig, timeout time.Du
 
 	switch {
 	case errors.Is(err, context.DeadlineExceeded) || strings.Contains(lower, "context deadline exceeded"):
-		return fmt.Errorf("Prometheus service proxy %s timed out after %s; Prometheus may be unavailable or the Kubernetes API service proxy is under pressure", target, timeout)
+		return fmt.Errorf("Prometheus query target %s timed out after %s; Prometheus may be unavailable or both the port-forward and Kubernetes service-proxy paths are under pressure", target, timeout)
 	case strings.Contains(lower, "not found") && strings.Contains(lower, "services"):
-		return fmt.Errorf("Prometheus service proxy %s was not found; verify monitoring is installed and the telemetry ConfigMap points at the right service", target)
+		return fmt.Errorf("Prometheus query target %s was not found; verify monitoring is installed and the telemetry ConfigMap points at the right service", target)
 	case strings.Contains(lower, "service unavailable") || strings.Contains(lower, "currently unable to handle the request") || strings.Contains(lower, "503"):
-		return fmt.Errorf("Prometheus service proxy %s returned service unavailable; monitoring may still be starting or the API service proxy may be overloaded", target)
+		return fmt.Errorf("Prometheus query target %s returned service unavailable; monitoring may still be starting or the API service proxy may be overloaded", target)
 	default:
-		return fmt.Errorf("Prometheus service proxy %s query failed: %w", target, err)
+		return fmt.Errorf("Prometheus query target %s failed: %w", target, err)
 	}
 }
 

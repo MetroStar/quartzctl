@@ -642,6 +642,17 @@ func (c KubernetesClient) QueryPrometheus(ctx context.Context, ns string, servic
 		return PrometheusQueryResponse{}, err
 	}
 
+	// Prefer the direct pod port-forward path first. The Kubernetes service proxy
+	// is convenient when it works, but in practice it is more likely to stall
+	// behind API-server pressure than the underlying Prometheus pod itself.
+	pfCtx, cancel := prometheusPortForwardContext(ctx)
+	defer cancel()
+
+	pfRes, pfErr := queryPrometheusViaPortForward(pfCtx, c.api, clientset, ns, service, port, query)
+	if pfErr == nil {
+		return pfRes, nil
+	}
+
 	name := fmt.Sprintf("http:%s:%d", service, port)
 	raw, err := clientset.CoreV1().RESTClient().
 		Get().
@@ -653,14 +664,7 @@ func (c KubernetesClient) QueryPrometheus(ctx context.Context, ns string, servic
 		Param("query", query).
 		DoRaw(ctx)
 	if err != nil {
-		fallbackCtx, cancel := prometheusPortForwardContext(ctx)
-		defer cancel()
-
-		res, pfErr := queryPrometheusViaPortForward(fallbackCtx, c.api, clientset, ns, service, port, query)
-		if pfErr == nil {
-			return res, nil
-		}
-		return PrometheusQueryResponse{}, fmt.Errorf("%w; port-forward fallback also failed: %v", err, pfErr)
+		return PrometheusQueryResponse{}, fmt.Errorf("port-forward query failed: %v; service proxy query failed: %w", pfErr, err)
 	}
 
 	var res PrometheusQueryResponse
