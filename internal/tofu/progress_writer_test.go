@@ -59,6 +59,24 @@ func TestProgressAnnotatingWriterAddsDestroyNoteOnce(t *testing.T) {
 	}
 }
 
+func TestProgressAnnotatingWriterAddsHelmReleaseNote(t *testing.T) {
+	var dst bytes.Buffer
+	w := newProgressAnnotatingWriter(&dst)
+	line := "helm_release.external_secrets: Still destroying... [id=external-secrets, 10s elapsed]\n"
+
+	if _, err := w.Write([]byte(line)); err != nil {
+		t.Fatalf("unexpected write error: %v", err)
+	}
+
+	got := dst.String()
+	if !strings.Contains(got, "Helm release deletion is still unwinding in-cluster") {
+		t.Fatalf("expected helm release destroy note, got:\n%s", got)
+	}
+	if strings.Contains(got, "provider-side") {
+		t.Fatalf("helm release note should not describe the wait as provider-side, got:\n%s", got)
+	}
+}
+
 func TestProgressAnnotatingWriterPassesPlainOutput(t *testing.T) {
 	var dst bytes.Buffer
 	w := newProgressAnnotatingWriter(&dst)

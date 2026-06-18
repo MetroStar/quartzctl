@@ -2265,12 +2265,21 @@ func recoverTimedOutExternalSecretsDestroy(ctx context.Context, stage string, p 
 		return false, nil
 	}
 
-	extra := ""
-	if len(scrubbed) > 0 {
-		extra = fmt.Sprintf(" after scrubbing %d stuck Helm record(s)", len(scrubbed))
-	}
-	util.Msgf("External Secrets uninstall timed out, but Quartz verified teardown completed%s; removed %d stale state record(s) from stage %s and retrying destroy", extra, removed, stage)
+	util.Msg(externalSecretsDestroyRecoveryMessage(stage, removed, len(scrubbed)))
 	return true, nil
+}
+
+func externalSecretsDestroyRecoveryMessage(stage string, removed int, scrubbed int) string {
+	extra := ""
+	if scrubbed > 0 {
+		extra = fmt.Sprintf(" after scrubbing %d stuck Helm record(s)", scrubbed)
+	}
+	return fmt.Sprintf(
+		"Quartz verified External Secrets was already torn down in-cluster%s; removed %d stale state record(s) from stage %s and is continuing cleanup",
+		extra,
+		removed,
+		stage,
+	)
 }
 
 func clearTimedOutExternalSecretsState(ctx context.Context, stage string, p *CommandParams) (int, error) {

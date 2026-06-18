@@ -71,14 +71,23 @@ func (w *progressAnnotatingWriter) annotateLine(line string) error {
 		return nil
 	}
 
-	label := destroyProgressLabel(match[1])
+	address := match[1]
+	label := destroyProgressLabel(address)
 	if label == "" || w.seen[label] {
 		return nil
 	}
 	w.seen[label] = true
 
-	_, err := fmt.Fprintf(w.dst, "  Note: %s deletion is still progressing provider-side; several minutes here can be normal.\n", label)
+	_, err := fmt.Fprint(w.dst, destroyProgressNote(address, label))
 	return err
+}
+
+func destroyProgressNote(address, label string) string {
+	lower := strings.ToLower(address)
+	if strings.Contains(lower, "helm_release") {
+		return fmt.Sprintf("  Note: %s deletion is still unwinding in-cluster; hooks, namespace finalizers, or CR cleanup can keep this open for several minutes even after workloads disappear.\n", label)
+	}
+	return fmt.Sprintf("  Note: %s deletion is still progressing provider-side; several minutes here can be normal.\n", label)
 }
 
 func destroyProgressLabel(address string) string {

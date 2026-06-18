@@ -189,6 +189,12 @@ Expected behavior:
 - Re-running `quartz clean --yes` is the normal recovery path.
 - The cleanup report is cumulative, so earlier failures stay visible while
   independent stages continue to destroy.
+- Quartz can sometimes verify that a timed-out Helm uninstall already completed
+  in-cluster, remove only stale OpenTofu bookkeeping, and continue the teardown.
+- During that kind of surgical recovery, raw OpenTofu `-target` /
+  `Applied changes may be incomplete` warnings can appear in the stage log even
+  though Quartz has already proven the underlying resource is gone; use the
+  final teardown report as the source of truth.
 
 Checks:
 

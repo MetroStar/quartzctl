@@ -546,6 +546,18 @@ func TestRenderCleanupReportWithCleanupStatusFinalReadNote(t *testing.T) {
 	assert.Contains(t, out, "Cleanup hook final read: cluster API became unreachable before the final cleanup-status refresh completed.")
 }
 
+func TestExternalSecretsDestroyRecoveryMessage(t *testing.T) {
+	msg := externalSecretsDestroyRecoveryMessage("foundation", 1, 0)
+	assert.Contains(t, msg, "Quartz verified External Secrets was already torn down in-cluster")
+	assert.Contains(t, msg, "removed 1 stale state record(s) from stage foundation")
+	assert.Contains(t, msg, "is continuing cleanup")
+	assert.NotContains(t, msg, "timed out")
+
+	msg = externalSecretsDestroyRecoveryMessage("foundation", 2, 3)
+	assert.Contains(t, msg, "after scrubbing 3 stuck Helm record(s)")
+	assert.Contains(t, msg, "removed 2 stale state record(s) from stage foundation")
+}
+
 func TestCleanupStatusAvailabilityNote(t *testing.T) {
 	notFound := apierrors.NewNotFound(schema.GroupResource{Resource: "configmaps"}, "quartz-cleanup-status")
 	assert.Equal(t,
