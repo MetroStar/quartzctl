@@ -28,6 +28,7 @@ import (
 	"sync"
 	"syscall"
 	"time"
+	"unicode"
 
 	"github.com/MetroStar/quartzctl/internal/config/schema"
 	"github.com/MetroStar/quartzctl/internal/log"
@@ -739,20 +740,24 @@ func modelWarmerWaitInterval() time.Duration {
 }
 
 func modelWarmerProgress(status modelWarmerStatus) string {
-	target := strings.TrimSpace(status.Model)
+	step := sanitizeModelWarmerText(status.Step)
+	target := sanitizeModelWarmerText(status.Model)
 	if target == "" {
-		target = status.DesiredModels
+		target = sanitizeModelWarmerText(status.DesiredModels)
 	}
-	detail := strings.TrimSpace(status.Detail)
+	detail := sanitizeModelWarmerText(status.Detail)
 	switch {
 	case target != "" && detail != "":
-		return fmt.Sprintf("%s %s: %s", status.Step, target, detail)
+		return fmt.Sprintf("%s %s: %s", step, target, detail)
 	case target != "":
-		return fmt.Sprintf("%s %s", status.Step, target)
+		return strings.TrimSpace(fmt.Sprintf("%s %s", step, target))
 	case detail != "":
-		return fmt.Sprintf("%s: %s", status.Step, detail)
+		if step == "" {
+			return detail
+		}
+		return fmt.Sprintf("%s: %s", step, detail)
 	default:
-		return strings.TrimSpace(status.Step)
+		return step
 	}
 }
 
@@ -831,6 +836,50 @@ func fallback(first, second string) string {
 		return first
 	}
 	return second
+}
+
+func sanitizeModelWarmerText(raw string) string {
+	raw = strings.TrimSpace(raw)
+	if raw == "" {
+		return ""
+	}
+
+	var cleaned strings.Builder
+	cleaned.Grow(len(raw))
+	lastSpace := false
+	for _, r := range raw {
+		switch {
+		case r >= 'a' && r <= 'z', r >= 'A' && r <= 'Z', r >= '0' && r <= '9':
+			cleaned.WriteRune(r)
+			lastSpace = false
+		case strings.ContainsRune(" .,:;/%+-_()[]{}=#", r):
+			if r == ' ' {
+				if lastSpace {
+					continue
+				}
+				lastSpace = true
+			} else {
+				lastSpace = false
+			}
+			cleaned.WriteRune(r)
+		case unicode.IsSpace(r):
+			if lastSpace {
+				continue
+			}
+			cleaned.WriteByte(' ')
+			lastSpace = true
+		default:
+			if lastSpace {
+				continue
+			}
+			cleaned.WriteByte(' ')
+			lastSpace = true
+		}
+	}
+
+	out := strings.Join(strings.Fields(cleaned.String()), " ")
+	replacer := strings.NewReplacer(" :", ":", " ,", ",", " .", ".", " ;", ";", " /", "/")
+	return strings.TrimSpace(replacer.Replace(out))
 }
 
 // stageIds returns a comma-separated list of stage IDs for error messages.

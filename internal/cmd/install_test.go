@@ -634,6 +634,26 @@ func TestModelWarmerCompletionTime(t *testing.T) {
 	assert.Equal(t, "", modelWarmerCompletionTime(modelWarmerStatus{}))
 }
 
+func TestSanitizeModelWarmerText(t *testing.T) {
+	raw := "pulling 4c27e0f5b5ad:  62% ââââââ       â 5.9 GB/9.6 GB  9.1 MB/s  6m43s\npulling manifest"
+	assert.Equal(t,
+		"pulling 4c27e0f5b5ad: 62% 5.9 GB/9.6 GB 9.1 MB/s 6m43s pulling manifest",
+		sanitizeModelWarmerText(raw),
+	)
+}
+
+func TestModelWarmerProgressSanitizesDisplayNoise(t *testing.T) {
+	progress := modelWarmerProgress(modelWarmerStatus{
+		Step:   "pull",
+		Model:  "gemma4:e4b",
+		Detail: "pulling 4c27e0f5b5ad:  62% ââââââ       â 5.9 GB/9.6 GB  9.1 MB/s  6m43s",
+	})
+	assert.Equal(t,
+		"pull gemma4:e4b: pulling 4c27e0f5b5ad: 62% 5.9 GB/9.6 GB 9.1 MB/s 6m43s",
+		progress,
+	)
+}
+
 func TestDestroyStagePreamble(t *testing.T) {
 	assert.Contains(t, destroyStagePreamble("host"), "provider-managed services")
 	assert.Equal(t, "", destroyStagePreamble("core"))
