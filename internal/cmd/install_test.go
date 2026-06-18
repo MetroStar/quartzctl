@@ -31,6 +31,8 @@ import (
 	"github.com/MetroStar/quartzctl/internal/util"
 	"github.com/stretchr/testify/assert"
 	"github.com/urfave/cli/v3"
+	apierrors "k8s.io/apimachinery/pkg/api/errors"
+	"k8s.io/apimachinery/pkg/runtime/schema"
 )
 
 func TestNewRootInstallCommand(t *testing.T) {
@@ -480,12 +482,12 @@ func TestRenderCleanupReportWithCleanupStatus(t *testing.T) {
 	timing := map[string]time.Duration{"destroy-core": 2 * time.Second}
 	status := &provider.CleanupStatus{
 		Data: map[string]string{
-			"status":             "Succeeded",
-			"phase":              "complete",
-			"detail":             "Pre-delete hook completed",
-			"updatedAt":          "2026-06-11T12:00:00Z",
-			"degraded":           "true",
-			"degradedDetail":     "Karpenter finalizer lag detected",
+			"status":              "Succeeded",
+			"phase":               "complete",
+			"detail":              "Pre-delete hook completed",
+			"updatedAt":           "2026-06-11T12:00:00Z",
+			"degraded":            "true",
+			"degradedDetail":      "Karpenter finalizer lag detected",
 			"foundationSafeHuman": "external-secrets, cert-manager",
 		},
 		Events: []provider.CleanupEvent{{
@@ -525,6 +527,38 @@ func TestRenderCleanupReportWithCleanupStatus(t *testing.T) {
 	assert.Contains(t, out, "Notes:")
 	assert.Contains(t, out, "No manual action is required for that hook condition")
 	assert.Contains(t, out, "Foundation handoff ready: external-secrets, cert-manager.")
+}
+
+func TestRenderCleanupReportWithCleanupStatusFinalReadNote(t *testing.T) {
+	timing := map[string]time.Duration{"destroy-core": 2 * time.Second}
+	status := &provider.CleanupStatus{
+		Data: map[string]string{
+			"status":           "Succeeded",
+			"phase":            "complete",
+			"detail":           "Pre-delete hook completed",
+			"availabilityNote": "cluster API became unreachable before the final cleanup-status refresh completed",
+		},
+	}
+
+	out := renderCleanupReport("pa-test", timing, time.Minute, nil, status)
+
+	assert.Contains(t, out, "FinalRead:   cluster API became unreachable before the final cleanup-status refresh completed")
+	assert.Contains(t, out, "Cleanup hook final read: cluster API became unreachable before the final cleanup-status refresh completed.")
+}
+
+func TestCleanupStatusAvailabilityNote(t *testing.T) {
+	notFound := apierrors.NewNotFound(schema.GroupResource{Resource: "configmaps"}, "quartz-cleanup-status")
+	assert.Equal(t,
+		"final cleanup-status read happened after the ConfigMap was removed during teardown",
+		cleanupStatusAvailabilityNote(notFound),
+	)
+
+	assert.Equal(t,
+		"cluster API became unreachable before the final cleanup-status refresh completed",
+		cleanupStatusAvailabilityNote(errors.New("Get https://api.cluster.local: dial tcp: lookup api.cluster.local: no such host")),
+	)
+
+	assert.Empty(t, cleanupStatusAvailabilityNote(errors.New("permission denied")))
 }
 
 func TestCleanupNotesDescribeLongCleanPhases(t *testing.T) {

@@ -35,6 +35,7 @@ import (
 	"github.com/MetroStar/quartzctl/internal/tofu"
 	"github.com/MetroStar/quartzctl/internal/util"
 	"github.com/urfave/cli/v3"
+	apierrors "k8s.io/apimachinery/pkg/api/errors"
 )
 
 const (
@@ -1262,6 +1263,10 @@ func Clean(ctx context.Context, p *CommandParams) error {
 		}
 		status, err := kube.GetCleanupStatus(ctx, ns, cleanupStatusConfigMapName)
 		if err != nil {
+			if note := cleanupStatusAvailabilityNote(err); note != "" {
+				recordCleanupStatusUnavailable(&cleanupStatus, note)
+				printCleanupStatusProgress(cleanupStatus, &cleanupDisplay)
+			}
 			log.Debug("Cleanup hook status not available", "namespace", ns, "name", cleanupStatusConfigMapName, "error", err)
 			return
 		}
@@ -1418,6 +1423,9 @@ func renderCleanupReport(name string, stageTiming map[string]time.Duration, tota
 		if data["updatedAt"] != "" {
 			fmt.Fprintf(&b, "  %-12s %s\n", "Updated:", data["updatedAt"])
 		}
+		if unavailable := strings.TrimSpace(data["availabilityNote"]); unavailable != "" {
+			fmt.Fprintf(&b, "  %-12s %s\n", "FinalRead:", unavailable)
+		}
 		if strings.EqualFold(data["degraded"], "true") {
 			fmt.Fprintf(&b, "  %-12s %s\n", "Degraded:", valueOrUnknown(data["degradedDetail"]))
 			if data["degradedAt"] != "" {
@@ -1502,6 +1510,9 @@ func printCleanupStatusSummary(cleanupStatus *provider.CleanupStatus) {
 		valueOrUnknown(data["phase"]),
 		truncateDetail(valueOrUnknown(data["detail"]), 120),
 	)
+	if unavailable := strings.TrimSpace(data["availabilityNote"]); unavailable != "" {
+		util.Msgf("  Final read: %s", truncateDetail(unavailable, 140))
+	}
 	if strings.EqualFold(data["degraded"], "true") {
 		util.Msgf("  Degraded: %s", truncateDetail(valueOrUnknown(data["degradedDetail"]), 140))
 		if recovery := cleanupHookRecoverySummary(cleanupStatus); recovery != "" {
@@ -1541,6 +1552,7 @@ type cleanupStatusDisplayState struct {
 	Handoff        string
 	Residual       string
 	HookEventCount int
+	Unavailable    string
 }
 
 func printCleanupStatusProgress(cleanupStatus *provider.CleanupStatus, state *cleanupStatusDisplayState) {
@@ -1576,6 +1588,11 @@ func printCleanupStatusProgress(cleanupStatus *provider.CleanupStatus, state *cl
 	if residual := strings.TrimSpace(data["residualHuman"]); residual != "" && residual != state.Residual {
 		util.Msgf("  Cleanup residual snapshot: %s", truncateDetail(residual, 140))
 		state.Residual = residual
+	}
+
+	if unavailable := strings.TrimSpace(data["availabilityNote"]); unavailable != "" && unavailable != state.Unavailable {
+		util.Msgf("  Cleanup final read: %s", truncateDetail(unavailable, 140))
+		state.Unavailable = unavailable
 	}
 
 	if len(cleanupStatus.HookEvents) <= state.HookEventCount {
@@ -1618,6 +1635,55 @@ func cleanupHookRecoverySummary(cleanupStatus *provider.CleanupStatus) string {
 	return fmt.Sprintf("self-healed after %s; cleanup hook finished successfully", detail)
 }
 
+func cleanupStatusAvailabilityNote(err error) string {
+	if err == nil {
+		return ""
+	}
+	if apierrors.IsNotFound(err) {
+		return "final cleanup-status read happened after the ConfigMap was removed during teardown"
+	}
+
+	errStr := strings.TrimSpace(err.Error())
+	if errStr == "" {
+		return ""
+	}
+	unavailablePatterns := []string{
+		"no such host",
+		"connection refused",
+		"i/o timeout",
+		"context deadline exceeded",
+		"Client.Timeout exceeded",
+		"EOF",
+	}
+	for _, pattern := range unavailablePatterns {
+		if strings.Contains(errStr, pattern) {
+			return "cluster API became unreachable before the final cleanup-status refresh completed"
+		}
+	}
+	return ""
+}
+
+func recordCleanupStatusUnavailable(cleanupStatus **provider.CleanupStatus, note string) {
+	note = strings.TrimSpace(note)
+	if note == "" {
+		return
+	}
+
+	if *cleanupStatus == nil {
+		*cleanupStatus = &provider.CleanupStatus{
+			Data: map[string]string{
+				"status": "Unavailable",
+				"phase":  "post-clean",
+				"detail": "Cleanup hook status unavailable after teardown",
+			},
+		}
+	}
+	if (*cleanupStatus).Data == nil {
+		(*cleanupStatus).Data = map[string]string{}
+	}
+	(*cleanupStatus).Data["availabilityNote"] = note
+}
+
 func cleanupNotes(stageTiming map[string]time.Duration, cleanupStatus *provider.CleanupStatus, errs []error) []string {
 	var notes []string
 
@@ -1631,6 +1697,9 @@ func cleanupNotes(stageTiming map[string]time.Duration, cleanupStatus *provider.
 	if cleanupStatus != nil {
 		if handoff := strings.TrimSpace(cleanupStatus.Data["foundationSafeHuman"]); handoff != "" {
 			notes = append(notes, "Foundation handoff ready: "+handoff+".")
+		}
+		if unavailable := strings.TrimSpace(cleanupStatus.Data["availabilityNote"]); unavailable != "" {
+			notes = append(notes, "Cleanup hook final read: "+unavailable+".")
 		}
 	}
 
