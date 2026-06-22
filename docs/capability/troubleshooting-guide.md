@@ -195,6 +195,10 @@ Expected behavior:
   `Applied changes may be incomplete` warnings can appear in the stage log even
   though Quartz has already proven the underlying resource is gone; use the
   final teardown report as the source of truth.
+- During `destroy-core`, Helm can also report that it kept
+  `ConfigMap/quartz-cleanup-status` and the `quartz` namespace due to resource
+  policy. That is expected: Quartz intentionally keeps those breadcrumbs long
+  enough for the cleanup summary and foundation handoff to remain readable.
 
 Checks:
 

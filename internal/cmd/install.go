@@ -1767,6 +1767,10 @@ func cleanupNotes(stageTiming map[string]time.Duration, cleanupStatus *provider.
 
 func destroyStagePreamble(stageID string) string {
 	switch stageID {
+	case "core":
+		return "Destroy core includes the Quartz Helm pre-delete hook. During staged recovery Quartz can intentionally use targeted OpenTofu cleanup, so raw `Resource targeting is in effect` or `Applied changes may be incomplete` warnings can be expected while the final cleanup report remains the source of truth."
+	case "foundation":
+		return "Destroy foundation removes cert-manager and external-secrets after Quartz has already drained their custom resources. If Quartz reports a foundation-safe handoff, transient targeted-destroy warnings are informational unless the final stage result fails."
 	case "host":
 		return "Destroy host tears down provider-managed services such as EKS, RDS, and VPC resources. Ten to twenty-plus minutes here can be normal while AWS finishes background deletion."
 	default:
