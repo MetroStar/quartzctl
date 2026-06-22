@@ -1436,6 +1436,40 @@ func valueOrUnknown(v string) string {
 	return v
 }
 
+func cleanupHookSucceeded(cleanupStatus *provider.CleanupStatus) bool {
+	if cleanupStatus == nil {
+		return false
+	}
+	data := cleanupStatus.Data
+	status := strings.TrimSpace(data["status"])
+	phase := strings.TrimSpace(data["phase"])
+	return strings.EqualFold(status, "Succeeded") ||
+		strings.EqualFold(status, "Complete") ||
+		strings.EqualFold(status, "Completed") ||
+		strings.EqualFold(phase, "complete")
+}
+
+func cleanupFinalReadSummary(cleanupStatus *provider.CleanupStatus) string {
+	if cleanupStatus == nil {
+		return ""
+	}
+	note := strings.TrimSpace(cleanupStatus.Data["availabilityNote"])
+	if note == "" {
+		return ""
+	}
+	if !cleanupHookSucceeded(cleanupStatus) {
+		return note
+	}
+	switch note {
+	case "cluster API became unreachable before the final cleanup-status refresh completed":
+		return "cluster API became unreachable after the cleanup hook had already reported success"
+	case "final cleanup-status read happened after the ConfigMap was removed during teardown":
+		return "cleanup-status ConfigMap was removed after the cleanup hook had already reported success"
+	default:
+		return note
+	}
+}
+
 // renderCleanupReport builds the plaintext teardown report: a header, the
 // per-phase timing table (sorted for deterministic output), and the grouped
 // destroy errors. It deliberately mirrors the console summary but emits no
@@ -1472,7 +1506,7 @@ func renderCleanupReport(name string, stageTiming map[string]time.Duration, tota
 		if data["updatedAt"] != "" {
 			fmt.Fprintf(&b, "  %-12s %s\n", "Updated:", data["updatedAt"])
 		}
-		if unavailable := strings.TrimSpace(data["availabilityNote"]); unavailable != "" {
+		if unavailable := cleanupFinalReadSummary(cleanupStatus); unavailable != "" {
 			fmt.Fprintf(&b, "  %-12s %s\n", "FinalRead:", unavailable)
 		}
 		if strings.EqualFold(data["degraded"], "true") {
@@ -1559,7 +1593,7 @@ func printCleanupStatusSummary(cleanupStatus *provider.CleanupStatus) {
 		valueOrUnknown(data["phase"]),
 		truncateDetail(valueOrUnknown(data["detail"]), 120),
 	)
-	if unavailable := strings.TrimSpace(data["availabilityNote"]); unavailable != "" {
+	if unavailable := cleanupFinalReadSummary(cleanupStatus); unavailable != "" {
 		util.Msgf("  Final read: %s", truncateDetail(unavailable, 140))
 	}
 	if strings.EqualFold(data["degraded"], "true") {
@@ -1639,7 +1673,7 @@ func printCleanupStatusProgress(cleanupStatus *provider.CleanupStatus, state *cl
 		state.Residual = residual
 	}
 
-	if unavailable := strings.TrimSpace(data["availabilityNote"]); unavailable != "" && unavailable != state.Unavailable {
+	if unavailable := cleanupFinalReadSummary(cleanupStatus); unavailable != "" && unavailable != state.Unavailable {
 		util.Msgf("  Cleanup final read: %s", truncateDetail(unavailable, 140))
 		state.Unavailable = unavailable
 	}
@@ -1747,7 +1781,7 @@ func cleanupNotes(stageTiming map[string]time.Duration, cleanupStatus *provider.
 		if handoff := strings.TrimSpace(cleanupStatus.Data["foundationSafeHuman"]); handoff != "" {
 			notes = append(notes, "Foundation handoff ready: "+handoff+".")
 		}
-		if unavailable := strings.TrimSpace(cleanupStatus.Data["availabilityNote"]); unavailable != "" {
+		if unavailable := cleanupFinalReadSummary(cleanupStatus); unavailable != "" {
 			notes = append(notes, "Cleanup hook final read: "+unavailable+".")
 		}
 	}

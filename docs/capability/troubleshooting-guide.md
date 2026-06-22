@@ -199,6 +199,9 @@ Expected behavior:
   `ConfigMap/quartz-cleanup-status` and the `quartz` namespace due to resource
   policy. That is expected: Quartz intentionally keeps those breadcrumbs long
   enough for the cleanup summary and foundation handoff to remain readable.
+- If the final cleanup report says the cluster API became unreachable only
+  after the cleanup hook had already reported success, treat that as a normal
+  end-of-teardown readback loss rather than a fresh failure.
 
 Checks:
 

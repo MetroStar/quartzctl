@@ -542,8 +542,8 @@ func TestRenderCleanupReportWithCleanupStatusFinalReadNote(t *testing.T) {
 
 	out := renderCleanupReport("pa-test", timing, time.Minute, nil, status)
 
-	assert.Contains(t, out, "FinalRead:   cluster API became unreachable before the final cleanup-status refresh completed")
-	assert.Contains(t, out, "Cleanup hook final read: cluster API became unreachable before the final cleanup-status refresh completed.")
+	assert.Contains(t, out, "FinalRead:   cluster API became unreachable after the cleanup hook had already reported success")
+	assert.Contains(t, out, "Cleanup hook final read: cluster API became unreachable after the cleanup hook had already reported success.")
 }
 
 func TestExternalSecretsDestroyRecoveryMessage(t *testing.T) {
@@ -571,6 +571,37 @@ func TestCleanupStatusAvailabilityNote(t *testing.T) {
 	)
 
 	assert.Empty(t, cleanupStatusAvailabilityNote(errors.New("permission denied")))
+}
+
+func TestCleanupFinalReadSummary(t *testing.T) {
+	assert.Equal(t, "",
+		cleanupFinalReadSummary(nil),
+	)
+
+	status := &provider.CleanupStatus{
+		Data: map[string]string{
+			"status":           "Succeeded",
+			"phase":            "complete",
+			"availabilityNote": "cluster API became unreachable before the final cleanup-status refresh completed",
+		},
+	}
+	assert.Equal(t,
+		"cluster API became unreachable after the cleanup hook had already reported success",
+		cleanupFinalReadSummary(status),
+	)
+
+	status.Data["availabilityNote"] = "final cleanup-status read happened after the ConfigMap was removed during teardown"
+	assert.Equal(t,
+		"cleanup-status ConfigMap was removed after the cleanup hook had already reported success",
+		cleanupFinalReadSummary(status),
+	)
+
+	status.Data["status"] = "Running"
+	status.Data["phase"] = "nodeclaims"
+	assert.Equal(t,
+		"final cleanup-status read happened after the ConfigMap was removed during teardown",
+		cleanupFinalReadSummary(status),
+	)
 }
 
 func TestCleanupNotesDescribeLongCleanPhases(t *testing.T) {
