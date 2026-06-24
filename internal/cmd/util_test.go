@@ -74,10 +74,12 @@ func TestNewRootCheckCommand(t *testing.T) {
 
 	assert.Equal(t, "check", cmd.Name)
 	assert.Equal(t, "Check environment and configuration for required values", cmd.Usage)
-	assert.Len(t, cmd.Flags, 1)
+	assert.Len(t, cmd.Flags, 2)
 
 	flag := cmd.Flags[0].(*cli.BoolFlag)
 	assert.Equal(t, "ai-telemetry", flag.Name)
+	flag = cmd.Flags[1].(*cli.BoolFlag)
+	assert.Equal(t, "install-readiness", flag.Name)
 
 	err := cmd.Action(context.Background(), &cli.Command{})
 	assert.NoError(t, err)
@@ -216,7 +218,8 @@ func TestCmdClusterInfoIncludesModelWarmerNote(t *testing.T) {
 
 	err := ClusterInfo(context.Background(), p)
 	assert.NoError(t, err)
-	assert.Contains(t, buf.String(), "Ollama model warming is still running in the background")
+	assert.Contains(t, buf.String(), "Background tasks")
+	assert.Contains(t, buf.String(), "Ollama persistent model store is not ready yet")
 }
 
 func TestCmdClusterLogin(t *testing.T) {
@@ -375,6 +378,19 @@ func TestCmdRefreshSecrets(t *testing.T) {
 	if err != nil {
 		t.Errorf("unexpected error in cmd RefreshSecrets, %v", err)
 	}
+}
+
+func TestSummarizeResourceNamespaces(t *testing.T) {
+	resources := []provider.KubernetesResource{
+		{Namespace: "argocd"},
+		{Namespace: "argocd"},
+		{Namespace: "epyon"},
+		{Namespace: "jenkins"},
+	}
+
+	assert.Equal(t, 3, countResourceNamespaces(resources))
+	assert.Equal(t, "argocd(2), epyon(1), jenkins(1)", summarizeResourceNamespaces(resources, 6))
+	assert.Equal(t, "argocd(2), +2 more", summarizeResourceNamespaces(resources, 1))
 }
 
 func TestCmdCleanup(t *testing.T) {

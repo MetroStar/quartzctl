@@ -91,7 +91,7 @@ quartz [command] [flags]
 
 ### Available Commands
 
-- `check`: Check environment, configuration and access for installer prerequisites. Use `quartz check --ai-telemetry` on a live Quartz cluster to verify Agent Gateway Prometheus scrape health, recent request volume, recent 2xx/5xx responses, and recent model-not-found/404 responses.
+- `check`: Check environment, configuration and access for installer prerequisites. Use `quartz check --ai-telemetry` on a live Quartz cluster to verify Agent Gateway Prometheus scrape health, recent request volume, recent 2xx/5xx responses, and recent model-not-found/404 responses. Use `quartz check --install-readiness` after install when you want a lightweight read on Flux convergence, app-delivery bootstrap readiness, and Ollama warmer status without re-reading the full cluster report.
 - `clean`: Perform a full cleanup/teardown of the system. Pass `--yes`/`-y` to skip the confirmation prompt (useful for CI). Cleanup destroys stages in reverse dependency order, continues across stage failures, reports cumulative status, and preserves the state backend until all stages complete successfully.
 - `export`: Export configured Kubernetes resources to yaml.
 - `info`: Output configuration info for the current cluster.
@@ -141,6 +141,16 @@ background after that point; the CLI now distinguishes between the durable
 model store being ready and the later best-effort GPU warm-up pass. Use
 `quartz install --wait-for-models` when you want the CLI itself to block until
 the desired models are fully persisted.
+
+When you just want the short follow-up signal after install, run:
+
+```bash
+quartz check --install-readiness
+```
+
+That check keeps the CLI thin while still surfacing the three things operators
+usually care about first: Flux HelmRelease convergence, app-delivery bootstrap,
+and AI model readiness.
 
 ---
 

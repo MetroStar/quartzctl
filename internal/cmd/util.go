@@ -80,10 +80,14 @@ func NewRootCheckCommand(p *CommandParams) RootCommandResult {
 			Usage: "Check environment and configuration for required values",
 			Flags: []cli.Flag{
 				&cli.BoolFlag{Name: "ai-telemetry", Usage: "Check Agent Gateway AI telemetry in Prometheus"},
+				&cli.BoolFlag{Name: "install-readiness", Usage: "Check lightweight post-install readiness signals for Flux, app delivery, and the AI stack"},
 			},
 			Action: func(ctx context.Context, ccmd *cli.Command) error {
 				if ccmd.Bool("ai-telemetry") {
 					return CheckAITelemetry(ctx, p)
+				}
+				if ccmd.Bool("install-readiness") {
+					return CheckInstallReadiness(ctx, p)
 				}
 				Check(ctx, p)
 				return nil
@@ -249,10 +253,17 @@ func ClusterInfo(ctx context.Context, p *CommandParams) error {
 	k8s.PrintClusterInfo(ctx)
 
 	util.Msgf("export KUBECONFIG=%s", p.Settings().Config.KubeconfigPath())
-	util.Msg("CI/CD builds may take up to 15 minutes to complete following initial setup, progress may be tracked at the Jenkins and ArgoCD URL's above")
-	ReportModelWarmerStatus(ctx, p)
+	printBackgroundTasks(ctx, p)
 
 	return err
+}
+
+func printBackgroundTasks(ctx context.Context, p *CommandParams) {
+	fmt.Println()
+	util.Printf("Background tasks")
+	util.Msg("CI/CD initial builds and first promotion checks may take up to 15 minutes after install; track progress in Jenkins and ArgoCD.")
+	ReportAppDeliveryReadiness(ctx, p)
+	ReportModelWarmerStatus(ctx, p)
 }
 
 // printHelmReleaseStatus renders a table of every Flux HelmRelease and its
@@ -639,6 +650,97 @@ func CheckAITelemetry(ctx context.Context, p *CommandParams) error {
 	return nil
 }
 
+func CheckInstallReadiness(ctx context.Context, p *CommandParams) error {
+	log.Debug("Entering", "command", "checkInstallReadiness")
+	defer log.Debug("Completed", "command", "checkInstallReadiness")
+
+	k8s, err := p.Provider().Kubernetes(ctx)
+	if err != nil {
+		return err
+	}
+
+	util.Hdr("Install readiness")
+
+	progress, progressErr := k8s.ClusterProgressSnapshot(ctx)
+	appDelivery, appDeliveryOK, appDeliveryErr := readAppDeliveryReadiness(ctx, k8s)
+	modelWarmer, modelWarmerOK, modelWarmerErr := readModelWarmerStatus(ctx, k8s)
+
+	rows := [][]string{}
+
+	if progressErr != nil {
+		rows = append(rows, []string{"Flux HelmReleases", "-", "Unavailable", truncateDetail(progressErr.Error(), 80)})
+	} else {
+		status := "OK"
+		detail := progress.SummaryWithStragglers(3)
+		value := fmt.Sprintf("%d/%d ready", progress.HelmReleasesReady, progress.HelmReleasesTotal)
+		if progress.HelmReleasesReady != progress.HelmReleasesTotal {
+			status = "Waiting"
+		}
+		rows = append(rows, []string{"Flux HelmReleases", value, status, truncateDetail(detail, 80)})
+	}
+
+	switch {
+	case appDeliveryErr != nil:
+		rows = append(rows, []string{"App delivery bootstrap", "-", "Unavailable", truncateDetail(appDeliveryErr.Error(), 80)})
+	case !appDeliveryOK:
+		rows = append(rows, []string{"App delivery bootstrap", "-", "Pending", "Readiness ConfigMap not published yet"})
+	default:
+		status := "OK"
+		value := fmt.Sprintf("%d/%d apps", appDelivery.ObservedApplications, appDelivery.ExpectedApplications)
+		detail := appDelivery.Summary
+		if !strings.EqualFold(appDelivery.Phase, "ready") {
+			status = "Waiting"
+		}
+		rows = append(rows, []string{"App delivery bootstrap", value, status, truncateDetail(detail, 80)})
+	}
+
+	switch {
+	case modelWarmerErr != nil:
+		rows = append(rows, []string{"Ollama model warming", "-", "Unavailable", truncateDetail(modelWarmerErr.Error(), 80)})
+	case !modelWarmerOK:
+		rows = append(rows, []string{"Ollama model warming", "-", "Pending", "Model warmer status not published yet"})
+	default:
+		status := "OK"
+		if strings.EqualFold(modelWarmer.Phase, "failed") {
+			status = "Errors"
+		} else if !strings.EqualFold(modelWarmer.Phase, "succeeded") && !modelWarmer.PersistentReady {
+			status = "Waiting"
+		}
+		rows = append(rows, []string{
+			"Ollama model warming",
+			modelWarmerReadinessSummary(modelWarmer),
+			status,
+			truncateDetail(modelWarmerProgress(modelWarmer), 80),
+		})
+	}
+
+	util.PrintRowStatusTable(
+		[]string{"Signal", "Value", "Status", "Detail"},
+		rows,
+		func(_ int, row []string) util.RowStatus {
+			switch row[2] {
+			case "OK":
+				return util.StatusOk
+			case "Waiting":
+				return util.StatusWarning
+			default:
+				return util.StatusError
+			}
+		},
+	)
+
+	if progressErr == nil && progress.HelmReleasesReady != progress.HelmReleasesTotal {
+		return fmt.Errorf("not all HelmReleases are ready")
+	}
+	if appDeliveryErr == nil && appDeliveryOK && !strings.EqualFold(appDelivery.Phase, "ready") {
+		return fmt.Errorf("app delivery bootstrap is still pending")
+	}
+	if modelWarmerErr == nil && modelWarmerOK && strings.EqualFold(modelWarmer.Phase, "failed") {
+		return fmt.Errorf("ollama model warmer failed")
+	}
+	return nil
+}
+
 func queryAITelemetryMetric(ctx context.Context, k8s provider.KubernetesProviderClient, cfg aiTelemetryConfig, key string, name string) aiTelemetryMetric {
 	query := cfg.Queries[key]
 	if strings.TrimSpace(query) == "" {
@@ -749,12 +851,64 @@ func RefreshSecrets(ctx context.Context, p *CommandParams) error {
 		return err
 	}
 
-	_, err = k8s.RefreshExternalSecrets(ctx)
+	refreshed, err := k8s.RefreshExternalSecrets(ctx)
 	if err != nil {
 		util.Errorf("Failed to refresh secrets, %v", err)
+		return err
 	}
+	if len(refreshed) == 0 {
+		util.Msg("No ExternalSecrets were found to refresh")
+		return nil
+	}
+	util.Msgf("Triggered refresh of %d ExternalSecret(s) across %d namespace(s): %s",
+		len(refreshed), countResourceNamespaces(refreshed), summarizeResourceNamespaces(refreshed, 6))
 
 	return nil
+}
+
+func countResourceNamespaces(resources []provider.KubernetesResource) int {
+	seen := map[string]bool{}
+	for _, resource := range resources {
+		if resource.Namespace != "" {
+			seen[resource.Namespace] = true
+		}
+	}
+	return len(seen)
+}
+
+func summarizeResourceNamespaces(resources []provider.KubernetesResource, limit int) string {
+	counts := map[string]int{}
+	for _, resource := range resources {
+		if resource.Namespace == "" {
+			continue
+		}
+		counts[resource.Namespace]++
+	}
+	if len(counts) == 0 {
+		return "none"
+	}
+
+	namespaces := make([]string, 0, len(counts))
+	for ns := range counts {
+		namespaces = append(namespaces, ns)
+	}
+	slices.Sort(namespaces)
+	if limit > 0 && len(namespaces) > limit {
+		extra := len(namespaces) - limit
+		namespaces = namespaces[:limit]
+		parts := make([]string, 0, len(namespaces)+1)
+		for _, ns := range namespaces {
+			parts = append(parts, fmt.Sprintf("%s(%d)", ns, counts[ns]))
+		}
+		parts = append(parts, fmt.Sprintf("+%d more", extra))
+		return strings.Join(parts, ", ")
+	}
+
+	parts := make([]string, 0, len(namespaces))
+	for _, ns := range namespaces {
+		parts = append(parts, fmt.Sprintf("%s(%d)", ns, counts[ns]))
+	}
+	return strings.Join(parts, ", ")
 }
 
 // Cleanup removes temporary files created by the installer.

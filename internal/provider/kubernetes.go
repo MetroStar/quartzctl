@@ -465,8 +465,7 @@ func (c KubernetesClient) RefreshExternalSecrets(ctx context.Context) ([]Kuberne
 	err = c.ForEachDynamicResources(ctx, kind, "", func(item unstructured.Unstructured) {
 		name := item.GetName()
 		ns := item.GetNamespace()
-
-		util.Printf("Triggering refresh of secret %s/%s", ns, name)
+		log.Debug("Triggering refresh of external secret", "namespace", ns, "name", name)
 
 		annotations := item.GetAnnotations()
 		if annotations == nil {
@@ -1176,6 +1175,55 @@ func (p ClusterProgress) Summary() string {
 		parts = append(parts, fmt.Sprintf("terminating ns: %s", strings.Join(p.TerminatingNamespaces, ",")))
 	}
 	return strings.Join(parts, " | ")
+}
+
+// SummaryWithStragglers renders the standard summary plus a short "waiting on"
+// tail naming the top not-ready HelmReleases. This keeps long installs readable
+// without forcing operators to jump straight to raw controller logs.
+func (p ClusterProgress) SummaryWithStragglers(limit int) string {
+	summary := p.Summary()
+	if detail := p.NotReadySummary(limit); detail != "" {
+		summary += " | waiting on: " + detail
+	}
+	return summary
+}
+
+// NotReadySummary returns a compact, human-oriented summary of the top
+// non-ready HelmReleases and their current state.
+func (p ClusterProgress) NotReadySummary(limit int) string {
+	notReady := p.NotReadyDetails()
+	if len(notReady) == 0 {
+		return ""
+	}
+	if limit <= 0 || limit > len(notReady) {
+		limit = len(notReady)
+	}
+
+	items := make([]string, 0, limit+1)
+	for _, r := range notReady[:limit] {
+		items = append(items, fmt.Sprintf("%s (%s)", r.ID(), summarizeReleaseState(r)))
+	}
+	if remaining := len(notReady) - limit; remaining > 0 {
+		items = append(items, fmt.Sprintf("+%d more", remaining))
+	}
+	return strings.Join(items, ", ")
+}
+
+func summarizeReleaseState(r HelmReleaseStatus) string {
+	msg := strings.TrimSpace(r.ReadyMsg)
+	if r.Stalled {
+		msg = strings.TrimSpace(r.StalledMsg)
+	}
+	if msg == "" {
+		if r.Stalled {
+			return "stalled"
+		}
+		return "not ready"
+	}
+	if len(msg) > 48 {
+		msg = strings.TrimSpace(msg[:45]) + "..."
+	}
+	return msg
 }
 
 // ClusterProgressSnapshot collects a lightweight health snapshot of the cluster:

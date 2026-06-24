@@ -1127,7 +1127,7 @@ func startProgressReporter(ctx context.Context, p *CommandParams) func() {
 				}
 				return
 			}
-			summary := snap.Summary()
+			summary := snap.SummaryWithStragglers(3)
 			// Avoid spamming identical lines when nothing has changed.
 			if summary == lastSummary {
 				return

@@ -710,7 +710,7 @@ func TestModelWarmerProgressSanitizesDisplayNoise(t *testing.T) {
 
 func TestDestroyStagePreamble(t *testing.T) {
 	assert.Contains(t, destroyStagePreamble("host"), "provider-managed services")
-	assert.Equal(t, "", destroyStagePreamble("core"))
+	assert.Contains(t, destroyStagePreamble("core"), "Quartz Helm pre-delete hook")
 }
 
 func TestReadModelWarmerStatusSanitizesControlCharacters(t *testing.T) {

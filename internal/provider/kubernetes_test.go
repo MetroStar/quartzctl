@@ -1506,12 +1506,21 @@ func TestClusterProgressSummary(t *testing.T) {
 		HelmReleasesTotal:     34,
 		UnhealthyPods:         []string{"quartz/epyon-0"},
 		TerminatingNamespaces: []string{"cert-manager"},
+		Releases: []HelmReleaseStatus{
+			{Namespace: "quartz", Name: "post-install", ReadyMsg: "running install"},
+			{Namespace: "monitoring", Name: "alloy", ReadyMsg: "upgrade retries in progress"},
+		},
 	}
 	got := p.Summary()
 	if !strings.Contains(got, "10/34 ready") ||
 		!strings.Contains(got, "1 unhealthy pod") ||
 		!strings.Contains(got, "terminating ns: cert-manager") {
 		t.Errorf("unexpected summary: %q", got)
+	}
+	withStragglers := p.SummaryWithStragglers(1)
+	if !strings.Contains(withStragglers, "waiting on: quartz/post-install (running install)") ||
+		!strings.Contains(withStragglers, "+1 more") {
+		t.Errorf("unexpected straggler summary: %q", withStragglers)
 	}
 
 	clean := ClusterProgress{HelmReleasesReady: 34, HelmReleasesTotal: 34}

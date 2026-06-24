@@ -43,12 +43,15 @@ const (
 	cleanupStatusConfigMapName = "quartz-cleanup-status"
 	ollamaNamespace            = "ollama"
 	modelWarmerStatusCM        = "ollama-model-warmer-status"
+	appDeliveryReadinessCM     = "quartz-app-delivery-readiness"
 )
 
 const (
 	logPreflightMinFreeBytes     = uint64(2 * 1024 * 1024 * 1024)
 	logPreflightCompressMinBytes = int64(100 * 1024 * 1024)
 	logPreflightCompressMinAge   = 24 * time.Hour
+	logPreflightArchiveMaxAge    = 14 * 24 * time.Hour
+	logPreflightArchiveRetain    = 10
 )
 
 // NewRootInstallCommand creates the "install" root command for the CLI.
@@ -345,6 +348,7 @@ func LocalInstallPreflight(p *CommandParams) error {
 	}
 
 	var compressed []string
+	var pruned []string
 	for _, dir := range logDirs {
 		items, err := compressOldTofuLogs(dir, time.Now())
 		if err != nil {
@@ -352,9 +356,18 @@ func LocalInstallPreflight(p *CommandParams) error {
 			continue
 		}
 		compressed = append(compressed, items...)
+		removed, err := pruneOldTofuLogArchives(dir, time.Now())
+		if err != nil {
+			log.Warn("Local log archive prune failed", "path", dir, "error", err)
+			continue
+		}
+		pruned = append(pruned, removed...)
 	}
 	if len(compressed) > 0 {
 		util.Msgf("Compressed %d old OpenTofu log file(s) to keep local disk space healthy", len(compressed))
+	}
+	if len(pruned) > 0 {
+		util.Msgf("Removed %d older OpenTofu log archive(s) after retaining the most recent %d per log directory", len(pruned), logPreflightArchiveRetain)
 	}
 
 	if root, free, err := minFreeSpace(logDirs); err == nil && free < logPreflightMinFreeBytes {
@@ -470,6 +483,64 @@ func gzipFile(path string) error {
 	return os.Remove(path)
 }
 
+func pruneOldTofuLogArchives(dir string, now time.Time) ([]string, error) {
+	entries, err := os.ReadDir(dir)
+	if os.IsNotExist(err) {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, err
+	}
+
+	type archive struct {
+		path    string
+		modTime time.Time
+	}
+	var archives []archive
+	for _, entry := range entries {
+		if entry.IsDir() {
+			continue
+		}
+		name := entry.Name()
+		if !strings.Contains(name, ".tf.log") || !strings.HasSuffix(name, ".gz") {
+			continue
+		}
+		info, err := entry.Info()
+		if err != nil {
+			return nil, err
+		}
+		archives = append(archives, archive{
+			path:    filepath.Join(dir, name),
+			modTime: info.ModTime(),
+		})
+	}
+	if len(archives) == 0 {
+		return nil, nil
+	}
+
+	slices.SortFunc(archives, func(a, b archive) int {
+		if a.modTime.Equal(b.modTime) {
+			return strings.Compare(a.path, b.path)
+		}
+		if a.modTime.After(b.modTime) {
+			return -1
+		}
+		return 1
+	})
+
+	var removed []string
+	for i, item := range archives {
+		if i < logPreflightArchiveRetain && now.Sub(item.modTime) < logPreflightArchiveMaxAge {
+			continue
+		}
+		if err := os.Remove(item.path); err != nil && !os.IsNotExist(err) {
+			return removed, err
+		}
+		removed = append(removed, item.path)
+	}
+	return removed, nil
+}
+
 func minFreeSpace(paths []string) (string, uint64, error) {
 	var minPath string
 	var minFree uint64
@@ -535,6 +606,18 @@ type modelWarmerStatus struct {
 	UpdatedAt            string `json:"updatedAt"`
 }
 
+type appDeliveryReadinessStatus struct {
+	Phase                 string   `json:"phase"`
+	BootstrapReady        bool     `json:"bootstrapReady"`
+	ArgocdNamespace       string   `json:"argocdNamespace"`
+	ExpectedApplications  int      `json:"expectedApplications"`
+	ObservedApplications  int      `json:"observedApplications"`
+	JenkinsAuthConfigured bool     `json:"jenkinsAuthConfigured"`
+	Missing               []string `json:"missing"`
+	UpdatedAt             string   `json:"updatedAt"`
+	Summary               string   `json:"summary"`
+}
+
 func ReportModelWarmerStatus(ctx context.Context, p *CommandParams) {
 	status, ok, err := readModelWarmerStatusFromParams(ctx, p)
 	if err != nil {
@@ -563,22 +646,48 @@ func ReportModelWarmerStatus(ctx context.Context, p *CommandParams) {
 		readiness := modelWarmerReadinessSummary(status)
 		if updatedAt := strings.TrimSpace(status.UpdatedAt); updatedAt != "" {
 			if status.PersistentReady {
-				util.Msgf("Ollama model store is ready (%s); best-effort GPU warm is still running in the background (%s, last update %s).",
+				util.Msgf("Ollama persistent model store is ready (%s); best-effort GPU warm is still running in the background (%s, last update %s).",
 					readiness, progress, updatedAt)
 			} else {
-				util.Msgf("Ollama model warming is still running in the background (%s, %s, last update %s). AI endpoints may be up before every model is ready.",
+				util.Msgf("Ollama persistent model store is not ready yet (%s, %s, last update %s). AI endpoints may be up before every model is ready.",
 					readiness, progress, updatedAt)
 			}
 		} else {
 			if status.PersistentReady {
-				util.Msgf("Ollama model store is ready (%s); best-effort GPU warm is still running in the background (%s).",
+				util.Msgf("Ollama persistent model store is ready (%s); best-effort GPU warm is still running in the background (%s).",
 					readiness, progress)
 			} else {
-				util.Msgf("Ollama model warming is still running in the background (%s, %s). AI endpoints may be up before every model is ready.",
+				util.Msgf("Ollama persistent model store is not ready yet (%s, %s). AI endpoints may be up before every model is ready.",
 					readiness, progress)
 			}
 		}
 	}
+}
+
+func ReportAppDeliveryReadiness(ctx context.Context, p *CommandParams) {
+	status, ok, err := readAppDeliveryReadinessFromParams(ctx, p)
+	if err != nil {
+		log.Debug("App-delivery readiness unavailable", "error", err)
+		return
+	}
+	if !ok {
+		return
+	}
+
+	summary := strings.TrimSpace(status.Summary)
+	if summary == "" {
+		summary = fmt.Sprintf(
+			"App delivery %s: %d/%d generated Argo CD Applications observed",
+			strings.ToLower(fallback(status.Phase, "pending")),
+			status.ObservedApplications,
+			status.ExpectedApplications,
+		)
+	}
+	if updatedAt := strings.TrimSpace(status.UpdatedAt); updatedAt != "" {
+		util.Msgf("%s (last update %s)", summary, updatedAt)
+		return
+	}
+	util.Msg(summary)
 }
 
 func modelWarmerCompletionTime(status modelWarmerStatus) string {
@@ -608,6 +717,30 @@ func readModelWarmerStatus(ctx context.Context, kube provider.KubernetesProvider
 	var status modelWarmerStatus
 	if err := json.Unmarshal([]byte(raw), &status); err != nil {
 		return modelWarmerStatus{}, false, err
+	}
+	return status, true, nil
+}
+
+func readAppDeliveryReadinessFromParams(ctx context.Context, p *CommandParams) (appDeliveryReadinessStatus, bool, error) {
+	kube, err := p.Provider().Kubernetes(ctx)
+	if err != nil {
+		return appDeliveryReadinessStatus{}, false, fmt.Errorf("cluster not reachable: %w", err)
+	}
+	return readAppDeliveryReadiness(ctx, kube)
+}
+
+func readAppDeliveryReadiness(ctx context.Context, kube provider.KubernetesProviderClient) (appDeliveryReadinessStatus, bool, error) {
+	data, err := kube.GetConfigMapValue(ctx, "quartz", appDeliveryReadinessCM)
+	if err != nil {
+		return appDeliveryReadinessStatus{}, false, err
+	}
+	raw := strings.TrimSpace(data["status.json"])
+	if raw == "" {
+		return appDeliveryReadinessStatus{}, false, nil
+	}
+	var status appDeliveryReadinessStatus
+	if err := json.Unmarshal([]byte(raw), &status); err != nil {
+		return appDeliveryReadinessStatus{}, false, err
 	}
 	return status, true, nil
 }
@@ -1115,9 +1248,9 @@ func waitForClusterConvergence(ctx context.Context, p *CommandParams) error {
 					return nil
 				}
 
-				util.Msgf("Convergence: %s", snap.Summary())
+				util.Msgf("Convergence: %s", snap.SummaryWithStragglers(3))
 			} else {
-				util.Msgf("Convergence: %s", snap.Summary())
+				util.Msgf("Convergence: %s", snap.SummaryWithStragglers(3))
 
 				// Fail fast on releases Flux has marked Stalled (retries/remediation
 				// exhausted) once the signal persists across consecutive polls.
