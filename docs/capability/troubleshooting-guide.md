@@ -199,6 +199,11 @@ Expected behavior:
   `ConfigMap/quartz-cleanup-status` and the `quartz` namespace due to resource
   policy. That is expected: Quartz intentionally keeps those breadcrumbs long
   enough for the cleanup summary and foundation handoff to remain readable.
+- The cleanup summary now also distinguishes the terminal completion shape via
+  `completionCategory` / `completionHuman` in `quartz-cleanup-status`, so the
+  final report can tell you whether the core hook finished cleanly, ended in a
+  foundation-safe handoff, left only namespace garbage collection, or finished
+  successfully after degraded self-healing.
 - If the final cleanup report says the cluster API became unreachable only
   after the cleanup hook had already reported success, treat that as a normal
   end-of-teardown readback loss rather than a fresh failure.

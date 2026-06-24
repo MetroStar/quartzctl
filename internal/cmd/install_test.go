@@ -160,11 +160,13 @@ func TestPrintCleanupStatusProgress(t *testing.T) {
 	state := cleanupStatusDisplayState{}
 	printCleanupStatusProgress(&provider.CleanupStatus{
 		Data: map[string]string{
-			"phase":          "nodeclaims",
-			"status":         "Degraded",
-			"detail":         "Waiting for NodeClaims to clear",
-			"degradedDetail": "Karpenter finalizer lag detected",
-			"residualHuman":  "workloads=0, loadBalancers=0, nodeClaims=1, nodePools=1, ec2NodeClasses=1, pvc=0, pv=0",
+			"phase":              "nodeclaims",
+			"status":             "Degraded",
+			"detail":             "Waiting for NodeClaims to clear",
+			"completionCategory": "degraded-but-complete",
+			"completionHuman":    "Cleanup completed after degraded recovery; review cleanup history for the self-healed steps.",
+			"degradedDetail":     "Karpenter finalizer lag detected",
+			"residualHuman":      "workloads=0, loadBalancers=0, nodeClaims=1, nodePools=1, ec2NodeClasses=1, pvc=0, pv=0",
 		},
 		HookEvents: []provider.CleanupHookEvent{
 			{
@@ -179,6 +181,8 @@ func TestPrintCleanupStatusProgress(t *testing.T) {
 
 	out := buf.String()
 	assert.Contains(t, out, "Cleanup hook:")
+	assert.Contains(t, out, "Cleanup completion category")
+	assert.Contains(t, out, "Cleanup completion summary")
 	assert.Contains(t, out, "Cleanup degraded but still progressing")
 	assert.Contains(t, out, "Cleanup residual snapshot")
 	assert.Contains(t, out, "Cleanup step:")
@@ -186,11 +190,13 @@ func TestPrintCleanupStatusProgress(t *testing.T) {
 	buf.Reset()
 	printCleanupStatusProgress(&provider.CleanupStatus{
 		Data: map[string]string{
-			"phase":          "nodeclaims",
-			"status":         "Degraded",
-			"detail":         "Waiting for NodeClaims to clear",
-			"degradedDetail": "Karpenter finalizer lag detected",
-			"residualHuman":  "workloads=0, loadBalancers=0, nodeClaims=1, nodePools=1, ec2NodeClasses=1, pvc=0, pv=0",
+			"phase":              "nodeclaims",
+			"status":             "Degraded",
+			"detail":             "Waiting for NodeClaims to clear",
+			"completionCategory": "degraded-but-complete",
+			"completionHuman":    "Cleanup completed after degraded recovery; review cleanup history for the self-healed steps.",
+			"degradedDetail":     "Karpenter finalizer lag detected",
+			"residualHuman":      "workloads=0, loadBalancers=0, nodeClaims=1, nodePools=1, ec2NodeClasses=1, pvc=0, pv=0",
 		},
 		HookEvents: []provider.CleanupHookEvent{
 			{
@@ -486,6 +492,8 @@ func TestRenderCleanupReportWithCleanupStatus(t *testing.T) {
 			"phase":               "complete",
 			"detail":              "Pre-delete hook completed",
 			"updatedAt":           "2026-06-11T12:00:00Z",
+			"completionCategory":  "degraded-but-complete",
+			"completionHuman":     "Cleanup completed after degraded recovery; review cleanup history for the self-healed steps.",
 			"degraded":            "true",
 			"degradedDetail":      "Karpenter finalizer lag detected",
 			"foundationSafeHuman": "external-secrets, cert-manager",
@@ -518,6 +526,8 @@ func TestRenderCleanupReportWithCleanupStatus(t *testing.T) {
 
 	assert.Contains(t, out, "Cleanup Hook:")
 	assert.Contains(t, out, "Status:      Succeeded")
+	assert.Contains(t, out, "Completion:  degraded-but-complete")
+	assert.Contains(t, out, "Outcome:     Cleanup completed after degraded recovery; review cleanup history for the self-healed steps.")
 	assert.Contains(t, out, "Degraded:    Karpenter finalizer lag detected")
 	assert.Contains(t, out, "Recovery:    self-healed after Karpenter finalizer lag detected; cleanup hook finished successfully")
 	assert.Contains(t, out, "Handoff:     external-secrets, cert-manager")
@@ -526,6 +536,7 @@ func TestRenderCleanupReportWithCleanupStatus(t *testing.T) {
 	assert.Contains(t, out, "KarpenterFinalizerLag")
 	assert.Contains(t, out, "Notes:")
 	assert.Contains(t, out, "No manual action is required for that hook condition")
+	assert.Contains(t, out, "Cleanup completion: Cleanup completed after degraded recovery; review cleanup history for the self-healed steps.")
 	assert.Contains(t, out, "Foundation handoff ready: external-secrets, cert-manager.")
 }
 

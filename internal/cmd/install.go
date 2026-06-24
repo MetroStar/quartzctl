@@ -1470,6 +1470,20 @@ func cleanupFinalReadSummary(cleanupStatus *provider.CleanupStatus) string {
 	}
 }
 
+func cleanupCompletionCategory(cleanupStatus *provider.CleanupStatus) string {
+	if cleanupStatus == nil {
+		return ""
+	}
+	return strings.TrimSpace(cleanupStatus.Data["completionCategory"])
+}
+
+func cleanupCompletionHuman(cleanupStatus *provider.CleanupStatus) string {
+	if cleanupStatus == nil {
+		return ""
+	}
+	return strings.TrimSpace(cleanupStatus.Data["completionHuman"])
+}
+
 // renderCleanupReport builds the plaintext teardown report: a header, the
 // per-phase timing table (sorted for deterministic output), and the grouped
 // destroy errors. It deliberately mirrors the console summary but emits no
@@ -1505,6 +1519,12 @@ func renderCleanupReport(name string, stageTiming map[string]time.Duration, tota
 		fmt.Fprintf(&b, "  %-12s %s\n", "Detail:", valueOrUnknown(data["detail"]))
 		if data["updatedAt"] != "" {
 			fmt.Fprintf(&b, "  %-12s %s\n", "Updated:", data["updatedAt"])
+		}
+		if category := cleanupCompletionCategory(cleanupStatus); category != "" {
+			fmt.Fprintf(&b, "  %-12s %s\n", "Completion:", category)
+		}
+		if human := cleanupCompletionHuman(cleanupStatus); human != "" {
+			fmt.Fprintf(&b, "  %-12s %s\n", "Outcome:", human)
 		}
 		if unavailable := cleanupFinalReadSummary(cleanupStatus); unavailable != "" {
 			fmt.Fprintf(&b, "  %-12s %s\n", "FinalRead:", unavailable)
@@ -1593,6 +1613,12 @@ func printCleanupStatusSummary(cleanupStatus *provider.CleanupStatus) {
 		valueOrUnknown(data["phase"]),
 		truncateDetail(valueOrUnknown(data["detail"]), 120),
 	)
+	if category := cleanupCompletionCategory(cleanupStatus); category != "" {
+		util.Msgf("  Completion: %s", truncateDetail(category, 140))
+	}
+	if human := cleanupCompletionHuman(cleanupStatus); human != "" {
+		util.Msgf("  Outcome:    %s", truncateDetail(human, 140))
+	}
 	if unavailable := cleanupFinalReadSummary(cleanupStatus); unavailable != "" {
 		util.Msgf("  Final read: %s", truncateDetail(unavailable, 140))
 	}
@@ -1631,6 +1657,8 @@ type cleanupStatusDisplayState struct {
 	Phase          string
 	Status         string
 	Detail         string
+	Completion     string
+	Outcome        string
 	DegradedDetail string
 	Handoff        string
 	Residual       string
@@ -1656,6 +1684,16 @@ func printCleanupStatusProgress(cleanupStatus *provider.CleanupStatus, state *cl
 		state.Phase = phase
 		state.Status = status
 		state.Detail = detail
+	}
+
+	if completion := cleanupCompletionCategory(cleanupStatus); completion != "" && completion != state.Completion {
+		util.Msgf("  Cleanup completion category: %s", truncateDetail(completion, 140))
+		state.Completion = completion
+	}
+
+	if outcome := cleanupCompletionHuman(cleanupStatus); outcome != "" && outcome != state.Outcome {
+		util.Msgf("  Cleanup completion summary: %s", truncateDetail(outcome, 140))
+		state.Outcome = outcome
 	}
 
 	if degraded := strings.TrimSpace(data["degradedDetail"]); degraded != "" && degraded != state.DegradedDetail {
@@ -1767,22 +1805,38 @@ func recordCleanupStatusUnavailable(cleanupStatus **provider.CleanupStatus, note
 	(*cleanupStatus).Data["availabilityNote"] = note
 }
 
+func cleanupNoteSentence(text string) string {
+	text = strings.TrimSpace(text)
+	if text == "" {
+		return ""
+	}
+	switch text[len(text)-1] {
+	case '.', '!', '?':
+		return text
+	default:
+		return text + "."
+	}
+}
+
 func cleanupNotes(stageTiming map[string]time.Duration, cleanupStatus *provider.CleanupStatus, errs []error) []string {
 	var notes []string
 
 	if recovery := cleanupHookRecoverySummary(cleanupStatus); recovery != "" {
-		note := "Cleanup hook recovery: " + recovery + "."
+		note := "Cleanup hook recovery: " + cleanupNoteSentence(recovery)
 		if len(errs) == 0 {
 			note += " No manual action is required for that hook condition."
 		}
 		notes = append(notes, note)
 	}
 	if cleanupStatus != nil {
+		if outcome := cleanupCompletionHuman(cleanupStatus); outcome != "" {
+			notes = append(notes, "Cleanup completion: "+cleanupNoteSentence(outcome))
+		}
 		if handoff := strings.TrimSpace(cleanupStatus.Data["foundationSafeHuman"]); handoff != "" {
-			notes = append(notes, "Foundation handoff ready: "+handoff+".")
+			notes = append(notes, "Foundation handoff ready: "+cleanupNoteSentence(handoff))
 		}
 		if unavailable := cleanupFinalReadSummary(cleanupStatus); unavailable != "" {
-			notes = append(notes, "Cleanup hook final read: "+unavailable+".")
+			notes = append(notes, "Cleanup hook final read: "+cleanupNoteSentence(unavailable))
 		}
 	}
 
