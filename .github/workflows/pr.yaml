@@ -32,18 +32,12 @@ jobs:
         with:
           version: v2.1.5
 
-  scan:
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
-        with:
-          fetch-depth: 0
-
-      - name: Run Trivy vulnerability scanner
-        uses: aquasecurity/trivy-action@0.36.0
-        with:
-          scan-type: fs
-          scan-ref: .
+  epyon-scan:
+    name: Epyon scan (quick)
+    uses: MetroStar/epyon/.github/workflows/epyon-scan.yml@main
+    with:
+      scan_mode: quick
+      fail_on_critical: true
 
   test:
     runs-on: ubuntu-latest
