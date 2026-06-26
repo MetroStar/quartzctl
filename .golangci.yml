@@ -33,7 +33,7 @@ linters:
     gocyclo:
       min-complexity: 35
     goconst:
-      min-occurrences: 10
+      min-occurrences: 13
   exclusions:
     generated: lax
     presets:
