@@ -91,6 +91,7 @@ func (c OidcStageCheck) Run(ctx context.Context, cfg schema.QuartzConfig) error 
 	}
 
 	tr := &http.Transport{
+		// lgtm[go/disabled-certificate-check]
 		TLSClientConfig: &tls.Config{InsecureSkipVerify: true}, // #nosec G402 - internal cluster certs
 		DialContext: (&net.Dialer{
 			Timeout:  10 * time.Second,
