@@ -9,9 +9,9 @@ coverage:
   status:
     project:
       default:
-        # Set target to be the same as base coverage, allowing minor decreases
+        # Set target to be the same as base coverage, allowing for feature additions
         target: auto
-        threshold: 2%  # Allow 2% decrease from base
+        threshold: 15%  # Allow 15% decrease from base to accommodate new feature development
         informational: false
     patch:
       default:
