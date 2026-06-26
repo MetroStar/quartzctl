@@ -205,7 +205,7 @@ func install(ctx context.Context, v string, dir string) (string, error) {
 		return "", fmt.Errorf("failed to download OpenTofu %s: %w", v, err)
 	}
 
-	if err := os.WriteFile(execPath, binary, 0750); err != nil {
+	if err := os.WriteFile(execPath, binary, 0o700); err != nil { //nolint:gosec
 		return "", fmt.Errorf("failed to write OpenTofu binary: %w", err)
 	}
 

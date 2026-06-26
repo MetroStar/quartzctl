@@ -740,7 +740,7 @@ func queryPrometheusViaPortForwardImpl(ctx context.Context, api KubernetesApi, c
 		return PrometheusQueryResponse{}, err
 	}
 	if len(ports) == 0 {
-		return PrometheusQueryResponse{}, fmt.Errorf("Prometheus port-forward returned no local ports")
+		return PrometheusQueryResponse{}, fmt.Errorf("prometheus port-forward returned no local ports")
 	}
 
 	reqURL := fmt.Sprintf("http://127.0.0.1:%d/api/v1/query?query=%s", ports[0].Local, url.QueryEscape(query))

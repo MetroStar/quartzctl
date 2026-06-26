@@ -191,7 +191,7 @@ func setDefaults(k *koanf.Koanf) {
 		Project:      "quartz",
 		Chart:        schema.ChartConfig{Path: filepath.Join(pwd, "chart")},
 		Providers:    providers,
-		Tofu:    schema.NewTofuConfig(),
+		Tofu:         schema.NewTofuConfig(),
 		Auth:         schema.DefaultAuthConfig(),
 		Gitops:       schema.DefaultGitopsConfig(providers.SourceControl),
 		Github:       schema.NewGithubConfig(),
@@ -361,7 +361,6 @@ func setAppDefaults(k *koanf.Koanf) {
 		k.MergeAt(k2, "applications."+key)
 	}
 }
-
 
 func defaultApplicationPostDeploySettings(raw interface{}) map[string]interface{} {
 	defaults := schema.DefaultApplicationPostDeployConfig()

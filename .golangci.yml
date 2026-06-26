@@ -30,6 +30,10 @@ linters:
     revive:
       rules:
         - name: comment-spacings
+    gocyclo:
+      min-complexity: 35
+    goconst:
+      min-occurrences: 10
   exclusions:
     generated: lax
     presets:

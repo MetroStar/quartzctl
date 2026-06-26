@@ -227,4 +227,3 @@ func TestIsClusterResidentType(t *testing.T) {
 		})
 	}
 }
-

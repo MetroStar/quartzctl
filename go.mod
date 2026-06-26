@@ -23,6 +23,7 @@ require (
 	github.com/knadh/koanf/providers/file v1.2.0
 	github.com/knadh/koanf/providers/structs v1.0.0
 	github.com/knadh/koanf/v2 v2.2.0
+	github.com/moby/spdystream v0.5.1
 	github.com/opentofu/tofudl v0.0.1
 	github.com/stretchr/testify v1.11.1
 	github.com/tidwall/gjson v1.18.0
@@ -116,7 +117,6 @@ require (
 	github.com/mitchellh/copystructure v1.2.0 // indirect
 	github.com/mitchellh/hashstructure/v2 v2.0.2 // indirect
 	github.com/mitchellh/reflectwalk v1.0.2 // indirect
-	github.com/moby/spdystream v0.5.1 // indirect
 	github.com/moby/term v0.5.2 // indirect
 	github.com/modern-go/concurrent v0.0.0-20180306012644-bacd9c7ef1dd // indirect
 	github.com/modern-go/reflect2 v1.0.3-0.20250322232337-35a7c28c31ee // indirect

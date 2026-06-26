@@ -44,7 +44,7 @@ type QuartzConfig struct {
 	Alerts       AlertsConfig                            `koanf:"alerts"`
 
 	Kubernetes KubernetesConfig `koanf:"kubernetes"`
-	Tofu  TofuConfig  `koanf:"tofu"`
+	Tofu       TofuConfig       `koanf:"tofu"`
 
 	StagePaths []string               `koanf:"stage_paths"`
 	Stages     map[string]StageConfig `koanf:"stages"`

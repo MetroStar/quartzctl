@@ -762,7 +762,7 @@ func queryAITelemetryMetric(ctx context.Context, k8s provider.KubernetesProvider
 
 	value, ok := res.ScalarValue()
 	if !ok {
-		return aiTelemetryMetric{Key: key, Name: name, Error: fmt.Errorf("Prometheus query %q returned no scalar value", key)}
+		return aiTelemetryMetric{Key: key, Name: name, Error: fmt.Errorf("prometheus query %q returned no scalar value", key)}
 	}
 
 	status, detail := aiTelemetryStatus(key, value)
@@ -786,13 +786,13 @@ func summarizeAITelemetryError(err error, cfg aiTelemetryConfig, timeout time.Du
 
 	switch {
 	case errors.Is(err, context.DeadlineExceeded) || strings.Contains(lower, "context deadline exceeded"):
-		return fmt.Errorf("Prometheus query target %s timed out after %s; Prometheus may be unavailable or both the port-forward and Kubernetes service-proxy paths are under pressure", target, timeout)
+		return fmt.Errorf("prometheus query target %s timed out after %s; prometheus may be unavailable or both the port-forward and Kubernetes service-proxy paths are under pressure", target, timeout)
 	case strings.Contains(lower, "not found") && strings.Contains(lower, "services"):
-		return fmt.Errorf("Prometheus query target %s was not found; verify monitoring is installed and the telemetry ConfigMap points at the right service", target)
+		return fmt.Errorf("prometheus query target %s was not found; verify monitoring is installed and the telemetry ConfigMap points at the right service", target)
 	case strings.Contains(lower, "service unavailable") || strings.Contains(lower, "currently unable to handle the request") || strings.Contains(lower, "503"):
-		return fmt.Errorf("Prometheus query target %s returned service unavailable; monitoring may still be starting or the API service proxy may be overloaded", target)
+		return fmt.Errorf("prometheus query target %s returned service unavailable; monitoring may still be starting or the API service proxy may be overloaded", target)
 	default:
-		return fmt.Errorf("Prometheus query target %s failed: %w", target, err)
+		return fmt.Errorf("prometheus query target %s failed: %w", target, err)
 	}
 }
 

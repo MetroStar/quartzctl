@@ -69,7 +69,7 @@ func TestProviderGithubClientCheckAccess(t *testing.T) {
 			}
 
 			repo, _ := json.Marshal(github.Repository{
-				FullName: github.String("test"),
+				FullName: github.Ptr("test"),
 				Permissions: map[string]bool{
 					"pull":     false,
 					"push":     true,

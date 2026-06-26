@@ -563,7 +563,7 @@ func minFreeSpace(paths []string) (string, uint64, error) {
 		if err := syscall.Statfs(probe, &stat); err != nil {
 			return "", 0, err
 		}
-		free := stat.Bavail * uint64(stat.Bsize)
+		free := stat.Bavail * uint64(stat.Bsize) //nolint:gosec
 		if minPath == "" || free < minFree {
 			minPath = probe
 			minFree = free
@@ -808,13 +808,13 @@ func waitForModelWarmerIfRequested(ctx context.Context, p *CommandParams) error 
 			switch strings.ToLower(status.Phase) {
 			case "succeeded":
 				if !modelListContainsAll(status.DesiredModels, status.PulledModels) {
-					return fmt.Errorf("Ollama model warmer succeeded but pulled models %q do not include desired models %q",
+					return fmt.Errorf("ollama model warmer succeeded but pulled models %q do not include desired models %q",
 						status.PulledModels, status.DesiredModels)
 				}
 				util.Msgf("Ollama model warmer complete: %s", modelWarmerReadinessSummary(status))
 				return nil
 			case "failed":
-				return fmt.Errorf("Ollama model warmer failed during %s for %s: %s",
+				return fmt.Errorf("ollama model warmer failed during %s for %s: %s",
 					status.Step, status.Model, status.Detail)
 			default:
 				progress := modelWarmerProgress(status)
@@ -1359,7 +1359,7 @@ func cloudPreflightError(cp provider.CloudProviderClient, err error) error {
 			"preflight: AWS access check failed: %w\n\n"+
 				"AWS credentials are not available or not authorized in this shell. "+
 				"Load your shell environment (for example, `source ~/.bashrc`) or export "+
-				"AWS_PROFILE/AWS_REGION/AWS_ACCESS_KEY_ID/AWS_SECRET_ACCESS_KEY/AWS_SESSION_TOKEN, then rerun `quartz install`.",
+				"AWS_PROFILE/AWS_REGION/AWS_ACCESS_KEY_ID/AWS_SECRET_ACCESS_KEY/AWS_SESSION_TOKEN, then rerun `quartz install`",
 			err,
 		)
 	}
@@ -2115,7 +2115,7 @@ func persistCleanupReport(p *CommandParams, stageTiming map[string]time.Duration
 	file := filepath.Join(dir, fmt.Sprintf("%s.%s.clean.%d.log", name, now.Format("2006-01-02"), now.Unix()))
 
 	report := renderCleanupReport(name, stageTiming, totalDuration, errs, cleanupStatus)
-	if err := os.WriteFile(file, []byte(report), 0o640); err != nil {
+	if err := os.WriteFile(file, []byte(report), 0o600); err != nil {
 		return "", err
 	}
 	return file, nil
@@ -2268,7 +2268,7 @@ func TfDestroyWithRetry(ctx context.Context, stage string, p *CommandParams, max
 
 		// Attempt automatic stale lock recovery
 		if strings.Contains(errStr, "Error acquiring the state lock") || strings.Contains(errStr, "state blob is already locked") {
-			recoverStaleLock(ctx, stage, p, errStr)
+			_ = recoverStaleLock(ctx, stage, p, errStr)
 		}
 
 		// Self-heal orphaned in-cluster state: when the destroy fails because the
@@ -2594,7 +2594,7 @@ func TfApplyWithRetry(ctx context.Context, stage string, p *CommandParams, maxRe
 
 		// Attempt automatic stale lock recovery
 		if strings.Contains(errStr, "Error acquiring the state lock") || strings.Contains(errStr, "state blob is already locked") {
-			recoverStaleLock(ctx, stage, p, errStr)
+			_ = recoverStaleLock(ctx, stage, p, errStr)
 		}
 
 		if !isRetryableApplyError(errStr) {
@@ -2648,7 +2648,7 @@ func isRetryableApplyError(errStr string) bool {
 // and force-unlocks it. During retry loops, locks are always from our own
 // prior failed attempt — no age check needed.
 // Returns true if the lock was successfully recovered.
-func recoverStaleLock(ctx context.Context, stage string, p *CommandParams, errStr string) bool {
+func recoverStaleLock(ctx context.Context, stage string, p *CommandParams, errStr string) bool { //nolint:unparam
 	lockID, ok := tofu.ExtractLockID(errStr)
 	if !ok {
 		return false

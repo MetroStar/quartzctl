@@ -1,7 +1,7 @@
 [tools]
-go = "1.24"
+go = "1.26"
 goreleaser = "latest"
-golangci-lint = "latest"
+golangci-lint = "2.12"
 "aqua:securego/gosec" = "latest"
 "aqua:mfridman/tparse" = "latest"
 gitleaks = "latest"
