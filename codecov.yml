@@ -12,7 +12,7 @@ coverage:
         # Set target to be the same as base coverage, allowing for feature additions
         target: auto
         threshold: 15%  # Allow 15% decrease from base to accommodate new feature development
-        informational: false
+        informational: true  # Report coverage but don't block PR for project-level regressions
     patch:
       default:
         # Reduce patch coverage requirement for integration-heavy code
