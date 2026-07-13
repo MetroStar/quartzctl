@@ -43,15 +43,7 @@ func (c HttpStageCheck) Run(ctx context.Context, cfg schema.QuartzConfig) error 
 	// with a short timeout avoids this problem on AWS; falls back to Google DNS.
 	resolver := &net.Resolver{
 		PreferGo: true,
-		Dial: func(ctx context.Context, network, address string) (net.Conn, error) {
-			d := net.Dialer{Timeout: 5 * time.Second}
-			// Try VPC resolver first (works on any AWS instance), fall back to Google DNS
-			conn, err := d.DialContext(ctx, "udp", "169.254.169.253:53")
-			if err != nil {
-				conn, err = d.DialContext(ctx, "udp", "8.8.8.8:53")
-			}
-			return conn, err
-		},
+		Dial: createDNSDialer(),
 	}
 
 	tr := &http.Transport{
@@ -188,4 +180,34 @@ func (c HttpStageCheck) checkResponseStatus(url string, res *http.Response) (boo
 	}
 
 	return false, fmt.Errorf("HTTP status code check failed, %d %s", res.StatusCode, res.Status)
+}
+
+// createDNSDialer returns the appropriate DNS dialer based on environment
+func createDNSDialer() func(ctx context.Context, network, address string) (net.Conn, error) {
+	if isAWSEnvironment() {
+		return func(ctx context.Context, network, address string) (net.Conn, error) {
+			d := net.Dialer{Timeout: 5 * time.Second}
+			return d.DialContext(ctx, "udp", "169.254.169.253:53")
+		}
+	}
+	// Non-AWS: use Google DNS
+	return func(ctx context.Context, network, address string) (net.Conn, error) {
+		d := net.Dialer{Timeout: 5 * time.Second}
+		return d.DialContext(ctx, "udp", "8.8.8.8:53")
+	}
+}
+
+// isAWSEnvironment checks if running on AWS
+func isAWSEnvironment() bool {
+	ctx, cancel := context.WithTimeout(context.Background(), 500*time.Millisecond)
+	defer cancel()
+
+	req, _ := http.NewRequestWithContext(ctx, "GET", "http://169.254.169.254/latest/meta-data/", nil)
+	client := &http.Client{Timeout: 500 * time.Millisecond}
+	resp, err := client.Do(req)
+	if err != nil {
+		return false
+	}
+	resp.Body.Close()
+	return resp.StatusCode == http.StatusOK
 }
