@@ -43,7 +43,7 @@ func (c HttpStageCheck) Run(ctx context.Context, cfg schema.QuartzConfig) error 
 	// with a short timeout avoids this problem on AWS; falls back to Google DNS.
 	resolver := &net.Resolver{
 		PreferGo: true,
-		Dial: createDNSDialer(),
+		Dial:     selectDNSDialer(), // Uses the cached isAWS value
 	}
 
 	tr := &http.Transport{
@@ -184,21 +184,32 @@ func (c HttpStageCheck) checkResponseStatus(url string, res *http.Response) (boo
 
 // createDNSDialer returns the appropriate DNS dialer based on environment
 func createDNSDialer() func(ctx context.Context, network, address string) (net.Conn, error) {
-	if isAWSEnvironment() {
-		return func(ctx context.Context, network, address string) (net.Conn, error) {
-			d := net.Dialer{Timeout: 5 * time.Second}
-			return d.DialContext(ctx, "udp", "169.254.169.253:53")
-		}
-	}
-	// Non-AWS: use Google DNS
-	return func(ctx context.Context, network, address string) (net.Conn, error) {
-		d := net.Dialer{Timeout: 5 * time.Second}
-		return d.DialContext(ctx, "udp", "8.8.8.8:53")
-	}
+	return selectDNSDialer()
 }
 
-// isAWSEnvironment checks if running on AWS
-func isAWSEnvironment() bool {
+// selectDNSDialer uses the cached detection result
+func selectDNSDialer() func(ctx context.Context, network, address string) (net.Conn, error) {
+	// At package level (once)
+	var isAWS = detectAWSEnvironment()
+
+	if isAWS {
+		return awsDNSDialer
+	}
+	return googleDNSDialer
+}
+
+func awsDNSDialer(ctx context.Context, network, address string) (net.Conn, error) {
+	d := net.Dialer{Timeout: 5 * time.Second}
+	return d.DialContext(ctx, "udp", "169.254.169.253:53")
+}
+
+func googleDNSDialer(ctx context.Context, network, address string) (net.Conn, error) {
+	d := net.Dialer{Timeout: 5 * time.Second}
+	return d.DialContext(ctx, "udp", "8.8.8.8:53")
+}
+
+// detectAWSEnvironment checks once at init time
+func detectAWSEnvironment() bool {
 	ctx, cancel := context.WithTimeout(context.Background(), 500*time.Millisecond)
 	defer cancel()
 
