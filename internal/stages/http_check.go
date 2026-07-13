@@ -30,6 +30,13 @@ import (
 	"github.com/MetroStar/quartzctl/internal/log"
 )
 
+// Package-level variable: detected once at startup
+var isAWS bool
+
+func init() {
+	isAWS = detectAWSEnvironment()
+}
+
 // HttpStageCheck represents an HTTP-based stage check.
 type HttpStageCheck schema.StageChecksHttpConfig
 
@@ -43,7 +50,7 @@ func (c HttpStageCheck) Run(ctx context.Context, cfg schema.QuartzConfig) error 
 	// with a short timeout avoids this problem on AWS; falls back to Google DNS.
 	resolver := &net.Resolver{
 		PreferGo: true,
-		Dial:     selectDNSDialer(), // Uses the cached isAWS value
+		Dial:     selectDNSDialer(),
 	}
 
 	tr := &http.Transport{
@@ -182,16 +189,8 @@ func (c HttpStageCheck) checkResponseStatus(url string, res *http.Response) (boo
 	return false, fmt.Errorf("HTTP status code check failed, %d %s", res.StatusCode, res.Status)
 }
 
-// createDNSDialer returns the appropriate DNS dialer based on environment
-func createDNSDialer() func(ctx context.Context, network, address string) (net.Conn, error) {
-	return selectDNSDialer()
-}
-
-// selectDNSDialer uses the cached detection result
+// selectDNSDialer returns the appropriate DNS resolver based on environment
 func selectDNSDialer() func(ctx context.Context, network, address string) (net.Conn, error) {
-	// At package level (once)
-	var isAWS = detectAWSEnvironment()
-
 	if isAWS {
 		return awsDNSDialer
 	}
@@ -208,7 +207,7 @@ func googleDNSDialer(ctx context.Context, network, address string) (net.Conn, er
 	return d.DialContext(ctx, "udp", "8.8.8.8:53")
 }
 
-// detectAWSEnvironment checks once at init time
+// detectAWSEnvironment checks if running on AWS
 func detectAWSEnvironment() bool {
 	ctx, cancel := context.WithTimeout(context.Background(), 500*time.Millisecond)
 	defer cancel()
