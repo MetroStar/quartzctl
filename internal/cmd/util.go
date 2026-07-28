@@ -233,10 +233,8 @@ func ClusterInfo(ctx context.Context, p *CommandParams) error {
 		return nil
 	}
 
-	util.Hdr("Cluster summary")
 	cp, _ := p.Provider().Cloud(ctx)
-	err := cp.PrintClusterInfo(ctx)
-	if err != nil {
+	if err := cp.PrintClusterInfo(ctx); err != nil {
 		log.Debug("ClusterInfo: cloud cluster info unavailable, skipping K8s summary", "err", err)
 		return nil
 	}
@@ -246,6 +244,8 @@ func ClusterInfo(ctx context.Context, p *CommandParams) error {
 		log.Debug("ClusterInfo: cluster not reachable, skipping K8s summary", "err", err)
 		return nil
 	}
+
+	util.Hdr("Cluster summary")
 
 	// Flux HelmRelease reconciliation status and the SSO posture per package,
 	// shown before the per-application connection details.
