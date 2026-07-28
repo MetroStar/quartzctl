@@ -237,12 +237,14 @@ func ClusterInfo(ctx context.Context, p *CommandParams) error {
 	cp, _ := p.Provider().Cloud(ctx)
 	err := cp.PrintClusterInfo(ctx)
 	if err != nil {
-		return err
+		log.Debug("ClusterInfo: cloud cluster info unavailable, skipping K8s summary", "err", err)
+		return nil
 	}
 
 	k8s, err := p.Provider().Kubernetes(ctx)
 	if err != nil {
-		return err
+		log.Debug("ClusterInfo: cluster not reachable, skipping K8s summary", "err", err)
+		return nil
 	}
 
 	// Flux HelmRelease reconciliation status and the SSO posture per package,
@@ -848,7 +850,9 @@ func RefreshSecrets(ctx context.Context, p *CommandParams) error {
 
 	k8s, err := p.Provider().Kubernetes(ctx)
 	if err != nil {
-		return err
+		// Cluster unreachable (e.g. non-EKS deployment). Nothing to refresh.
+		log.Debug("RefreshSecrets: cluster not reachable, skipping", "err", err)
+		return nil
 	}
 
 	refreshed, err := k8s.RefreshExternalSecrets(ctx)
