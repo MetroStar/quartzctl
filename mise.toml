@@ -63,7 +63,7 @@ run = [
 
 [tasks.test]
 description = "Run tests"
-run = "go test -json -cover ./... {{ if env.RUN }}-run $RUN{{ end }} | tparse -all"
+run = "go test -json -cover ./... ${RUN:+-run $RUN} | tparse -all"
 sources = ["**/*.go", "go.mod", "go.sum"]
 
 [tasks."test-ci"]
