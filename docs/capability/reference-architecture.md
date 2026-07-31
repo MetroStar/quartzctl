@@ -153,4 +153,4 @@ Checks can run before or after `apply`, `destroy`, or `init`, and can be ordered
 
 ## Runtime Dependencies
 
-`quartzctl` is a Go CLI. Development tooling is managed by `mise.toml` and includes Go 1.24, GoReleaser, golangci-lint, gosec, gitleaks, pre-commit, and UPX. The target project supplies OpenTofu, cloud credentials, and any cluster tools required by its stages.
+`quartzctl` is a Go CLI. Development tooling is managed by `mise.toml` and includes Go 1.26, GoReleaser, golangci-lint, gosec, gitleaks, and pre-commit. The target project supplies OpenTofu, cloud credentials, and any cluster tools required by its stages.

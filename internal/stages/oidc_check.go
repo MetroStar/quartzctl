@@ -78,16 +78,10 @@ func (c OidcStageCheck) Run(ctx context.Context, cfg schema.QuartzConfig) error 
 		return fmt.Errorf("oidc check [%s]: client_id and client_secret are required", c.App)
 	}
 
+	// TODO: fix for outside of AWS VPC so local DNS cache won't work when records aren't created before checking.
 	resolver := &net.Resolver{
 		PreferGo: true,
-		Dial: func(ctx context.Context, network, address string) (net.Conn, error) {
-			d := net.Dialer{Timeout: 5 * time.Second}
-			conn, err := d.DialContext(ctx, "udp", "169.254.169.253:53")
-			if err != nil {
-				conn, err = d.DialContext(ctx, "udp", "8.8.8.8:53")
-			}
-			return conn, err
-		},
+		Dial:     selectDNSDialer(),
 	}
 
 	tr := &http.Transport{

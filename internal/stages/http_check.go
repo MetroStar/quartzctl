@@ -48,6 +48,7 @@ func (c HttpStageCheck) Run(ctx context.Context, cfg schema.QuartzConfig) error 
 	// local stub resolver caches NXDOMAIN responses and blocks retries from
 	// succeeding even after the record exists. Using the VPC resolver (169.254.169.253)
 	// with a short timeout avoids this problem on AWS; falls back to Google DNS.
+	// TODO: fix for outside of AWS VPC so local DNS cache won't work when records aren't created before checking.
 	resolver := &net.Resolver{
 		PreferGo: true,
 		Dial:     selectDNSDialer(),

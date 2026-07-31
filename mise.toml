@@ -6,10 +6,10 @@ golangci-lint = "2.12"
 "aqua:mfridman/tparse" = "latest"
 gitleaks = "latest"
 pre-commit = "latest"
-upx = "latest"
 
 [env]
 CGO_ENABLED = "0"
+GOFIPS140 = "latest"
 
 [tasks.setup]
 description = "Install git hooks"
@@ -26,11 +26,6 @@ run = [
   "goreleaser build --clean --snapshot --single-target --output ./bin/quartz",
   "./bin/quartz --version",
 ]
-
-[tasks.compress]
-description = "Build and compress binary with UPX"
-depends = ["build"]
-run = "upx --best --lzma ./bin/quartz"
 
 [tasks.release]
 description = "Create a release"
