@@ -22,18 +22,27 @@ var (
 	runOnceStore sync.Map
 )
 
+// runOnceEntry guards a single keyed execution so that concurrent first-callers
+// run the function exactly once and all observe the same cached result.
+type runOnceEntry struct {
+	once sync.Once
+	err  error
+}
+
 // RunOnce ensures that a function identified by the
 // given key is only executed the first time. Subequent calls
 // will return a cached response.
+//
+// RunOnce is safe for concurrent use: if multiple goroutines call it with the
+// same key simultaneously, exactly one executes f while the others block until
+// it completes, then all return the cached result. This guarantee matters for
+// shared-setup keys (e.g. writing the tfvars file or generating the kubeconfig)
+// that are invoked from parallel stage operations.
 func RunOnce(key string, f func() error) error {
-	if v, loaded := runOnceStore.Load(key); loaded {
-		if v != nil {
-			return v.(error)
-		}
-		return nil
-	}
-
-	err := f()
-	runOnceStore.Store(key, err)
-	return err
+	v, _ := runOnceStore.LoadOrStore(key, &runOnceEntry{})
+	e := v.(*runOnceEntry)
+	e.once.Do(func() {
+		e.err = f()
+	})
+	return e.err
 }

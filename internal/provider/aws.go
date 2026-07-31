@@ -47,7 +47,11 @@ type AwsProviderCheckResult struct {
 }
 
 func NewLazyAwsClient(ctx context.Context, id string, region string) (AwsClient, error) {
-	c, err := config.LoadDefaultConfig(ctx)
+	opts := []func(*config.LoadOptions) error{}
+	if region != "" {
+		opts = append(opts, config.WithRegion(region))
+	}
+	c, err := config.LoadDefaultConfig(ctx, opts...)
 	if err != nil {
 		return AwsClient{}, err
 	}
@@ -83,7 +87,7 @@ func (c AwsClient) ProviderName() string {
 }
 
 func (c AwsClient) CheckConfig() error {
-	if c.cfg.Region == "" {
+	if c.region == "" && c.cfg.Region == "" {
 		return fmt.Errorf("aws.region required")
 	}
 
@@ -107,14 +111,33 @@ func (c AwsClient) CurrentIdentity(ctx context.Context) (CloudProviderIdentity, 
 		return CloudProviderIdentity{}, err
 	}
 
-	aliases, _ := c.sdk.Iam().ListAccountAliases(ctx, &iam.ListAccountAliasesInput{})
+	var accountAliases []string
+	if aliases, aliasErr := c.sdk.Iam().ListAccountAliases(ctx, &iam.ListAccountAliasesInput{}); aliasErr != nil {
+		log.Debug("AWS account alias lookup failed; continuing without account alias", "err", aliasErr)
+	} else if aliases != nil {
+		accountAliases = aliases.AccountAliases
+	}
 
 	return CloudProviderIdentity{
-		AccountId:   *callerId.Account,
-		AccountName: strings.Join(aliases.AccountAliases, ", "),
-		UserId:      *callerId.UserId,
-		UserName:    strings.Split(*callerId.Arn, "/")[1],
+		AccountId:   aws.ToString(callerId.Account),
+		AccountName: strings.Join(accountAliases, ", "),
+		UserId:      aws.ToString(callerId.UserId),
+		UserName:    awsUserNameFromArn(aws.ToString(callerId.Arn)),
 	}, nil
+}
+
+func awsUserNameFromArn(arn string) string {
+	if arn == "" {
+		return ""
+	}
+	parts := strings.Split(arn, "/")
+	if len(parts) > 1 && parts[len(parts)-1] != "" {
+		return parts[len(parts)-1]
+	}
+	if i := strings.LastIndex(arn, ":"); i >= 0 && i+1 < len(arn) {
+		return arn[i+1:]
+	}
+	return arn
 }
 
 func (c AwsClient) StateBackendInfo(stage string) CloudProviderStateBackend {
@@ -158,6 +181,14 @@ func (c AwsClient) DestroyStateBackend(ctx context.Context) error {
 	}
 
 	return nil
+}
+
+// StateBackendExists reports whether the S3 state bucket backing this cluster
+// still exists. A clean run destroys the bucket only after every stage has been
+// torn down, so its absence is a reliable signal that there is nothing left to
+// destroy.
+func (c AwsClient) StateBackendExists(ctx context.Context) (bool, error) {
+	return c.BucketExists(ctx, c.stateBackendBucketName())
 }
 
 func (c AwsClient) KubeconfigInfo(ctx context.Context) (KubeconfigInfo, error) {

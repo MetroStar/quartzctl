@@ -34,9 +34,12 @@ import (
 //   - settings: Lazy-loaded settings from the configuration file.
 //   - provider: Lazy-loaded provider factory for managing resources.
 type CommandParams struct {
-	configFile  string
-	secretsFile string
-	startTime   time.Time
+	configFile    string
+	secretsFile   string
+	startTime     time.Time
+	allowDeferral bool
+	assumeYes     bool
+	waitForModels bool
 
 	settings *config.Settings
 	provider *provider.ProviderFactory

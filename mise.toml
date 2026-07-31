@@ -1,0 +1,79 @@
+[tools]
+go = "1.26"
+goreleaser = "latest"
+golangci-lint = "2.12"
+"aqua:securego/gosec" = "latest"
+"aqua:mfridman/tparse" = "latest"
+gitleaks = "latest"
+pre-commit = "latest"
+
+[env]
+CGO_ENABLED = "0"
+GOFIPS140 = "latest"
+
+[tasks.setup]
+description = "Install git hooks"
+run = ["pre-commit install", "pre-commit install --hook-type commit-msg"]
+
+[tasks.build-all]
+description = "Build for all platforms"
+run = "goreleaser build --clean --auto-snapshot"
+
+[tasks.build]
+description = "Build quartz binary"
+run = [
+  "mkdir -p ./bin",
+  "goreleaser build --clean --snapshot --single-target --output ./bin/quartz",
+  "./bin/quartz --version",
+]
+
+[tasks.release]
+description = "Create a release"
+run = "goreleaser release --clean"
+
+[tasks.install]
+description = "Build and install to ~/go/bin"
+depends = ["build"]
+run = "cp ./bin/quartz ~/go/bin/"
+
+[tasks.deploy]
+description = "Fast rebuild + atomically deploy quartz to every local install location"
+run = [
+  "mkdir -p ./bin",
+  # Fast local build (no goreleaser): embed the same version/buildDate ldflags so
+  # `quartz --version` stays meaningful on dev builds. CGO_ENABLED=0 comes from [env].
+  "go build -ldflags \"-s -w -X main.version=$(git describe --tags --always --dirty 2>/dev/null || echo dev) -X main.buildDate=$(date -u +%s)\" -o ./bin/quartz ./cmd/quartz",
+  # Atomically replace each installed copy. Copy to a sibling temp then rename:
+  # `mv` swaps the inode, so it never hits "Text file busy" even when the target
+  # binary is currently running. /usr/local/bin is root-owned, so fall back to
+  # sudo for any directory the current user cannot write.
+  """
+  for dest in /usr/local/bin/quartz "$HOME/quartz/bin/quartz" "$HOME/quartzctl/bin/quartz"; do
+    dir=$(dirname "$dest"); tmp="$dir/.quartz.new.$$"
+    if [ -w "$dir" ]; then
+      cp ./bin/quartz "$tmp" && mv -f "$tmp" "$dest"
+    else
+      sudo cp ./bin/quartz "$tmp" && sudo mv -f "$tmp" "$dest"
+    fi
+    echo "deployed -> $dest"
+  done
+  """,
+  "quartz --version",
+]
+
+[tasks.test]
+description = "Run tests"
+run = "go test -json -cover ./... ${RUN:+-run $RUN} | tparse -all"
+sources = ["**/*.go", "go.mod", "go.sum"]
+
+[tasks."test-ci"]
+description = "Run tests with coverage output"
+run = "go test -json -cover -coverprofile=coverage.out ./..."
+
+[tasks.lint]
+description = "Run golangci-lint"
+run = "golangci-lint run -v"
+
+[tasks."deps-update"]
+description = "Update Go dependencies"
+run = ["go get -u ./...", "go mod tidy"]

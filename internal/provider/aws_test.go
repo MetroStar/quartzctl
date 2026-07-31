@@ -16,6 +16,7 @@ package provider
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"testing"
 
@@ -93,6 +94,46 @@ func TestProviderAwsClientCurrentIdentity(t *testing.T) {
 	}
 }
 
+func TestProviderAwsClientCurrentIdentityAliasLookupOptional(t *testing.T) {
+	c := NewAwsClient("", "", aws.Config{},
+		&AwsSdkClientMock{
+			stsClient: StsClientMock{account: "123456789", userid: "testuserid", arn: "arn:aws:iam::123456789:user/testusername"},
+			iamClient: IamClientMock{err: errors.New("access denied")},
+		})
+
+	id, err := c.CurrentIdentity(context.Background())
+	if err != nil {
+		t.Errorf("unexpected error from aws client identity lookup, %v", err)
+	}
+
+	if id.AccountId != "123456789" ||
+		id.UserId != "testuserid" ||
+		id.UserName != "testusername" ||
+		id.AccountName != "" {
+		t.Errorf("unexpected aws client identity, %v", id)
+	}
+}
+
+func TestProviderAwsClientCurrentIdentityRootArn(t *testing.T) {
+	c := NewAwsClient("", "", aws.Config{},
+		&AwsSdkClientMock{
+			stsClient: StsClientMock{account: "123456789", userid: "testuserid", arn: "arn:aws:iam::123456789:root"},
+			iamClient: IamClientMock{},
+		})
+
+	id, err := c.CurrentIdentity(context.Background())
+	if err != nil {
+		t.Errorf("unexpected error from aws client identity lookup, %v", err)
+	}
+
+	if id.AccountId != "123456789" ||
+		id.UserId != "testuserid" ||
+		id.UserName != "root" ||
+		id.AccountName != "" {
+		t.Errorf("unexpected aws client identity, %v", id)
+	}
+}
+
 func TestProviderAwsClientCheckAccess(t *testing.T) {
 	c := NewAwsClient("", "", aws.Config{},
 		&AwsSdkClientMock{
@@ -154,6 +195,35 @@ func TestProviderAwsClientDestroyStateBackend(t *testing.T) {
 	err := c.DestroyStateBackend(context.Background())
 	if err != nil {
 		t.Errorf("unexpected error from aws client destroy backend, %v", err)
+	}
+}
+
+func TestProviderAwsClientStateBackendExists(t *testing.T) {
+	tests := []struct {
+		name     string
+		exists   bool
+		expected bool
+	}{
+		{name: "backend present", exists: true, expected: true},
+		{name: "backend already destroyed", exists: false, expected: false},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			c := NewAwsClient("testcluster", "us-east-1", aws.Config{
+				Region: "us-east-1",
+			}, &AwsSdkClientMock{
+				s3Client: S3ClientMock{exists: tt.exists},
+			})
+
+			got, err := c.StateBackendExists(context.Background())
+			if err != nil {
+				t.Errorf("unexpected error from aws client state backend exists, %v", err)
+			}
+			if got != tt.expected {
+				t.Errorf("expected StateBackendExists=%v, got %v", tt.expected, got)
+			}
+		})
 	}
 }
 
@@ -254,7 +324,11 @@ func TestAwsClient_CheckConfig(t *testing.T) {
 
 	client.cfg.Region = ""
 	err = client.CheckConfig()
-	assert.Error(t, err, "CheckConfig should return an error if aws.Config.Region is not set")
+	assert.NoError(t, err, "CheckConfig should not return an error if region is set on client")
+
+	client.region = ""
+	err = client.CheckConfig()
+	assert.Error(t, err, "CheckConfig should return an error if neither region is set")
 }
 
 func TestAwsClient_StateBackendInfo(t *testing.T) {

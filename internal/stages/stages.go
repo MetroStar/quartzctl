@@ -40,7 +40,7 @@ func NewStageConfig(id string) schema.StageConfig {
 		Id:           id,
 		Description:  id,
 		Path:         "",
-		Type:         "terraform", // only type supported for now
+		Type:         "tofu", // only type supported for now
 		Dependencies: nil,
 		Order:        -1,
 		Vars:         map[string]schema.StageVarsConfig{},
@@ -144,7 +144,12 @@ func processStagePath(root string) (map[string]schema.StageConfig, error) {
 			continue
 		}
 
-		stage := NewStageConfigPath(filepath.Join(aroot, e.Name()), e)
+		stagePath := filepath.Join(aroot, e.Name())
+		if shouldSkipStageDir(stagePath, e.Name()) {
+			continue
+		}
+
+		stage := NewStageConfigPath(stagePath, e)
 		r[stage.Id] = stage
 	}
 
@@ -153,6 +158,37 @@ func processStagePath(root string) (map[string]schema.StageConfig, error) {
 	}
 
 	return r, nil
+}
+
+func shouldSkipStageDir(path string, name string) bool {
+	if _, _, err := parseStageDirName(name); err == nil {
+		return false
+	}
+
+	if stageFileMarksManualOrExample(path) || isExampleStageDir(name) {
+		log.Debug("Skipping manual/example stage directory", "path", path)
+		return true
+	}
+
+	return false
+}
+
+func stageFileMarksManualOrExample(path string) bool {
+	configPath := filepath.Join(path, configFileName)
+	if _, err := os.Stat(configPath); err != nil {
+		return false
+	}
+
+	k := koanf.New(".")
+	if err := k.Load(file.Provider(configPath), yaml.Parser()); err != nil {
+		return false
+	}
+	return k.Bool("manual") || k.Bool("example")
+}
+
+func isExampleStageDir(name string) bool {
+	lower := strings.ToLower(name)
+	return strings.HasPrefix(lower, "xx-") || strings.Contains(lower, "example")
 }
 
 // processStageDependencies adjusts the order of stages to ensure that all dependencies precede the dependent stages.

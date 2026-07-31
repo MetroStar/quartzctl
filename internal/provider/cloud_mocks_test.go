@@ -18,8 +18,9 @@ import "context"
 
 // TestCloudProviderClient is a mock implementation of the CloudProviderClient interface for testing purposes.
 type TestCloudProviderClient struct {
-	kubeconfig KubeconfigInfo   // Mock kubeconfig information.
-	errs       map[string]error // Mock errors for specific methods.
+	kubeconfig         KubeconfigInfo   // Mock kubeconfig information.
+	errs               map[string]error // Mock errors for specific methods.
+	stateBackendExists bool             // Mock state backend existence.
 }
 
 // TestCloudProviderCheckResult is a mock implementation of the ProviderCheckResult interface for testing purposes.
@@ -28,8 +29,9 @@ type TestCloudProviderCheckResult struct{}
 // NewTestCloudProviderClient creates a new instance of TestCloudProviderClient with default values.
 func NewTestCloudProviderClient() TestCloudProviderClient {
 	return TestCloudProviderClient{
-		kubeconfig: KubeconfigInfo{},
-		errs:       map[string]error{},
+		kubeconfig:         KubeconfigInfo{},
+		errs:               map[string]error{},
+		stateBackendExists: true,
 	}
 }
 
@@ -71,6 +73,12 @@ func (c TestCloudProviderClient) CreateStateBackend(ctx context.Context) error {
 // Returns a mock error if configured.
 func (c TestCloudProviderClient) DestroyStateBackend(ctx context.Context) error {
 	return c.errs["provider__cloud__DestroyStateBackend"]
+}
+
+// StateBackendExists returns the mock state backend existence flag for the test
+// cloud provider. Returns a mock error if configured.
+func (c TestCloudProviderClient) StateBackendExists(ctx context.Context) (bool, error) {
+	return c.stateBackendExists, c.errs["provider__cloud__StateBackendExists"]
 }
 
 // KubeconfigInfo returns mock kubeconfig information for the test cloud provider.

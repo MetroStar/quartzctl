@@ -21,12 +21,21 @@ import (
 	"fmt"
 	"io"
 	"math"
+	"net"
 	"net/http"
 	"strings"
+	"time"
 
 	"github.com/MetroStar/quartzctl/internal/config/schema"
 	"github.com/MetroStar/quartzctl/internal/log"
 )
+
+// Package-level variable: detected once at startup
+var isAWS bool
+
+func init() {
+	isAWS = detectAWSEnvironment()
+}
 
 // HttpStageCheck represents an HTTP-based stage check.
 type HttpStageCheck schema.StageChecksHttpConfig
@@ -34,8 +43,24 @@ type HttpStageCheck schema.StageChecksHttpConfig
 // Run executes the HTTP stage check by sending a GET request to the specified URL.
 // It validates the response status code and content based on the check configuration.
 func (c HttpStageCheck) Run(ctx context.Context, cfg schema.QuartzConfig) error {
+	// Use a custom DNS resolver to avoid systemd-resolved (127.0.0.53) negative
+	// caching issues. When the HTTP check starts before DNS records propagate, the
+	// local stub resolver caches NXDOMAIN responses and blocks retries from
+	// succeeding even after the record exists. Using the VPC resolver (169.254.169.253)
+	// with a short timeout avoids this problem on AWS; falls back to Google DNS.
+	// TODO: fix for outside of AWS VPC so local DNS cache won't work when records aren't created before checking.
+	resolver := &net.Resolver{
+		PreferGo: true,
+		Dial:     selectDNSDialer(),
+	}
+
 	tr := &http.Transport{
-		TLSClientConfig: &tls.Config{InsecureSkipVerify: c.Verify}, // #nosec G402
+		// lgtm[go/disabled-certificate-check]
+		TLSClientConfig: &tls.Config{InsecureSkipVerify: c.Insecure}, // #nosec G402
+		DialContext: (&net.Dialer{
+			Timeout:  10 * time.Second,
+			Resolver: resolver,
+		}).DialContext,
 	}
 	client := &http.Client{Transport: tr}
 
@@ -163,4 +188,37 @@ func (c HttpStageCheck) checkResponseStatus(url string, res *http.Response) (boo
 	}
 
 	return false, fmt.Errorf("HTTP status code check failed, %d %s", res.StatusCode, res.Status)
+}
+
+// selectDNSDialer returns the appropriate DNS resolver based on environment
+func selectDNSDialer() func(ctx context.Context, network, address string) (net.Conn, error) {
+	if isAWS {
+		return awsDNSDialer
+	}
+	return googleDNSDialer
+}
+
+func awsDNSDialer(ctx context.Context, network, address string) (net.Conn, error) {
+	d := net.Dialer{Timeout: 5 * time.Second}
+	return d.DialContext(ctx, "udp", "169.254.169.253:53")
+}
+
+func googleDNSDialer(ctx context.Context, network, address string) (net.Conn, error) {
+	d := net.Dialer{Timeout: 5 * time.Second}
+	return d.DialContext(ctx, "udp", "8.8.8.8:53")
+}
+
+// detectAWSEnvironment checks if running on AWS
+func detectAWSEnvironment() bool {
+	ctx, cancel := context.WithTimeout(context.Background(), 500*time.Millisecond)
+	defer cancel()
+
+	req, _ := http.NewRequestWithContext(ctx, "GET", "http://169.254.169.254/latest/meta-data/", nil)
+	client := &http.Client{Timeout: 500 * time.Millisecond}
+	resp, err := client.Do(req)
+	if err != nil {
+		return false
+	}
+	resp.Body.Close()
+	return resp.StatusCode == http.StatusOK
 }

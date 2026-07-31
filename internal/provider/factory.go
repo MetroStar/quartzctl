@@ -16,9 +16,13 @@ package provider
 
 import (
 	"context"
+	"encoding/base64"
+	"os"
 
 	"github.com/MetroStar/quartzctl/internal/config/schema"
+	"github.com/MetroStar/quartzctl/internal/log"
 	"github.com/MetroStar/quartzctl/internal/util"
+	"k8s.io/client-go/tools/clientcmd"
 )
 
 // ProviderFactory is responsible for creating and managing provider clients.
@@ -69,14 +73,18 @@ func (f *ProviderFactory) Kubernetes(ctx context.Context) (KubernetesProviderCli
 		return f.k8sClient, nil
 	}
 
-	cp, err := f.Cloud(ctx)
-	if err != nil {
-		return nil, err
-	}
+	i, found := kubeconfigInfoFromExistingFile(f.cfg)
+	if !found {
+		cp, err := f.Cloud(ctx)
+		if err != nil {
+			return nil, err
+		}
 
-	i, err := cp.KubeconfigInfo(ctx)
-	if err != nil {
-		return nil, err
+		kubeconfig, err := cp.KubeconfigInfo(ctx)
+		if err != nil {
+			return nil, err
+		}
+		i = kubeconfig
 	}
 
 	api, err := NewKubernetesApi(ctx, f.cfg, &i)
@@ -91,6 +99,55 @@ func (f *ProviderFactory) Kubernetes(ctx context.Context) (KubernetesProviderCli
 
 	f.k8sClient = c
 	return f.k8sClient, nil
+}
+
+// kubeconfigInfoFromExistingFile reuses the already-written kubeconfig metadata
+// when possible. This avoids repeated EKS DescribeCluster calls during
+// convergence/cleanup, which in turn avoids drifting into an ambient instance
+// role that can mint a Kubernetes exec token but cannot describe the cluster.
+func kubeconfigInfoFromExistingFile(cfg schema.QuartzConfig) (KubeconfigInfo, bool) {
+	if cfg.Auth.ServiceAccount.Enabled {
+		// Service-account exchange needs a fresh cloud token first.
+		return KubeconfigInfo{}, false
+	}
+
+	path := cfg.KubeconfigPath()
+	if _, err := os.Stat(path); err != nil {
+		return KubeconfigInfo{}, false
+	}
+
+	kc, err := clientcmd.LoadFromFile(path)
+	if err != nil {
+		log.Debug("Existing kubeconfig could not be loaded, falling back to cloud metadata", "path", path, "error", err)
+		return KubeconfigInfo{}, false
+	}
+
+	ctxName := kc.CurrentContext
+	ctxInfo := kc.Contexts[ctxName]
+	if ctxName == "" || ctxInfo == nil {
+		return KubeconfigInfo{}, false
+	}
+
+	cluster := kc.Clusters[ctxInfo.Cluster]
+	if cluster == nil || cluster.Server == "" || len(cluster.CertificateAuthorityData) == 0 {
+		return KubeconfigInfo{}, false
+	}
+
+	userName := ctxInfo.AuthInfo
+	token := ""
+	if user := kc.AuthInfos[userName]; user != nil {
+		token = user.Token
+	}
+
+	log.Debug("Using existing kubeconfig metadata", "path", path, "context", ctxName, "cluster", ctxInfo.Cluster)
+	return KubeconfigInfo{
+		Context:              ctxName,
+		User:                 userName,
+		Cluster:              ctxInfo.Cluster,
+		Endpoint:             cluster.Server,
+		CertificateAuthority: base64.StdEncoding.EncodeToString(cluster.CertificateAuthorityData),
+		Token:                token,
+	}, true
 }
 
 // Cloud returns the cloud provider client, initializing it if necessary.

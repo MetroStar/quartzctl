@@ -23,11 +23,7 @@ Dockerfile
 .dockerignore
 
 coverage.txt
-.task/
 .envrc
-.devbox/
-devbox.*
 .github/
 .goreleaser.yaml
-Taskfile.yml
 *.md

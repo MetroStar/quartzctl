@@ -15,13 +15,42 @@
 package cmd
 
 import (
+	"compress/gzip"
 	"context"
+	"encoding/json"
+	"fmt"
+	"io"
+	"os"
+	"path/filepath"
 	"slices"
+	"strconv"
+	"strings"
+	"sync"
 	"time"
+	"unicode"
 
+	"github.com/MetroStar/quartzctl/internal/config/schema"
 	"github.com/MetroStar/quartzctl/internal/log"
+	"github.com/MetroStar/quartzctl/internal/provider"
+	"github.com/MetroStar/quartzctl/internal/tofu"
 	"github.com/MetroStar/quartzctl/internal/util"
 	"github.com/urfave/cli/v3"
+	apierrors "k8s.io/apimachinery/pkg/api/errors"
+)
+
+const (
+	cleanupStatusConfigMapName = "quartz-cleanup-status"
+	ollamaNamespace            = "ollama"
+	modelWarmerStatusCM        = "ollama-model-warmer-status"
+	appDeliveryReadinessCM     = "quartz-app-delivery-readiness"
+)
+
+const (
+	logPreflightMinFreeBytes     = uint64(2 * 1024 * 1024 * 1024)
+	logPreflightCompressMinBytes = int64(100 * 1024 * 1024)
+	logPreflightCompressMinAge   = 24 * time.Hour
+	logPreflightArchiveMaxAge    = 14 * 24 * time.Hour
+	logPreflightArchiveRetain    = 10
 )
 
 // NewRootInstallCommand creates the "install" root command for the CLI.
@@ -37,8 +66,19 @@ func NewRootInstallCommand(p *CommandParams) RootCommandResult {
 		Command: &cli.Command{
 			Name:  "install",
 			Usage: "Perform a full install/update of the system",
+			Flags: []cli.Flag{
+				&cli.StringFlag{Name: "resume-from", Aliases: []string{"r"}, Usage: "Resume installation from a specific stage ID (skips earlier stages)"},
+				&cli.BoolFlag{Name: "allow-deferral", Usage: "Enable OpenTofu deferred actions for resources that cannot be fully resolved in one pass"},
+				&cli.BoolFlag{Name: "wait-for-models", Usage: "Wait for Ollama model warming to finish before reporting install success"},
+				&cli.BoolFlag{Name: "yes", Aliases: []string{"y"}, Usage: "Skip the interactive confirmation prompt (assume yes)"},
+			},
 			Action: func(ctx context.Context, ccmd *cli.Command) error {
-				err := Install(ctx, p)
+				resumeFrom := ccmd.String("resume-from")
+				allowDeferral := ccmd.Bool("allow-deferral")
+				p.allowDeferral = allowDeferral
+				p.waitForModels = ccmd.Bool("wait-for-models")
+				p.assumeYes = ccmd.Bool("yes")
+				err := Install(ctx, p, resumeFrom)
 				if err != nil {
 					return err
 				}
@@ -63,12 +103,12 @@ func NewRootCleanCommand(p *CommandParams) RootCommandResult {
 			Name:  "clean",
 			Usage: "Perform a full cleanup/teardown of the system",
 			Flags: []cli.Flag{
-				&cli.BoolFlag{Name: "refresh", Aliases: []string{"r"}, Usage: "refresh", Value: false},
+				&cli.BoolFlag{Name: "refresh", Aliases: []string{"r"}, Usage: "refresh (always enabled)", Value: true},
+				&cli.BoolFlag{Name: "yes", Aliases: []string{"y"}, Usage: "Skip the interactive confirmation prompt (assume yes)"},
 			},
 			Action: func(ctx context.Context, ccmd *cli.Command) error {
-				refresh := ccmd.Bool("refresh")
-
-				err := Clean(ctx, refresh, p)
+				p.assumeYes = ccmd.Bool("yes")
+				err := Clean(ctx, p)
 				if err != nil {
 					return err
 				}
@@ -80,7 +120,7 @@ func NewRootCleanCommand(p *CommandParams) RootCommandResult {
 }
 
 // Install sets up the Quartz environment by initializing and applying all stages.
-// This includes preparing the account, creating the Terraform backend, and applying configurations.
+// This includes preparing the account, creating the OpenTofu backend, and applying configurations.
 //
 // Parameters:
 //   - ctx: The context for the operation.
@@ -88,64 +128,1221 @@ func NewRootCleanCommand(p *CommandParams) RootCommandResult {
 //
 // Returns:
 //   - error: An error if the installation fails, otherwise nil.
-func Install(ctx context.Context, p *CommandParams) error {
+func Install(ctx context.Context, p *CommandParams, resumeFrom string) (err error) {
 	log.Debug("Entering", "command", "install")
 	defer log.Debug("Completed", "command", "install")
 
 	Banner()
 
-	err := Confirm(ctx, "Would you like to install Quartz cluster?", p)
+	installStart := time.Now()
+	installTiming := make(map[string]time.Duration)
+	defer func() {
+		printInstallTimingSummary(installTiming, time.Since(installStart), err)
+	}()
+
+	err = Confirm(ctx, "Would you like to install Quartz cluster?", p)
 	if err != nil {
 		// just means the user said no
 		return err
 	}
 
+	stepStart := time.Now()
+	if err = LocalInstallPreflight(p); err != nil {
+		installTiming["local-preflight"] = time.Since(stepStart)
+		return err
+	}
+	installTiming["local-preflight"] = time.Since(stepStart)
+
+	// Preflight validation: check IAM credentials and cloud connectivity
+	stepStart = time.Now()
+	err = Preflight(ctx, p)
+	installTiming["cloud-preflight"] = time.Since(stepStart)
+	if err != nil {
+		return err
+	}
+
+	stepStart = time.Now()
 	err = PrepareAccount(ctx, p)
+	installTiming["prepare-account"] = time.Since(stepStart)
 	if err != nil {
 		return err
 	}
 
+	stepStart = time.Now()
 	err = TfCreateBackend(ctx, p)
+	installTiming["create-backend"] = time.Since(stepStart)
 	if err != nil {
 		return err
 	}
 
-	for _, s := range p.Settings().Config.StagesOrdered() {
+	stages := p.Settings().Config.StagesOrdered()
+
+	// If --resume-from is specified, skip stages until we reach the target
+	if resumeFrom != "" {
+		found := false
+		for i, s := range stages {
+			if strings.EqualFold(s.Id, resumeFrom) {
+				stages = stages[i:]
+				found = true
+				util.Msgf("Resuming installation from stage: %s", resumeFrom)
+				break
+			}
+		}
+		if !found {
+			return fmt.Errorf("stage %q not found; available stages: %s", resumeFrom, stageIds(p.Settings().Config.StagesOrdered()))
+		}
+	}
+
+	// Load checkpoint to detect previously completed stages
+	cp := loadCheckpoint(p)
+
+	for _, s := range stages {
+		stageStart := time.Now()
+		stageKey := "stage-" + s.Id
+		finishStageTiming := func() {
+			if _, ok := installTiming[stageKey]; !ok {
+				installTiming[stageKey] = time.Since(stageStart)
+			}
+		}
+
+		if cp.isCompleted(s.Id) {
+			// A checkpointed stage is not blindly skipped. It may have drifted
+			// since it last completed (manual console edits, template/var
+			// changes, or a partial prior apply). Run a plan and only skip when
+			// the stage is genuinely in sync; otherwise re-apply so a resume
+			// converges the cluster instead of silently leaving it stale.
+			drifted, derr := stageHasDrift(ctx, s.Id, p)
+			if derr != nil {
+				// Drift detection is best-effort. If it fails (e.g. transient
+				// backend error), preserve the prior fast-resume behavior and
+				// skip rather than blocking the whole install.
+				util.Msgf("Stage %s already completed; drift check failed (%v), skipping", s.Id, derr)
+				finishStageTiming()
+				continue
+			}
+			if !drifted {
+				util.Msgf("Stage %s already completed and in sync, skipping", s.Id)
+				finishStageTiming()
+				continue
+			}
+			util.Msgf("Stage %s already completed but drift detected, re-applying", s.Id)
+			// Fall through to re-apply below.
+		}
+
 		err = TfInit(ctx, s.Id, p)
 		if err != nil {
+			finishStageTiming()
 			return err
 		}
 
-		err = TfApply(ctx, s.Id, p)
+		err = TfApplyWithRetry(ctx, s.Id, p, 2, 30*time.Second)
 		if err != nil {
+			// The core stage bootstraps the umbrella Helm release once and then
+			// hands ownership to Flux, which re-renders from git and stamps the
+			// release version with the git revision (e.g. "1.0.0+<sha>"). Any
+			// later apply against a live, Flux-managed cluster sees the bare
+			// bootstrap chart "1.0.0" versus Flux's "1.0.0+<sha>" and the Helm
+			// provider aborts at plan time with "Planned version is different
+			// from configured version". This is expected and NOT a failure:
+			// Flux already owns the release, so the bootstrap apply is a no-op
+			// (re-applying it would prune Flux's entire rendered stack). Treat
+			// the stage as satisfied so the install converges instead of
+			// aborting. A genuinely fresh install never hits this branch because
+			// Flux has not yet adopted the release.
+			if isFluxOwnedReleaseDrift(err) {
+				log.Debug("Apply reported Flux-owned release version drift; treating stage as complete",
+					"stage", s.Id, "error", err)
+				util.Msgf("Stage %s bootstrap Helm release is already owned by Flux; the local chart version mismatch is expected and not an install failure", s.Id)
+
+				// The bootstrap apply is a no-op, but the stage's co-resources
+				// (e.g. the values overlay Secret consumed by the release via
+				// valuesFrom) still need to converge so day-2 quartz.yaml changes
+				// take effect. An untargeted apply can't reach them: the Helm
+				// provider aborts the whole plan on the version mismatch before
+				// any resource applies. Fall back to a targeted apply of the
+				// stage's declared convergence resources, which excludes the
+				// Flux-owned release and so avoids the abort.
+				if targets := s.Flux.ConvergeTargets; len(targets) > 0 {
+					if cerr := TfApplyTargeted(ctx, s.Id, p, targets); cerr != nil {
+						log.Warn("Targeted convergence apply failed for Flux-owned stage",
+							"stage", s.Id, "targets", targets, "error", cerr)
+						finishStageTiming()
+						return cerr
+					}
+					util.Msgf("Stage %s co-resources converged via targeted apply", s.Id)
+				}
+
+				cp.markCompleted(s.Id)
+				cp.save(p)
+				finishStageTiming()
+				continue
+			}
+			finishStageTiming()
 			return err
 		}
+
+		cp.markCompleted(s.Id)
+		cp.save(p)
+		finishStageTiming()
 	}
 
+	stepStart = time.Now()
 	err = RefreshSecrets(ctx, p)
+	installTiming["refresh-secrets"] = time.Since(stepStart)
 	if err != nil {
 		return err
 	}
 
-	err = ClusterInfo(ctx, p)
+	// Final convergence gate. Per-stage post-checks only verify that stage's
+	// own HelmRelease, so without this an install can report success while
+	// sibling releases are still failing to reconcile. Wait for every Flux
+	// HelmRelease to become Ready (or fail with the offending releases named)
+	// before declaring the install successful. Runs after RefreshSecrets so
+	// external-secret-dependent releases have their inputs in place. The
+	// checkpoint is intentionally cleared only AFTER this gate passes so a
+	// failed convergence still allows a fast drift-aware resume.
+	stepStart = time.Now()
+	err = waitForClusterConvergence(ctx, p)
+	installTiming["cluster-convergence"] = time.Since(stepStart)
 	if err != nil {
 		return err
+	}
+
+	stepStart = time.Now()
+	err = waitForModelWarmerIfRequested(ctx, p)
+	installTiming["ollama-model-wait"] = time.Since(stepStart)
+	if err != nil {
+		return err
+	}
+
+	// Clear checkpoint on successful completion.
+	cp.clear(p)
+
+	stepStart = time.Now()
+	err = ClusterInfo(ctx, p)
+	installTiming["cluster-info"] = time.Since(stepStart)
+	if err != nil {
+		return err
+	}
+
+	if !installWaitForModels(p) {
+		stepStart = time.Now()
+		if !p.Settings().Config.Internal.Installer.Summary.Enabled {
+			ReportModelWarmerStatus(ctx, p)
+		}
+		installTiming["model-warmer-status"] = time.Since(stepStart)
 	}
 
 	return nil
 }
 
+// LocalInstallPreflight keeps local install prerequisites from failing late in
+// OpenTofu. It never deletes logs automatically; it only compresses large old
+// *.tf.log files and warns when the filesystem is still tight.
+func LocalInstallPreflight(p *CommandParams) error {
+	cfg := p.Settings().Config
+	logDirs := installLogDirs(cfg.Name, cfg.Log)
+	if len(logDirs) == 0 {
+		return nil
+	}
+
+	var compressed []string
+	var pruned []string
+	for _, dir := range logDirs {
+		items, err := compressOldTofuLogs(dir, time.Now())
+		if err != nil {
+			log.Warn("Local log preflight failed", "path", dir, "error", err)
+			continue
+		}
+		compressed = append(compressed, items...)
+		removed, err := pruneOldTofuLogArchives(dir, time.Now())
+		if err != nil {
+			log.Warn("Local log archive prune failed", "path", dir, "error", err)
+			continue
+		}
+		pruned = append(pruned, removed...)
+	}
+	if len(compressed) > 0 {
+		util.Msgf("Compressed %d old OpenTofu log file(s) to keep local disk space healthy", len(compressed))
+	}
+	if len(pruned) > 0 {
+		util.Msgf("Removed %d older OpenTofu log archive(s) after retaining the most recent %d per log directory", len(pruned), logPreflightArchiveRetain)
+	}
+
+	if root, free, err := minFreeSpace(logDirs); err == nil && free < logPreflightMinFreeBytes {
+		util.Msgf("Local disk space is low at %s: %s free. Consider removing old logs or increasing disk before a large install.",
+			root, formatBytes(free))
+	} else if err != nil {
+		log.Debug("Local disk preflight free-space check failed", "error", err)
+	}
+
+	return nil
+}
+
+func installLogDirs(clusterName string, cfg log.LogOptionsConfig) []string {
+	paths := []string{cfg.File.Path, cfg.Tofu.Path}
+	seen := map[string]bool{}
+	var dirs []string
+	for _, p := range paths {
+		p = strings.TrimSpace(expandLogPath(p, clusterName))
+		if p == "" {
+			continue
+		}
+		dir := filepath.Dir(p)
+		if dir == "." || dir == "" {
+			dir = p
+		}
+		if !seen[dir] {
+			seen[dir] = true
+			dirs = append(dirs, dir)
+		}
+	}
+	return dirs
+}
+
+func expandLogPath(path string, clusterName string) string {
+	date := time.Now().Format("2006-01-02")
+	path = strings.ReplaceAll(path, "$name", clusterName)
+	path = strings.ReplaceAll(path, "$date", date)
+	return path
+}
+
+func compressOldTofuLogs(dir string, now time.Time) ([]string, error) {
+	entries, err := os.ReadDir(dir)
+	if os.IsNotExist(err) {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, err
+	}
+
+	var compressed []string
+	for _, entry := range entries {
+		if entry.IsDir() {
+			continue
+		}
+		name := entry.Name()
+		if !strings.HasSuffix(name, ".tf.log") {
+			continue
+		}
+		path := filepath.Join(dir, name)
+		info, err := entry.Info()
+		if err != nil {
+			return compressed, err
+		}
+		if info.Size() < logPreflightCompressMinBytes || now.Sub(info.ModTime()) < logPreflightCompressMinAge {
+			continue
+		}
+		if err := gzipFile(path); err != nil {
+			return compressed, err
+		}
+		compressed = append(compressed, path)
+	}
+	return compressed, nil
+}
+
+func gzipFile(path string) error {
+	in, err := os.Open(path) // #nosec G304 - operator-configured local log path
+	if err != nil {
+		return err
+	}
+	defer in.Close()
+
+	outPath := path + ".gz"
+	out, err := os.OpenFile(outPath, os.O_CREATE|os.O_EXCL|os.O_WRONLY, 0640) // #nosec G304
+	if err != nil {
+		if os.IsExist(err) {
+			return nil
+		}
+		return err
+	}
+	ok := false
+	defer func() {
+		out.Close()
+		if !ok {
+			os.Remove(outPath) //nolint:errcheck
+		}
+	}()
+
+	zw := gzip.NewWriter(out)
+	if _, err := io.Copy(zw, in); err != nil {
+		zw.Close() //nolint:errcheck
+		return err
+	}
+	if err := zw.Close(); err != nil {
+		return err
+	}
+	if err := out.Close(); err != nil {
+		return err
+	}
+	if err := os.Chtimes(outPath, time.Now(), time.Now()); err != nil {
+		return err
+	}
+	ok = true
+	return os.Remove(path)
+}
+
+func pruneOldTofuLogArchives(dir string, now time.Time) ([]string, error) {
+	entries, err := os.ReadDir(dir)
+	if os.IsNotExist(err) {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, err
+	}
+
+	type archive struct {
+		path    string
+		modTime time.Time
+	}
+	var archives []archive
+	for _, entry := range entries {
+		if entry.IsDir() {
+			continue
+		}
+		name := entry.Name()
+		if !strings.Contains(name, ".tf.log") || !strings.HasSuffix(name, ".gz") {
+			continue
+		}
+		info, err := entry.Info()
+		if err != nil {
+			return nil, err
+		}
+		archives = append(archives, archive{
+			path:    filepath.Join(dir, name),
+			modTime: info.ModTime(),
+		})
+	}
+	if len(archives) == 0 {
+		return nil, nil
+	}
+
+	slices.SortFunc(archives, func(a, b archive) int {
+		if a.modTime.Equal(b.modTime) {
+			return strings.Compare(a.path, b.path)
+		}
+		if a.modTime.After(b.modTime) {
+			return -1
+		}
+		return 1
+	})
+
+	var removed []string
+	for i, item := range archives {
+		if i < logPreflightArchiveRetain && now.Sub(item.modTime) < logPreflightArchiveMaxAge {
+			continue
+		}
+		if err := os.Remove(item.path); err != nil && !os.IsNotExist(err) {
+			return removed, err
+		}
+		removed = append(removed, item.path)
+	}
+	return removed, nil
+}
+
+func formatBytes(n uint64) string {
+	const unit = 1024
+	if n < unit {
+		return fmt.Sprintf("%d B", n)
+	}
+	div, exp := uint64(unit), 0
+	for q := n / unit; q >= unit; q /= unit {
+		div *= unit
+		exp++
+	}
+	return fmt.Sprintf("%.1f %ciB", float64(n)/float64(div), "KMGTPE"[exp])
+}
+
+type modelWarmerStatus struct {
+	Phase                string `json:"phase"`
+	Step                 string `json:"step"`
+	Model                string `json:"model"`
+	Detail               string `json:"detail"`
+	DesiredModels        string `json:"desiredModels"`
+	DesiredCount         int    `json:"desiredCount"`
+	PulledModels         string `json:"pulledModels"`
+	PulledCount          int    `json:"pulledCount"`
+	WarmedModels         string `json:"warmedModels"`
+	WarmedCount          int    `json:"warmedCount"`
+	SkippedGpuWarmModels string `json:"skippedGpuWarmModels"`
+	SkippedGpuWarmCount  int    `json:"skippedGpuWarmCount"`
+	PersistentReady      bool   `json:"persistentReady"`
+	CompletedAt          string `json:"completedAt"`
+	UpdatedAt            string `json:"updatedAt"`
+}
+
+type appDeliveryReadinessStatus struct {
+	Phase                 string   `json:"phase"`
+	BootstrapReady        bool     `json:"bootstrapReady"`
+	ArgocdNamespace       string   `json:"argocdNamespace"`
+	ExpectedApplications  int      `json:"expectedApplications"`
+	ObservedApplications  int      `json:"observedApplications"`
+	JenkinsAuthConfigured bool     `json:"jenkinsAuthConfigured"`
+	Missing               []string `json:"missing"`
+	UpdatedAt             string   `json:"updatedAt"`
+	Summary               string   `json:"summary"`
+}
+
+func ReportModelWarmerStatus(ctx context.Context, p *CommandParams) {
+	status, ok, err := readModelWarmerStatusFromParams(ctx, p)
+	if err != nil {
+		log.Debug("Model warmer status unavailable", "error", err)
+		return
+	}
+	if !ok {
+		return
+	}
+	switch strings.ToLower(status.Phase) {
+	case "succeeded":
+		completedAt := modelWarmerCompletionTime(status)
+		summary := modelWarmerReadinessSummary(status)
+		if completedAt != "" {
+			util.Msgf("Ollama model warmer complete at %s: %s", completedAt, summary)
+		} else {
+			util.Msgf("Ollama model warmer complete: %s", summary)
+		}
+	case "failed":
+		util.Msgf(
+			"Ollama model warmer failed during %s for %s: %s (%s)",
+			status.Step, status.Model, status.Detail, modelWarmerReadinessSummary(status),
+		)
+	default:
+		progress := modelWarmerProgress(status)
+		readiness := modelWarmerReadinessSummary(status)
+		if updatedAt := strings.TrimSpace(status.UpdatedAt); updatedAt != "" {
+			if status.PersistentReady {
+				util.Msgf("Ollama persistent model store is ready (%s); best-effort GPU warm is still running in the background (%s, last update %s).",
+					readiness, progress, updatedAt)
+			} else {
+				util.Msgf("Ollama persistent model store is not ready yet (%s, %s, last update %s). AI endpoints may be up before every model is ready.",
+					readiness, progress, updatedAt)
+			}
+		} else {
+			if status.PersistentReady {
+				util.Msgf("Ollama persistent model store is ready (%s); best-effort GPU warm is still running in the background (%s).",
+					readiness, progress)
+			} else {
+				util.Msgf("Ollama persistent model store is not ready yet (%s, %s). AI endpoints may be up before every model is ready.",
+					readiness, progress)
+			}
+		}
+	}
+}
+
+func ReportAppDeliveryReadiness(ctx context.Context, p *CommandParams) {
+	status, ok, err := readAppDeliveryReadinessFromParams(ctx, p)
+	if err != nil {
+		log.Debug("App-delivery readiness unavailable", "error", err)
+		return
+	}
+	if !ok {
+		return
+	}
+
+	summary := strings.TrimSpace(status.Summary)
+	if summary == "" {
+		summary = fmt.Sprintf(
+			"App delivery %s: %d/%d generated Argo CD Applications observed",
+			strings.ToLower(fallback(status.Phase, "pending")),
+			status.ObservedApplications,
+			status.ExpectedApplications,
+		)
+	}
+	if updatedAt := strings.TrimSpace(status.UpdatedAt); updatedAt != "" {
+		util.Msgf("%s (last update %s)", summary, updatedAt)
+		return
+	}
+	util.Msg(summary)
+}
+
+func modelWarmerCompletionTime(status modelWarmerStatus) string {
+	if completedAt := strings.TrimSpace(status.CompletedAt); completedAt != "" {
+		return completedAt
+	}
+	return strings.TrimSpace(status.UpdatedAt)
+}
+
+func readModelWarmerStatusFromParams(ctx context.Context, p *CommandParams) (modelWarmerStatus, bool, error) {
+	kube, err := p.Provider().Kubernetes(ctx)
+	if err != nil {
+		return modelWarmerStatus{}, false, fmt.Errorf("cluster not reachable: %w", err)
+	}
+	return readModelWarmerStatus(ctx, kube)
+}
+
+func readModelWarmerStatus(ctx context.Context, kube provider.KubernetesProviderClient) (modelWarmerStatus, bool, error) {
+	data, err := kube.GetConfigMapValue(ctx, ollamaNamespace, modelWarmerStatusCM)
+	if err != nil {
+		return modelWarmerStatus{}, false, err
+	}
+	raw := sanitizeModelWarmerStatusJSON(data["status.json"])
+	if raw == "" {
+		return modelWarmerStatus{}, false, nil
+	}
+	var status modelWarmerStatus
+	if err := json.Unmarshal([]byte(raw), &status); err != nil {
+		return modelWarmerStatus{}, false, err
+	}
+	return status, true, nil
+}
+
+func readAppDeliveryReadinessFromParams(ctx context.Context, p *CommandParams) (appDeliveryReadinessStatus, bool, error) {
+	kube, err := p.Provider().Kubernetes(ctx)
+	if err != nil {
+		return appDeliveryReadinessStatus{}, false, fmt.Errorf("cluster not reachable: %w", err)
+	}
+	return readAppDeliveryReadiness(ctx, kube)
+}
+
+func readAppDeliveryReadiness(ctx context.Context, kube provider.KubernetesProviderClient) (appDeliveryReadinessStatus, bool, error) {
+	data, err := kube.GetConfigMapValue(ctx, "quartz", appDeliveryReadinessCM)
+	if err != nil {
+		return appDeliveryReadinessStatus{}, false, err
+	}
+	raw := strings.TrimSpace(data["status.json"])
+	if raw == "" {
+		return appDeliveryReadinessStatus{}, false, nil
+	}
+	var status appDeliveryReadinessStatus
+	if err := json.Unmarshal([]byte(raw), &status); err != nil {
+		return appDeliveryReadinessStatus{}, false, err
+	}
+	return status, true, nil
+}
+
+func sanitizeModelWarmerStatusJSON(raw string) string {
+	raw = strings.TrimSpace(raw)
+	if raw == "" {
+		return ""
+	}
+	var cleaned strings.Builder
+	cleaned.Grow(len(raw))
+	for i := 0; i < len(raw); i++ {
+		if raw[i] == 0x1b {
+			// Strip ANSI escape sequences such as "\x1b[0m" that can leak into
+			// ConfigMap-backed status output from shell-oriented scripts.
+			if i+1 < len(raw) && raw[i+1] == '[' {
+				i += 2
+				for ; i < len(raw); i++ {
+					if raw[i] >= 0x40 && raw[i] <= 0x7e {
+						break
+					}
+				}
+			}
+			continue
+		}
+		r := rune(raw[i])
+		if r == '\n' || r == '\r' || r == '\t' {
+			cleaned.WriteRune(r)
+			continue
+		}
+		if r < 0x20 || r == 0x7f {
+			continue
+		}
+		cleaned.WriteRune(r)
+	}
+	return strings.TrimSpace(cleaned.String())
+}
+
+func waitForModelWarmerIfRequested(ctx context.Context, p *CommandParams) error {
+	if !installWaitForModels(p) {
+		return nil
+	}
+
+	kube, err := p.Provider().Kubernetes(ctx)
+	if err != nil {
+		return fmt.Errorf("wait for Ollama models: cluster not reachable: %w", err)
+	}
+
+	timeout := modelWarmerWaitTimeout()
+	if timeout == 0 {
+		util.Msg("Ollama model wait disabled (QUARTZ_MODEL_WARMER_TIMEOUT=0)")
+		return nil
+	}
+	interval := modelWarmerWaitInterval()
+	deadline := time.Now().Add(timeout)
+	lastProgress := ""
+
+	util.Hdr("Waiting for Ollama models")
+	for {
+		status, ok, readErr := readModelWarmerStatus(ctx, kube)
+		if readErr != nil {
+			log.Debug("Model warmer status unavailable while waiting", "error", readErr)
+		}
+		if ok {
+			switch strings.ToLower(status.Phase) {
+			case "succeeded":
+				if !modelListContainsAll(status.DesiredModels, status.PulledModels) {
+					return fmt.Errorf("ollama model warmer succeeded but pulled models %q do not include desired models %q",
+						status.PulledModels, status.DesiredModels)
+				}
+				util.Msgf("Ollama model warmer complete: %s", modelWarmerReadinessSummary(status))
+				return nil
+			case "failed":
+				return fmt.Errorf("ollama model warmer failed during %s for %s: %s",
+					status.Step, status.Model, status.Detail)
+			default:
+				progress := modelWarmerProgress(status)
+				if progress != "" && progress != lastProgress {
+					util.Msgf("Ollama model warming: %s (%s)", progress, modelWarmerReadinessSummary(status))
+					lastProgress = progress
+				}
+			}
+		} else if lastProgress == "" {
+			util.Msgf("Waiting for %s/%s to publish model warmer status", ollamaNamespace, modelWarmerStatusCM)
+			lastProgress = "waiting-for-status"
+		}
+
+		if time.Now().After(deadline) {
+			return fmt.Errorf("timed out after %s waiting for Ollama model warmer to complete", timeout)
+		}
+
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		case <-time.After(interval):
+		}
+	}
+}
+
+func installWaitForModels(p *CommandParams) bool {
+	if p != nil && p.waitForModels {
+		return true
+	}
+	raw := strings.TrimSpace(os.Getenv("QUARTZ_WAIT_FOR_MODELS"))
+	if raw == "" {
+		return false
+	}
+	enabled, err := strconv.ParseBool(raw)
+	return err == nil && enabled
+}
+
+func modelWarmerWaitTimeout() time.Duration {
+	const def = 90 * time.Minute
+	if raw := strings.TrimSpace(os.Getenv("QUARTZ_MODEL_WARMER_TIMEOUT")); raw != "" {
+		if d, err := time.ParseDuration(raw); err == nil && d >= 0 {
+			return d
+		}
+	}
+	return def
+}
+
+func modelWarmerWaitInterval() time.Duration {
+	const def = 30 * time.Second
+	if raw := strings.TrimSpace(os.Getenv("QUARTZ_MODEL_WARMER_INTERVAL")); raw != "" {
+		if d, err := time.ParseDuration(raw); err == nil && d > 0 {
+			return d
+		}
+	}
+	return def
+}
+
+func modelWarmerProgress(status modelWarmerStatus) string {
+	step := sanitizeModelWarmerText(status.Step)
+	target := sanitizeModelWarmerText(status.Model)
+	if target == "" {
+		target = sanitizeModelWarmerText(status.DesiredModels)
+	}
+	detail := sanitizeModelWarmerText(status.Detail)
+	switch {
+	case target != "" && detail != "":
+		return fmt.Sprintf("%s %s: %s", step, target, detail)
+	case target != "":
+		return strings.TrimSpace(fmt.Sprintf("%s %s", step, target))
+	case detail != "":
+		if step == "" {
+			return detail
+		}
+		return fmt.Sprintf("%s: %s", step, detail)
+	default:
+		return step
+	}
+}
+
+func modelWarmerReadinessSummary(status modelWarmerStatus) string {
+	desiredCount := status.DesiredCount
+	if desiredCount == 0 {
+		desiredCount = len(splitModelList(status.DesiredModels))
+	}
+	pulledCount := status.PulledCount
+	if pulledCount == 0 {
+		pulledCount = len(splitModelList(status.PulledModels))
+	}
+	warmedCount := status.WarmedCount
+	if warmedCount == 0 {
+		warmedCount = len(splitModelList(status.WarmedModels))
+	}
+	skippedCount := status.SkippedGpuWarmCount
+	if skippedCount == 0 {
+		skippedCount = len(splitModelList(status.SkippedGpuWarmModels))
+	}
+
+	totalPersistedTarget := desiredCount
+	if pulledCount > totalPersistedTarget {
+		totalPersistedTarget = pulledCount
+	}
+	persisted := fmt.Sprintf("%d/%d persisted", pulledCount, totalPersistedTarget)
+	if desiredCount == 0 {
+		persisted = fallback(status.PulledModels, status.DesiredModels)
+	}
+
+	var parts []string
+	parts = append(parts, persisted)
+	if desiredCount > 0 {
+		parts = append(parts, fmt.Sprintf("%d/%d GPU-warmed", warmedCount, desiredCount))
+	}
+	if skippedCount > 0 {
+		parts = append(parts, fmt.Sprintf("%d skipped GPU warm", skippedCount))
+	}
+	models := fallback(status.PulledModels, status.DesiredModels)
+	if strings.TrimSpace(models) != "" {
+		parts = append(parts, models)
+	}
+	return strings.Join(parts, "; ")
+}
+
+func splitModelList(raw string) []string {
+	var models []string
+	for _, part := range strings.Split(raw, ",") {
+		model := strings.TrimSpace(part)
+		if model != "" {
+			models = append(models, model)
+		}
+	}
+	return models
+}
+
+func modelListContainsAll(desiredRaw string, pulledRaw string) bool {
+	desired := splitModelList(desiredRaw)
+	if len(desired) == 0 {
+		return true
+	}
+	pulled := map[string]bool{}
+	for _, model := range splitModelList(pulledRaw) {
+		pulled[model] = true
+	}
+	for _, model := range desired {
+		if !pulled[model] {
+			return false
+		}
+	}
+	return true
+}
+
+func fallback(first, second string) string {
+	if strings.TrimSpace(first) != "" {
+		return first
+	}
+	return second
+}
+
+func sanitizeModelWarmerText(raw string) string {
+	raw = strings.TrimSpace(raw)
+	if raw == "" {
+		return ""
+	}
+
+	var cleaned strings.Builder
+	cleaned.Grow(len(raw))
+	lastSpace := false
+	for _, r := range raw {
+		switch {
+		case r >= 'a' && r <= 'z', r >= 'A' && r <= 'Z', r >= '0' && r <= '9':
+			cleaned.WriteRune(r)
+			lastSpace = false
+		case strings.ContainsRune(" .,:;/%+-_()[]{}=#", r):
+			if r == ' ' {
+				if lastSpace {
+					continue
+				}
+				lastSpace = true
+			} else {
+				lastSpace = false
+			}
+			cleaned.WriteRune(r)
+		case unicode.IsSpace(r):
+			if lastSpace {
+				continue
+			}
+			cleaned.WriteByte(' ')
+			lastSpace = true
+		default:
+			if lastSpace {
+				continue
+			}
+			cleaned.WriteByte(' ')
+			lastSpace = true
+		}
+	}
+
+	out := strings.Join(strings.Fields(cleaned.String()), " ")
+	replacer := strings.NewReplacer(" :", ":", " ,", ",", " .", ".", " ;", ";", " /", "/")
+	return strings.TrimSpace(replacer.Replace(out))
+}
+
+// stageIds returns a comma-separated list of stage IDs for error messages.
+func stageIds(stages []schema.StageConfig) string {
+	ids := make([]string, len(stages))
+	for i, s := range stages {
+		ids[i] = s.Id
+	}
+	return strings.Join(ids, ", ")
+}
+
+// helmConvergenceTimeout returns the overall budget for the post-install
+// HelmRelease convergence gate, and whether it was set explicitly by the
+// operator. Defaults to 30m; override with QUARTZ_CONVERGENCE_TIMEOUT (e.g.
+// "45m"). Set to "0" to disable the gate.
+//
+// When NOT set explicitly, the returned value is only a floor: the gate raises
+// it to fit the slowest HelmRelease's own spec.timeout (see adaptiveConvergenceTimeout),
+// because a release that Flux legitimately allows 90m must not be failed by a
+// gate that only waits 30m. An explicit value is always honored verbatim.
+func helmConvergenceTimeout() (time.Duration, bool) {
+	const def = 30 * time.Minute
+	if v := os.Getenv("QUARTZ_CONVERGENCE_TIMEOUT"); v != "" {
+		if d, err := time.ParseDuration(v); err == nil && d >= 0 {
+			return d, true
+		}
+	}
+	return def, false
+}
+
+// adaptiveConvergenceTimeout sizes the gate's wait to the slowest release. A
+// release with spec.timeout T may consume the whole T on its first attempt and
+// then remediate (retry) once before genuinely converging; the resulting
+// workloads then need the stabilize grace to roll out. Budgeting 2*T + grace
+// lets a healthy-but-slow release (cold image pulls, model warmers) finish
+// instead of tripping a misleading "did not converge" while it is still
+// progressing. The static floor still applies for fast clusters. The gate
+// exits the instant all releases are Ready or any release Stalls, so a generous
+// backstop never makes a converged install wait.
+func adaptiveConvergenceTimeout(floor, maxReleaseTimeout, grace time.Duration) time.Duration {
+	if maxReleaseTimeout <= 0 {
+		return floor
+	}
+	adaptive := 2*maxReleaseTimeout + grace
+	if adaptive > floor {
+		return adaptive
+	}
+	return floor
+}
+
+// convergencePollInterval returns the cadence for the convergence gate's
+// polling loop. Defaults to 20s; override with QUARTZ_CONVERGENCE_INTERVAL.
+func convergencePollInterval() time.Duration {
+	const def = 20 * time.Second
+	if v := os.Getenv("QUARTZ_CONVERGENCE_INTERVAL"); v != "" {
+		if d, err := time.ParseDuration(v); err == nil && d > 0 {
+			return d
+		}
+	}
+	return def
+}
+
+// workloadStabilizeGrace returns how long, after every HelmRelease has become
+// Ready, the convergence gate will wait for the resulting workloads to finish
+// rolling out before declaring success. A HelmRelease reports Ready when Helm's
+// install/upgrade succeeds, which does NOT guarantee the pods it created are
+// healthy: a chart whose RBAC or image is mismatched installs cleanly yet
+// crashloops. This grace window lets the gate catch that class of failure
+// instead of reporting a misleading success the instant releases are Ready.
+// Defaults to 3m; override with QUARTZ_WORKLOAD_GRACE. Set to "0" to disable
+// the workload check (HelmRelease readiness alone then ends the gate).
+func workloadStabilizeGrace() time.Duration {
+	const def = 3 * time.Minute
+	if v := os.Getenv("QUARTZ_WORKLOAD_GRACE"); v != "" {
+		if d, err := time.ParseDuration(v); err == nil && d >= 0 {
+			return d
+		}
+	}
+	return def
+}
+
+// formatReleaseFailures renders a compact, operator-actionable description of a
+// set of not-ready/stalled HelmReleases (id + truncated condition message).
+func formatReleaseFailures(rs []provider.HelmReleaseStatus) string {
+	if len(rs) == 0 {
+		return "(none)"
+	}
+	parts := make([]string, 0, len(rs))
+	for _, r := range rs {
+		msg := r.ReadyMsg
+		if r.Stalled && r.StalledMsg != "" {
+			msg = r.StalledMsg
+		}
+		msg = strings.TrimSpace(strings.ReplaceAll(msg, "\n", " "))
+		if len(msg) > 200 {
+			msg = msg[:200] + "..."
+		}
+		if msg == "" {
+			parts = append(parts, r.ID())
+		} else {
+			parts = append(parts, fmt.Sprintf("%s (%s)", r.ID(), msg))
+		}
+	}
+	return strings.Join(parts, "; ")
+}
+
+// waitForClusterConvergence is the final install gate. Per-stage post-checks
+// only verify that stage's own HelmRelease, so an install can otherwise report
+// success while sibling releases (neuvector, kiali, ...) are still failing to
+// reconcile. This polls ALL Flux HelmReleases until every one is Ready, the
+// overall timeout elapses, or a release is Stalled (Flux exhausted its
+// retries). On a non-convergent outcome it returns an error naming the
+// offending releases so the operator gets an actionable failure instead of a
+// misleading "Installation successful".
+func waitForClusterConvergence(ctx context.Context, p *CommandParams) error {
+	timeout, explicit := helmConvergenceTimeout()
+	if timeout == 0 {
+		util.Msg("HelmRelease convergence gate disabled (QUARTZ_CONVERGENCE_TIMEOUT=0)")
+		return nil
+	}
+
+	kube, err := p.Provider().Kubernetes(ctx)
+	if err != nil {
+		// Cluster unreachable. The stage applies already fail loudly if the
+		// cluster never came up, so don't manufacture a new failure here.
+		log.Debug("Convergence gate: cluster not reachable, skipping", "err", err)
+		return nil
+	}
+
+	util.Hdr("Waiting for all HelmReleases to converge")
+
+	start := time.Now()
+	deadline := start.Add(timeout)
+	interval := convergencePollInterval()
+
+	// Unless the operator pinned the budget explicitly, the gate adapts its
+	// deadline once to the slowest release's own spec.timeout (computed from the
+	// first snapshot below), so it never gives up on a release that is still
+	// inside the time Flux is allowed to spend on it.
+	deadlineAdapted := explicit
+
+	// A release must report Stalled across consecutive polls before the gate
+	// gives up on it, so a brief self-healing blip doesn't abort an
+	// otherwise-converging install.
+	const stalledThreshold = 2
+	stalledStreak := map[string]int{}
+
+	// Once every HelmRelease is Ready, workloads get a bounded grace window to
+	// finish rolling out. A pod must stay unhealthy across several consecutive
+	// polls before it counts against the install, so transient image-pull or
+	// startup churn doesn't produce a false failure.
+	workloadGrace := workloadStabilizeGrace()
+	const unhealthyThreshold = 3
+	unhealthyStreak := map[string]int{}
+	var releasesReadyAt time.Time
+
+	var last provider.ClusterProgress
+	for {
+		snap, sErr := kube.ClusterProgressSnapshot(ctx)
+		if sErr != nil {
+			if ctx.Err() != nil {
+				return ctx.Err()
+			}
+			// Transient API hiccup — keep trying until the deadline.
+			log.Debug("Convergence gate: snapshot failed (will retry)", "err", sErr)
+		} else {
+			last = snap
+
+			// No HelmReleases present at all (CRD absent or none created yet).
+			// There is nothing to converge — don't spin until the deadline. This
+			// also keeps the gate a no-op for non-Flux/mock clusters.
+			if snap.HelmReleasesTotal == 0 {
+				log.Debug("Convergence gate: no HelmReleases present, nothing to wait for")
+				return nil
+			}
+
+			// Size the wait to the slowest release the first time we can see the
+			// releases. Done once: the release set is stable for an install and
+			// extending the deadline mid-wait should reflect declared intent, not
+			// drift in transient status.
+			if !deadlineAdapted {
+				deadlineAdapted = true
+				if adapted := adaptiveConvergenceTimeout(timeout, snap.MaxReleaseTimeout(), workloadGrace); adapted > timeout {
+					deadline = start.Add(adapted)
+					util.Msgf("Convergence budget extended to %s to fit slowest HelmRelease timeout (%s)",
+						adapted, snap.MaxReleaseTimeout())
+				}
+			}
+
+			if snap.HelmReleasesReady == snap.HelmReleasesTotal {
+				// Every release is Ready. Confirm the resulting workloads have
+				// actually stabilized before declaring success, so a release
+				// that installs cleanly but crashloops (RBAC/image skew) is
+				// caught instead of slipping through.
+				if workloadGrace == 0 || len(snap.UnhealthyPods) == 0 {
+					util.Msgf("All %d HelmReleases are Ready", snap.HelmReleasesTotal)
+					return nil
+				}
+
+				if releasesReadyAt.IsZero() {
+					releasesReadyAt = time.Now()
+					util.Msgf("All %d HelmReleases are Ready; waiting up to %s for %d workload(s) to stabilize",
+						snap.HelmReleasesTotal, workloadGrace, len(snap.UnhealthyPods))
+				}
+
+				// Track which pods stay unhealthy across consecutive polls.
+				current := map[string]bool{}
+				for _, pod := range snap.UnhealthyPods {
+					current[pod] = true
+					unhealthyStreak[pod]++
+				}
+				for pod := range unhealthyStreak {
+					if !current[pod] {
+						delete(unhealthyStreak, pod)
+					}
+				}
+
+				if time.Since(releasesReadyAt) >= workloadGrace {
+					var persistent []string
+					for pod, streak := range unhealthyStreak {
+						if streak >= unhealthyThreshold {
+							persistent = append(persistent, pod)
+						}
+					}
+					if len(persistent) > 0 {
+						slices.Sort(persistent)
+						return fmt.Errorf("install did not converge: all HelmReleases Ready but %d workload(s) unhealthy after %s: %s",
+							len(persistent), workloadGrace, strings.Join(persistent, ", "))
+					}
+					// Grace elapsed with nothing persistently unhealthy — the
+					// snapshot's unhealthy pods were transient churn. Accept.
+					util.Msgf("All %d HelmReleases are Ready; workloads stabilized", snap.HelmReleasesTotal)
+					return nil
+				}
+
+				util.Msgf("Convergence: %s", snap.SummaryWithStragglers(3))
+			} else {
+				util.Msgf("Convergence: %s", snap.SummaryWithStragglers(3))
+
+				// Fail fast on releases Flux has marked Stalled (retries/remediation
+				// exhausted) once the signal persists across consecutive polls.
+				stalled := snap.StalledReleases()
+				current := map[string]bool{}
+				for _, r := range stalled {
+					current[r.ID()] = true
+					stalledStreak[r.ID()]++
+				}
+				for id := range stalledStreak {
+					if !current[id] {
+						delete(stalledStreak, id)
+					}
+				}
+				var stuck []provider.HelmReleaseStatus
+				for _, r := range stalled {
+					if stalledStreak[r.ID()] >= stalledThreshold {
+						stuck = append(stuck, r)
+					}
+				}
+				if len(stuck) > 0 {
+					return fmt.Errorf("install did not converge: %d HelmRelease(s) stalled (Flux exhausted retries): %s",
+						len(stuck), formatReleaseFailures(stuck))
+				}
+
+				// Best-effort self-heal: clear Helm release secrets wedged in a
+				// pending state, which otherwise block Flux from retrying. Only
+				// records stuck past the grace period are scrubbed so we never
+				// delete a revision secret helm-controller is actively driving
+				// (doing so wedges it forever on "secrets ...vN not found").
+				if scrubbed, scrubErr := kube.ScrubStuckHelmReleaseSecrets(ctx, provider.HelmReleaseStuckGracePeriod); scrubErr == nil && len(scrubbed) > 0 {
+					util.Msgf("Cleared %d stuck Helm release secret(s) to unblock reconciliation: %v", len(scrubbed), scrubbed)
+				}
+			}
+		}
+
+		if time.Now().After(deadline) {
+			elapsed := time.Since(start).Round(time.Second)
+			notReady := last.NotReadyDetails()
+
+			// Distinguish a genuinely stuck install (a release Flux has Stalled —
+			// retries/remediation exhausted, won't recover without intervention)
+			// from one that is merely still progressing. The latter routinely
+			// self-heals: Flux keeps reconciling in-cluster after the CLI exits,
+			// so a resume that skips completed stages and re-checks convergence
+			// usually finds the cluster green. Wording the two cases differently
+			// stops a slow-but-healthy install from looking like a hard failure.
+			var stalledNow []provider.HelmReleaseStatus
+			for _, r := range notReady {
+				if r.Stalled {
+					stalledNow = append(stalledNow, r)
+				}
+			}
+			if len(stalledNow) > 0 {
+				return fmt.Errorf("install did not converge within %s: %d HelmRelease(s) stalled (Flux exhausted retries): %s",
+					elapsed, len(stalledNow), formatReleaseFailures(stalledNow))
+			}
+			return fmt.Errorf("install did not converge within %s: %d/%d HelmReleases ready, none stalled — still progressing. "+
+				"Flux keeps reconciling in-cluster; re-run `quartz install` to resume (completed stages are skipped) and confirm convergence. Still not ready: %s",
+				elapsed, last.HelmReleasesReady, last.HelmReleasesTotal,
+				formatReleaseFailures(notReady))
+		}
+
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		case <-time.After(interval):
+		}
+	}
+}
+
+// Preflight validates cloud credentials and connectivity before starting the install.
+// Fails fast if IAM credentials are invalid or the cloud provider is unreachable.
+func Preflight(ctx context.Context, p *CommandParams) error {
+	util.Hdr("Preflight Checks")
+
+	cp, err := p.Provider().Cloud(ctx)
+	if err != nil {
+		return fmt.Errorf("preflight: failed to initialize cloud provider: %w", err)
+	}
+
+	result := cp.CheckAccess(ctx)
+	headers, rows := result.ToTable()
+
+	// Check for any failing rows
+	for _, row := range rows {
+		if row.Error != nil {
+			return cloudPreflightError(cp, row.Error)
+		}
+	}
+
+	// Print identity summary
+	if len(rows) > 0 && len(headers) == len(rows[0].Data) {
+		for i, h := range headers {
+			util.Msgf("  %-15s %s", h+":", rows[0].Data[i])
+		}
+	}
+
+	util.Msg("  Preflight checks passed")
+	return nil
+}
+
+func cloudPreflightError(cp provider.CloudProviderClient, err error) error {
+	if cp != nil && strings.EqualFold(cp.ProviderName(), provider.AWS_PROVIDER) {
+		return fmt.Errorf(
+			"preflight: AWS access check failed: %w\n\n"+
+				"AWS credentials are not available or not authorized in this shell. "+
+				"Load your shell environment (for example, `source ~/.bashrc`) or export "+
+				"AWS_PROFILE/AWS_REGION/AWS_ACCESS_KEY_ID/AWS_SECRET_ACCESS_KEY/AWS_SESSION_TOKEN, then rerun `quartz install`",
+			err,
+		)
+	}
+	return fmt.Errorf("preflight: cloud access check failed: %w", err)
+}
+
 // Clean tears down the Quartz environment, including all managed resources and data.
-// This includes refreshing Terraform states, destroying resources, and cleaning up.
+// This includes refreshing OpenTofu states, destroying resources, and cleaning up.
+// Errors during individual stage destroys are collected and reported but do not
+// abort remaining stages, ensuring maximum cleanup even with partial failures.
 //
 // Parameters:
 //   - ctx: The context for the operation.
-//   - refresh: A boolean indicating whether to refresh the Terraform state before destruction.
 //   - p: *CommandParams containing configuration and runtime parameters.
 //
 // Returns:
 //   - error: An error if the cleanup fails, otherwise nil.
-func Clean(ctx context.Context, refresh bool, p *CommandParams) error {
+func Clean(ctx context.Context, p *CommandParams) error {
 	log.Debug("Entering", "command", "clean")
 	defer log.Debug("Completed", "command", "clean")
 
@@ -159,94 +1356,854 @@ func Clean(ctx context.Context, refresh bool, p *CommandParams) error {
 
 	cleanupStart := time.Now()
 	stageTiming := make(map[string]time.Duration)
-
-	// Phase 1: Always clean up Kubernetes blocking resources first
-	// This removes webhooks, API services, and finalizers that would block Helm uninstalls.
-	// We do this BEFORE any AWS cleanup to ensure the cluster is still healthy.
-	util.Hdr("Kubernetes Cleanup (preparation)")
-	k8sStart := time.Now()
-	cleanupKubernetesBlockers(ctx)
-	stageTiming["k8s-cleanup"] = time.Since(k8sStart)
-
-	// Phase 2: Check for blocking AWS resources and clean up if needed
-	// (orphaned EC2 instances, in-use ENIs). If found, run cleanup proactively
-	// to avoid waiting 15+ minutes for Terraform timeout.
-	util.Msg("Checking for resources that may block cleanup...")
-	checkStart := time.Now()
-	if hasBlockingResources, err := HasBlockingAWSResources(ctx, p); err != nil {
-		log.Warn("Could not check for blocking resources", "error", err)
-	} else if hasBlockingResources {
-		util.Hdr("AWS Resource Cleanup (proactive)")
-		util.Msg("Detected orphaned resources that would block Terraform. Cleaning up first...")
-		if cleanupErr := ForceAWSCleanup(ctx, p); cleanupErr != nil {
-			log.Warn("AWS cleanup encountered errors (continuing)", "error", cleanupErr)
-		}
-		stageTiming["aws-cleanup"] = time.Since(checkStart)
-	} else {
-		util.Msg("No blocking resources detected, proceeding with Terraform destroy")
-	}
+	var destroyErrors []error
+	var cleanupStatus *provider.CleanupStatus
+	var cleanupDisplay cleanupStatusDisplayState
 
 	stages := p.Settings().Config.StagesOrdered()
 
-	// refresh each stage in case local state is out of sync
-	initStart := time.Now()
-	for _, s := range stages {
-		err = TfInit(ctx, s.Id, p)
-		if err != nil {
-			return err
+	// No-op fast path: a successful clean destroys the state backend last, so
+	// its absence means the environment is already torn down. Probing it once
+	// up front lets us skip the parallel init/refresh and per-stage destroy
+	// waves entirely — work that would otherwise spend minutes downloading
+	// modules and refreshing empty state across every stage only to find
+	// nothing to do. On any probe error we fall through to the normal path
+	// rather than risk skipping a real teardown.
+	if exists, err := TfStateBackendExists(ctx, p); err != nil {
+		log.Debug("State backend existence check failed, proceeding with full clean", "error", err)
+	} else if !exists {
+		util.Msg("State backend not found — environment already torn down, nothing to destroy.")
+		if cleanupErr := Cleanup(ctx, p); cleanupErr != nil {
+			log.Warn("Final cleanup failed (non-fatal)", "error", cleanupErr)
 		}
-		if refresh {
-			err = TfRefresh(ctx, s.Id, p)
-			if err != nil {
-				return err
-			}
-		}
+		return nil
 	}
+
+	// Initialize and refresh each stage before destruction. Stages are
+	// independent for init/refresh (each operates on its own working directory
+	// and remote state), so they run concurrently to avoid the serial
+	// per-stage module download + refresh that dominated clean startup time.
+	// Uses TfRefreshWithUnlock for automatic state lock recovery.
+	initStart := time.Now()
+	parallelInitRefresh(ctx, stages, p)
 	stageTiming["init-refresh"] = time.Since(initStart)
 
-	// destroy stages in reverse order with retry logic for transient failures
-	slices.Reverse(stages)
-	for _, s := range stages {
-		stageStart := time.Now()
-		err = TfDestroyWithRetry(ctx, s.Id, p, 3, 60*time.Second)
-		stageTiming["destroy-"+s.Id] = time.Since(stageStart)
+	// K8s preparation: remove Flux finalizers, patch stuck namespaces,
+	// and clean up resources that would block destroy
+	k8sCleanStart := time.Now()
+	kube, err := p.Provider().Kubernetes(ctx)
+	if err != nil {
+		log.Warn("Could not connect to Kubernetes for pre-destroy cleanup", "error", err)
+	} else {
+		err = kube.PrepareForDestroy(ctx)
 		if err != nil {
-			printCleanupTimingSummary(stageTiming, time.Since(cleanupStart))
-			return err
+			log.Warn("K8s pre-destroy cleanup failed (non-fatal)", "error", err)
 		}
 	}
+	captureCleanupStatus := func() {
+		if kube == nil {
+			return
+		}
+		ns := p.Settings().Config.State.ConfigMapNamespace
+		if ns == "" {
+			ns = "quartz"
+		}
+		status, err := kube.GetCleanupStatus(ctx, ns, cleanupStatusConfigMapName)
+		if err != nil {
+			if note := cleanupStatusAvailabilityNote(err); note != "" {
+				recordCleanupStatusUnavailable(&cleanupStatus, note)
+				printCleanupStatusProgress(cleanupStatus, &cleanupDisplay)
+			}
+			log.Debug("Cleanup hook status not available", "namespace", ns, "name", cleanupStatusConfigMapName, "error", err)
+			return
+		}
+		cleanupStatus = &status
+		printCleanupStatusProgress(cleanupStatus, &cleanupDisplay)
+	}
+	stageTiming["k8s-prep"] = time.Since(k8sCleanStart)
 
-	backendStart := time.Now()
-	err = TfDestroyBackend(ctx, p)
-	stageTiming["destroy-backend"] = time.Since(backendStart)
-	if err != nil {
-		printCleanupTimingSummary(stageTiming, time.Since(cleanupStart))
-		return err
+	// Destroy stages in parallel where possible. Stages are grouped into
+	// "destroy waves" based on reverse dependencies: stages with no dependents
+	// can be destroyed first (highest order numbers), then their dependencies.
+	destroyWaves := buildDestroyWaves(stages)
+	for waveIdx, wave := range destroyWaves {
+		printDestroyWavePreamble(wave)
+		if len(wave) == 1 {
+			// Single stage — no parallelism needed
+			s := wave[0]
+			stageStart := time.Now()
+			err = TfDestroyWithRetry(ctx, s.Id, p, 2, 30*time.Second)
+			stageTiming["destroy-"+s.Id] = time.Since(stageStart)
+			if err != nil {
+				log.Warn("Stage destroy failed, continuing with remaining stages", "stage", s.Id, "error", err)
+				destroyErrors = append(destroyErrors, fmt.Errorf("stage %s: %w", s.Id, err))
+			}
+		} else {
+			// Multiple independent stages — destroy in parallel
+			util.Msgf("Destroying %d stages in parallel (wave %d/%d): %s", len(wave), waveIdx+1, len(destroyWaves), stageIds(wave))
+			waveStart := time.Now()
+			waveErrors := parallelDestroy(ctx, wave, p)
+			for _, s := range wave {
+				stageTiming["destroy-"+s.Id] = time.Since(waveStart)
+			}
+			destroyErrors = append(destroyErrors, waveErrors...)
+		}
+
+		captureCleanupStatus()
+
+		// Inter-wave K8s cleanup
+		if kube != nil && waveIdx < len(destroyWaves)-1 {
+			interStart := time.Now()
+			if cleanErr := kube.InterStageCleanup(ctx); cleanErr != nil {
+				log.Warn("Inter-stage K8s cleanup failed (non-fatal)", "error", cleanErr)
+			}
+			stageTiming[fmt.Sprintf("k8s-inter-wave-%d", waveIdx)] = time.Since(interStart)
+			captureCleanupStatus()
+		}
+	}
+	captureCleanupStatus()
+
+	// Only destroy the state backend if ALL stage destroys succeeded.
+	// If any stage failed, the backend must remain intact so operators can
+	// re-run clean or use tofu commands to recover. Destroying the backend
+	// with failed stages makes the orphaned resources irrecoverable via tofu.
+	if len(destroyErrors) == 0 {
+		backendStart := time.Now()
+		err = TfDestroyBackend(ctx, p)
+		stageTiming["destroy-backend"] = time.Since(backendStart)
+		if err != nil {
+			destroyErrors = append(destroyErrors, fmt.Errorf("backend: %w", err))
+		}
+	} else {
+		util.Msgf("⚠️  Skipping backend destruction — %d stage(s) failed. Re-run 'quartz clean' to retry.", len(destroyErrors))
+		util.Msg("   The state backend is preserved so tofu can still manage remaining resources.")
 	}
 
 	cleanupFinalStart := time.Now()
 	err = Cleanup(ctx, p)
 	stageTiming["cleanup-final"] = time.Since(cleanupFinalStart)
+	if err != nil {
+		destroyErrors = append(destroyErrors, fmt.Errorf("cleanup: %w", err))
+	}
 
-	printCleanupTimingSummary(stageTiming, time.Since(cleanupStart))
-	return err
+	totalDuration := time.Since(cleanupStart)
+	printCleanupTimingSummary(stageTiming, totalDuration)
+	printCleanupStatusSummary(cleanupStatus)
+	printCleanupNotes(stageTiming, cleanupStatus, destroyErrors)
+
+	if len(destroyErrors) > 0 {
+		printDestroyErrors(destroyErrors)
+	}
+
+	// Persist a durable, plaintext teardown report under the run log directory.
+	// The console summary above is lost the moment the working directory is
+	// removed (and the operator's terminal scrolls away); on a FAILED clean that
+	// post-mortem is exactly what is needed to decide the next step. The report
+	// carries no secrets — only stage timings and de-duplicated error messages —
+	// so it is always safe to write, unlike the raw tofu destroy output.
+	if path, err := persistCleanupReport(p, stageTiming, totalDuration, destroyErrors, cleanupStatus); err != nil {
+		log.Warn("Could not persist cleanup report (non-fatal)", "error", err)
+	} else if path != "" {
+		util.Msgf("Teardown report written to %s", path)
+	}
+
+	if len(destroyErrors) > 0 {
+		return fmt.Errorf("%d stage(s) failed to destroy cleanly", len(destroyErrors))
+	}
+
+	return nil
 }
 
-// printCleanupTimingSummary outputs timing information for each phase of the cleanup.
+// cleanupReportDir resolves the directory durable run artifacts are written to,
+// derived from the configured file-log path (default "log/...") so the teardown
+// report lands alongside the tofu logs regardless of whether file logging is
+// enabled. Falls back to "log" when no path is configured.
+func cleanupReportDir(cfg schema.QuartzConfig) string {
+	p := cfg.Log.File.Path
+	if p == "" {
+		return "log"
+	}
+	return filepath.Dir(p)
+}
+
+func valueOrUnknown(v string) string {
+	v = strings.TrimSpace(v)
+	if v == "" {
+		return "unknown"
+	}
+	return v
+}
+
+func cleanupHookSucceeded(cleanupStatus *provider.CleanupStatus) bool {
+	if cleanupStatus == nil {
+		return false
+	}
+	data := cleanupStatus.Data
+	status := strings.TrimSpace(data["status"])
+	phase := strings.TrimSpace(data["phase"])
+	return strings.EqualFold(status, "Succeeded") ||
+		strings.EqualFold(status, "Complete") ||
+		strings.EqualFold(status, "Completed") ||
+		strings.EqualFold(phase, "complete")
+}
+
+func cleanupFinalReadSummary(cleanupStatus *provider.CleanupStatus) string {
+	if cleanupStatus == nil {
+		return ""
+	}
+	note := strings.TrimSpace(cleanupStatus.Data["availabilityNote"])
+	if note == "" {
+		return ""
+	}
+	if !cleanupHookSucceeded(cleanupStatus) {
+		return note
+	}
+	switch note {
+	case "cluster API became unreachable before the final cleanup-status refresh completed":
+		return "cluster API became unreachable after the cleanup hook had already reported success"
+	case "final cleanup-status read happened after the ConfigMap was removed during teardown":
+		return "cleanup-status ConfigMap was removed after the cleanup hook had already reported success"
+	default:
+		return note
+	}
+}
+
+func cleanupCompletionCategory(cleanupStatus *provider.CleanupStatus) string {
+	if cleanupStatus == nil {
+		return ""
+	}
+	return strings.TrimSpace(cleanupStatus.Data["completionCategory"])
+}
+
+func cleanupCompletionHuman(cleanupStatus *provider.CleanupStatus) string {
+	if cleanupStatus == nil {
+		return ""
+	}
+	return strings.TrimSpace(cleanupStatus.Data["completionHuman"])
+}
+
+// renderCleanupReport builds the plaintext teardown report: a header, the
+// per-phase timing table (sorted for deterministic output), and the grouped
+// destroy errors. It deliberately mirrors the console summary but emits no
+// color codes so the artifact stays grep- and diff-friendly.
+func renderCleanupReport(name string, stageTiming map[string]time.Duration, totalDuration time.Duration, errs []error, cleanupStatus *provider.CleanupStatus) string {
+	var b strings.Builder
+	result := "SUCCESS"
+	if len(errs) > 0 {
+		result = fmt.Sprintf("FAILED (%d stage(s) did not destroy cleanly)", len(errs))
+	}
+
+	fmt.Fprintf(&b, "Quartz Teardown Report\n")
+	fmt.Fprintf(&b, "Cluster:   %s\n", name)
+	fmt.Fprintf(&b, "Completed: %s\n", time.Now().UTC().Format(time.RFC3339))
+	fmt.Fprintf(&b, "Result:    %s\n\n", result)
+
+	fmt.Fprintf(&b, "Timing:\n")
+	keys := make([]string, 0, len(stageTiming))
+	for k := range stageTiming {
+		keys = append(keys, k)
+	}
+	slices.Sort(keys)
+	for _, k := range keys {
+		fmt.Fprintf(&b, "  %-25s %v\n", k+":", stageTiming[k].Round(time.Second))
+	}
+	fmt.Fprintf(&b, "  %-25s %v\n", "TOTAL:", totalDuration.Round(time.Second))
+
+	if cleanupStatus != nil {
+		data := cleanupStatus.Data
+		fmt.Fprintf(&b, "\nCleanup Hook:\n")
+		fmt.Fprintf(&b, "  %-12s %s\n", "Status:", valueOrUnknown(data["status"]))
+		fmt.Fprintf(&b, "  %-12s %s\n", "Phase:", valueOrUnknown(data["phase"]))
+		fmt.Fprintf(&b, "  %-12s %s\n", "Detail:", valueOrUnknown(data["detail"]))
+		if data["updatedAt"] != "" {
+			fmt.Fprintf(&b, "  %-12s %s\n", "Updated:", data["updatedAt"])
+		}
+		if category := cleanupCompletionCategory(cleanupStatus); category != "" {
+			fmt.Fprintf(&b, "  %-12s %s\n", "Completion:", category)
+		}
+		if human := cleanupCompletionHuman(cleanupStatus); human != "" {
+			fmt.Fprintf(&b, "  %-12s %s\n", "Outcome:", human)
+		}
+		if unavailable := cleanupFinalReadSummary(cleanupStatus); unavailable != "" {
+			fmt.Fprintf(&b, "  %-12s %s\n", "FinalRead:", unavailable)
+		}
+		if strings.EqualFold(data["degraded"], "true") {
+			fmt.Fprintf(&b, "  %-12s %s\n", "Degraded:", valueOrUnknown(data["degradedDetail"]))
+			if data["degradedAt"] != "" {
+				fmt.Fprintf(&b, "  %-12s %s\n", "DegradedAt:", data["degradedAt"])
+			}
+			if recovery := cleanupHookRecoverySummary(cleanupStatus); recovery != "" {
+				fmt.Fprintf(&b, "  %-12s %s\n", "Recovery:", recovery)
+			}
+		}
+		if foundationSafe := strings.TrimSpace(data["foundationSafeHuman"]); foundationSafe != "" {
+			fmt.Fprintf(&b, "  %-12s %s\n", "Handoff:", foundationSafe)
+		}
+		if residual := strings.TrimSpace(data["residualHuman"]); residual != "" {
+			fmt.Fprintf(&b, "  %-12s %s\n", "Residual:", residual)
+		}
+
+		writeCleanupHookHistory(&b, cleanupStatus.HookEvents, "  ")
+
+		if len(cleanupStatus.Events) > 0 {
+			fmt.Fprintf(&b, "  Events:\n")
+			events := cleanupStatus.Events
+			if len(events) > 10 {
+				events = events[len(events)-10:]
+			}
+			for _, e := range events {
+				last := "unknown"
+				if !e.LastTimestamp.IsZero() {
+					last = e.LastTimestamp.UTC().Format(time.RFC3339)
+				}
+				count := ""
+				if e.Count > 1 {
+					count = fmt.Sprintf(" x%d", e.Count)
+				}
+				fmt.Fprintf(&b, "    - [%s] %s%s at %s: %s\n",
+					valueOrUnknown(e.Type), valueOrUnknown(e.Reason), count, last, truncateDetail(e.Message, 180))
+			}
+		}
+	}
+
+	writeCleanupNotes(&b, stageTiming, cleanupStatus, errs)
+
+	if len(errs) > 0 {
+		fmt.Fprintf(&b, "\nDestroy Errors:\n")
+		order, stagesByMsg := groupStageErrors(errs)
+		for _, msg := range order {
+			stageList := stagesByMsg[msg]
+			switch {
+			case len(stageList) > 1:
+				fmt.Fprintf(&b, "  x [%s] %s\n", strings.Join(stageList, ", "), msg)
+			case len(stageList) == 1:
+				fmt.Fprintf(&b, "  x [%s] %s\n", stageList[0], msg)
+			default:
+				fmt.Fprintf(&b, "  x %s\n", msg)
+			}
+		}
+	}
+
+	fmt.Fprintf(&b, "\nNext Action:\n")
+	if len(errs) > 0 {
+		fmt.Fprintf(&b, "  State backend: preserved because one or more stages failed.\n")
+		fmt.Fprintf(&b, "  Retry:         quartz clean --yes\n")
+		fmt.Fprintf(&b, "  Logs:          inspect the neighboring *.tf.log and *.tf.log.*.gz files for the failed stage.\n")
+	} else {
+		fmt.Fprintf(&b, "  State backend: destroyed after all stages completed.\n")
+		fmt.Fprintf(&b, "  Provider wait: delayed provider-side deletion can continue after OpenTofu reports success.\n")
+		fmt.Fprintf(&b, "  Retry:         not needed.\n")
+		fmt.Fprintf(&b, "  Logs:          retained only for audit/troubleshooting.\n")
+	}
+
+	return b.String()
+}
+
+func printCleanupStatusSummary(cleanupStatus *provider.CleanupStatus) {
+	if cleanupStatus == nil {
+		return
+	}
+
+	data := cleanupStatus.Data
+	util.Hdr("Cleanup Hook Summary")
+	util.Msgf("  Status: %-10s Phase: %-18s Detail: %s",
+		valueOrUnknown(data["status"]),
+		valueOrUnknown(data["phase"]),
+		truncateDetail(valueOrUnknown(data["detail"]), 120),
+	)
+	if category := cleanupCompletionCategory(cleanupStatus); category != "" {
+		util.Msgf("  Completion: %s", truncateDetail(category, 140))
+	}
+	if human := cleanupCompletionHuman(cleanupStatus); human != "" {
+		util.Msgf("  Outcome:    %s", truncateDetail(human, 140))
+	}
+	if unavailable := cleanupFinalReadSummary(cleanupStatus); unavailable != "" {
+		util.Msgf("  Final read: %s", truncateDetail(unavailable, 140))
+	}
+	if strings.EqualFold(data["degraded"], "true") {
+		util.Msgf("  Degraded: %s", truncateDetail(valueOrUnknown(data["degradedDetail"]), 140))
+		if recovery := cleanupHookRecoverySummary(cleanupStatus); recovery != "" {
+			util.Msgf("  Recovery: %s", truncateDetail(recovery, 140))
+		}
+	}
+	if foundationSafe := strings.TrimSpace(data["foundationSafeHuman"]); foundationSafe != "" {
+		util.Msgf("  Handoff:  %s", truncateDetail(foundationSafe, 140))
+	}
+	if residual := strings.TrimSpace(data["residualHuman"]); residual != "" {
+		util.Msgf("  Residual: %s", truncateDetail(residual, 140))
+	}
+
+	if len(cleanupStatus.HookEvents) > 0 {
+		total, degraded := cleanupHookHistoryCounts(cleanupStatus.HookEvents)
+		summary := fmt.Sprintf("  History:  %d recorded step(s)", total)
+		if degraded > 0 {
+			summary = fmt.Sprintf("%s, %d degraded", summary, degraded)
+		}
+		util.Msg(summary)
+		for _, e := range latestCleanupHookEvents(cleanupStatus.HookEvents, 5) {
+			util.Msgf("    - %s %-18s %-9s %s",
+				cleanupHookEventTime(e.At),
+				cleanupHookEventLabel(e),
+				valueOrUnknown(e.Status),
+				truncateDetail(valueOrUnknown(e.Detail), 120),
+			)
+		}
+	}
+}
+
+type cleanupStatusDisplayState struct {
+	Phase          string
+	Status         string
+	Detail         string
+	Completion     string
+	Outcome        string
+	DegradedDetail string
+	Handoff        string
+	Residual       string
+	HookEventCount int
+	Unavailable    string
+}
+
+func printCleanupStatusProgress(cleanupStatus *provider.CleanupStatus, state *cleanupStatusDisplayState) {
+	if cleanupStatus == nil || state == nil {
+		return
+	}
+
+	data := cleanupStatus.Data
+	phase := valueOrUnknown(data["phase"])
+	status := valueOrUnknown(data["status"])
+	detail := valueOrUnknown(data["detail"])
+	if phase != state.Phase || status != state.Status || detail != state.Detail {
+		util.Msgf("Cleanup hook: %-10s %-18s %s",
+			status,
+			phase,
+			truncateDetail(detail, 120),
+		)
+		state.Phase = phase
+		state.Status = status
+		state.Detail = detail
+	}
+
+	if completion := cleanupCompletionCategory(cleanupStatus); completion != "" && completion != state.Completion {
+		util.Msgf("  Cleanup completion category: %s", truncateDetail(completion, 140))
+		state.Completion = completion
+	}
+
+	if outcome := cleanupCompletionHuman(cleanupStatus); outcome != "" && outcome != state.Outcome {
+		util.Msgf("  Cleanup completion summary: %s", truncateDetail(outcome, 140))
+		state.Outcome = outcome
+	}
+
+	if degraded := strings.TrimSpace(data["degradedDetail"]); degraded != "" && degraded != state.DegradedDetail {
+		util.Msgf("  Cleanup degraded but still progressing: %s", truncateDetail(degraded, 140))
+		state.DegradedDetail = degraded
+	}
+
+	if handoff := strings.TrimSpace(data["foundationSafeHuman"]); handoff != "" && handoff != state.Handoff {
+		util.Msgf("  Cleanup handoff ready: %s", truncateDetail(handoff, 140))
+		state.Handoff = handoff
+	}
+
+	if residual := strings.TrimSpace(data["residualHuman"]); residual != "" && residual != state.Residual {
+		util.Msgf("  Cleanup residual snapshot: %s", truncateDetail(residual, 140))
+		state.Residual = residual
+	}
+
+	if unavailable := cleanupFinalReadSummary(cleanupStatus); unavailable != "" && unavailable != state.Unavailable {
+		util.Msgf("  Cleanup final read: %s", truncateDetail(unavailable, 140))
+		state.Unavailable = unavailable
+	}
+
+	if len(cleanupStatus.HookEvents) <= state.HookEventCount {
+		return
+	}
+	for _, e := range cleanupStatus.HookEvents[state.HookEventCount:] {
+		util.Msgf("  Cleanup step: %s %-18s %-9s %s",
+			cleanupHookEventTime(e.At),
+			cleanupHookEventLabel(e),
+			valueOrUnknown(e.Status),
+			truncateDetail(valueOrUnknown(e.Detail), 120),
+		)
+	}
+	state.HookEventCount = len(cleanupStatus.HookEvents)
+}
+
+func cleanupHookRecoverySummary(cleanupStatus *provider.CleanupStatus) string {
+	if cleanupStatus == nil {
+		return ""
+	}
+	data := cleanupStatus.Data
+	if !strings.EqualFold(data["degraded"], "true") {
+		return ""
+	}
+
+	status := strings.TrimSpace(data["status"])
+	phase := strings.TrimSpace(data["phase"])
+	hookComplete := strings.EqualFold(status, "Succeeded") ||
+		strings.EqualFold(status, "Complete") ||
+		strings.EqualFold(status, "Completed") ||
+		strings.EqualFold(phase, "complete")
+	if !hookComplete {
+		return ""
+	}
+
+	detail := valueOrUnknown(data["degradedDetail"])
+	if detail == "unknown" {
+		return "self-healed; cleanup hook finished successfully after an earlier degraded signal"
+	}
+	return fmt.Sprintf("self-healed after %s; cleanup hook finished successfully", detail)
+}
+
+func cleanupStatusAvailabilityNote(err error) string {
+	if err == nil {
+		return ""
+	}
+	if apierrors.IsNotFound(err) {
+		return "final cleanup-status read happened after the ConfigMap was removed during teardown"
+	}
+
+	errStr := strings.TrimSpace(err.Error())
+	if errStr == "" {
+		return ""
+	}
+	unavailablePatterns := []string{
+		"no such host",
+		"connection refused",
+		"i/o timeout",
+		"context deadline exceeded",
+		"Client.Timeout exceeded",
+		"EOF",
+	}
+	for _, pattern := range unavailablePatterns {
+		if strings.Contains(errStr, pattern) {
+			return "cluster API became unreachable before the final cleanup-status refresh completed"
+		}
+	}
+	return ""
+}
+
+func recordCleanupStatusUnavailable(cleanupStatus **provider.CleanupStatus, note string) {
+	note = strings.TrimSpace(note)
+	if note == "" {
+		return
+	}
+
+	if *cleanupStatus == nil {
+		*cleanupStatus = &provider.CleanupStatus{
+			Data: map[string]string{
+				"status": "Unavailable",
+				"phase":  "post-clean",
+				"detail": "Cleanup hook status unavailable after teardown",
+			},
+		}
+	}
+	if (*cleanupStatus).Data == nil {
+		(*cleanupStatus).Data = map[string]string{}
+	}
+	(*cleanupStatus).Data["availabilityNote"] = note
+}
+
+func cleanupNoteSentence(text string) string {
+	text = strings.TrimSpace(text)
+	if text == "" {
+		return ""
+	}
+	switch text[len(text)-1] {
+	case '.', '!', '?':
+		return text
+	default:
+		return text + "."
+	}
+}
+
+func cleanupNotes(stageTiming map[string]time.Duration, cleanupStatus *provider.CleanupStatus, errs []error) []string {
+	var notes []string
+
+	if recovery := cleanupHookRecoverySummary(cleanupStatus); recovery != "" {
+		note := "Cleanup hook recovery: " + cleanupNoteSentence(recovery)
+		if len(errs) == 0 {
+			note += " No manual action is required for that hook condition."
+		}
+		notes = append(notes, note)
+	}
+	if cleanupStatus != nil {
+		if outcome := cleanupCompletionHuman(cleanupStatus); outcome != "" {
+			notes = append(notes, "Cleanup completion: "+cleanupNoteSentence(outcome))
+		}
+		if handoff := strings.TrimSpace(cleanupStatus.Data["foundationSafeHuman"]); handoff != "" {
+			notes = append(notes, "Foundation handoff ready: "+cleanupNoteSentence(handoff))
+		}
+		if unavailable := cleanupFinalReadSummary(cleanupStatus); unavailable != "" {
+			notes = append(notes, "Cleanup hook final read: "+cleanupNoteSentence(unavailable))
+		}
+	}
+
+	if d, ok := stageTiming["init-refresh"]; ok && d >= 2*time.Minute {
+		notes = append(notes, "init-refresh runs stages in parallel; long time here is usually provider refresh/module initialization and does not block later destroy attempts.")
+	}
+	if d, ok := stageTiming["destroy-core"]; ok && d >= 5*time.Minute {
+		notes = append(notes, "destroy-core includes the Helm pre-delete hook and in-cluster drain/PV/LoadBalancer cleanup; several minutes can be normal while NodeClaims and storage settle.")
+	}
+	if d, ok := stageTiming["destroy-host"]; ok && d >= 5*time.Minute {
+		notes = append(notes, "destroy-host includes provider-side managed-service teardown such as EKS, RDS, and network resources; long waits here are usually provider deletion progress.")
+	}
+
+	return notes
+}
+
+func destroyStagePreamble(stageID string) string {
+	switch stageID {
+	case "core":
+		return "Destroy core includes the Quartz Helm pre-delete hook. During staged recovery Quartz can intentionally use targeted OpenTofu cleanup, so raw `Resource targeting is in effect` or `Applied changes may be incomplete` warnings can be expected while the final cleanup report remains the source of truth."
+	case "foundation":
+		return "Destroy foundation removes cert-manager and external-secrets after Quartz has already drained their custom resources. If Quartz reports a foundation-safe handoff, transient targeted-destroy warnings are informational unless the final stage result fails."
+	case "host":
+		return "Destroy host tears down provider-managed services such as EKS, RDS, and VPC resources. Ten to twenty-plus minutes here can be normal while AWS finishes background deletion."
+	default:
+		return ""
+	}
+}
+
+func printDestroyWavePreamble(wave []schema.StageConfig) {
+	seen := map[string]bool{}
+	for _, stage := range wave {
+		note := destroyStagePreamble(stage.Id)
+		if note == "" || seen[note] {
+			continue
+		}
+		seen[note] = true
+		util.Msgf("Note: %s", note)
+	}
+}
+
+func writeCleanupNotes(b *strings.Builder, stageTiming map[string]time.Duration, cleanupStatus *provider.CleanupStatus, errs []error) {
+	notes := cleanupNotes(stageTiming, cleanupStatus, errs)
+	if len(notes) == 0 {
+		return
+	}
+
+	fmt.Fprintf(b, "\nNotes:\n")
+	for _, note := range notes {
+		fmt.Fprintf(b, "  - %s\n", note)
+	}
+}
+
+func printCleanupNotes(stageTiming map[string]time.Duration, cleanupStatus *provider.CleanupStatus, errs []error) {
+	notes := cleanupNotes(stageTiming, cleanupStatus, errs)
+	if len(notes) == 0 {
+		return
+	}
+
+	util.Hdr("Cleanup Notes")
+	for _, note := range notes {
+		util.Msgf("  - %s", note)
+	}
+}
+
+func writeCleanupHookHistory(b *strings.Builder, events []provider.CleanupHookEvent, indent string) {
+	if len(events) == 0 {
+		return
+	}
+
+	total, degraded := cleanupHookHistoryCounts(events)
+	summary := fmt.Sprintf("%sHook History: %d recorded step(s)", indent, total)
+	if degraded > 0 {
+		summary = fmt.Sprintf("%s, %d degraded", summary, degraded)
+	}
+	fmt.Fprintf(b, "%s\n", summary)
+
+	display := latestCleanupHookEvents(events, 12)
+	if len(display) < total {
+		fmt.Fprintf(b, "%s  Recent Steps (last %d):\n", indent, len(display))
+	} else {
+		fmt.Fprintf(b, "%s  Recent Steps:\n", indent)
+	}
+	for _, e := range display {
+		fmt.Fprintf(b, "%s    - %s %-18s %-9s %s\n",
+			indent,
+			cleanupHookEventTime(e.At),
+			cleanupHookEventLabel(e),
+			valueOrUnknown(e.Status),
+			truncateDetail(valueOrUnknown(e.Detail), 160),
+		)
+	}
+}
+
+func cleanupHookHistoryCounts(events []provider.CleanupHookEvent) (int, int) {
+	degraded := 0
+	for _, e := range events {
+		if strings.EqualFold(e.Kind, "degraded") || (e.Kind == "" && strings.EqualFold(e.Status, "Degraded")) {
+			degraded++
+		}
+	}
+	return len(events), degraded
+}
+
+func latestCleanupHookEvents(events []provider.CleanupHookEvent, limit int) []provider.CleanupHookEvent {
+	if limit <= 0 || len(events) <= limit {
+		return events
+	}
+	return events[len(events)-limit:]
+}
+
+func cleanupHookEventTime(t time.Time) string {
+	if t.IsZero() {
+		return "unknown"
+	}
+	return t.UTC().Format(time.RFC3339)
+}
+
+func cleanupHookEventLabel(e provider.CleanupHookEvent) string {
+	phase := valueOrUnknown(e.Phase)
+	if e.Kind == "" || strings.EqualFold(e.Kind, "status") {
+		return phase
+	}
+	return fmt.Sprintf("%s/%s", phase, e.Kind)
+}
+
+// persistCleanupReport writes the teardown report to a timestamped file in the
+// run log directory and returns its path. The filename follows the same
+// "<name>.<date>.<kind>.<unix>" convention as the tofu logs so artifacts from a
+// single run sort together.
+func persistCleanupReport(p *CommandParams, stageTiming map[string]time.Duration, totalDuration time.Duration, errs []error, cleanupStatus *provider.CleanupStatus) (string, error) {
+	cfg := p.Settings().Config
+	dir := cleanupReportDir(cfg)
+	if err := os.MkdirAll(dir, 0o750); err != nil {
+		return "", err
+	}
+
+	now := time.Now()
+	name := cfg.Name
+	if name == "" {
+		name = "quartz"
+	}
+	file := filepath.Join(dir, fmt.Sprintf("%s.%s.clean.%d.log", name, now.Format("2006-01-02"), now.Unix()))
+
+	report := renderCleanupReport(name, stageTiming, totalDuration, errs, cleanupStatus)
+	if err := os.WriteFile(file, []byte(report), 0o600); err != nil {
+		return "", err
+	}
+	return file, nil
+}
+
+// printDestroyErrors renders the destroy-error summary, collapsing identical
+// root-cause messages across stages into a single line. During teardown the
+// same failure (most often the EKS "No cluster found" 404) commonly surfaces on
+// several stages at once; listing it once with the affected stages is far
+// easier to read than N verbatim repetitions.
+func printDestroyErrors(errs []error) {
+	util.Hdr("Destroy Errors")
+
+	order, stagesByMsg := groupStageErrors(errs)
+	for _, msg := range order {
+		stageList := stagesByMsg[msg]
+		if len(stageList) > 1 {
+			util.Msgf("  ✗ [%s] %s", strings.Join(stageList, ", "), msg)
+		} else if len(stageList) == 1 {
+			util.Msgf("  ✗ [%s] %s", stageList[0], msg)
+		} else {
+			util.Msgf("  ✗ %s", msg)
+		}
+	}
+}
+
+// groupStageErrors collapses a slice of stage destroy errors by their
+// underlying message, preserving first-seen order, so identical root causes
+// surfacing on several stages are reported once with the affected stage list.
+// Shared by the console summary and the persisted report.
+func groupStageErrors(errs []error) ([]string, map[string][]string) {
+	order := make([]string, 0, len(errs))
+	stagesByMsg := make(map[string][]string)
+	for _, e := range errs {
+		stage, msg := splitStageError(e)
+		if _, seen := stagesByMsg[msg]; !seen {
+			order = append(order, msg)
+		}
+		if stage != "" {
+			stagesByMsg[msg] = append(stagesByMsg[msg], stage)
+		}
+	}
+	return order, stagesByMsg
+}
+
+// splitStageError separates a "stage <id>: <message>" error into its stage id
+// and underlying message so identical messages can be grouped. Errors not in
+// that form are returned with an empty stage id and the full message.
+func splitStageError(e error) (string, string) {
+	s := e.Error()
+	if rest, ok := strings.CutPrefix(s, "stage "); ok {
+		if idx := strings.Index(rest, ": "); idx > 0 {
+			return rest[:idx], rest[idx+2:]
+		}
+	}
+	return "", s
+}
+
+// printCleanupTimingSummary outputs timing information for each phase of the
+// cleanup. Phases are sorted so the summary is deterministic across runs
+// (Go map iteration order is otherwise randomized, scrambling the table).
 func printCleanupTimingSummary(stageTiming map[string]time.Duration, totalDuration time.Duration) {
 	util.Hdr("Cleanup Timing Summary")
-	for stage, duration := range stageTiming {
-		util.Msgf("  %-25s %v", stage+":", duration.Round(time.Second))
+	keys := make([]string, 0, len(stageTiming))
+	for k := range stageTiming {
+		keys = append(keys, k)
+	}
+	slices.Sort(keys)
+	for _, stage := range keys {
+		util.Msgf("  %-25s %v", stage+":", stageTiming[stage].Round(time.Second))
 	}
 	util.Msgf("  %-25s %v", "TOTAL:", totalDuration.Round(time.Second))
 }
 
-// TfDestroyWithRetry attempts to destroy a stage with retry logic for transient failures
-// such as AWS resource dependency violations that may resolve after ENI cleanup completes.
-//
-// If a retryable error is encountered (e.g., DependencyViolation), it runs AWS CLI cleanup
-// to handle orphaned resources (EC2 instances, ENIs, security groups) before retrying.
-// This is a fallback - primary cleanup is handled by Terraform's Helm pre-delete hooks.
+type timingEntry struct {
+	Name     string
+	Duration time.Duration
+}
+
+func slowestTimingEntries(stageTiming map[string]time.Duration, limit int) []timingEntry {
+	entries := make([]timingEntry, 0, len(stageTiming))
+	for name, duration := range stageTiming {
+		entries = append(entries, timingEntry{Name: name, Duration: duration})
+	}
+	slices.SortFunc(entries, func(a, b timingEntry) int {
+		if a.Duration > b.Duration {
+			return -1
+		}
+		if a.Duration < b.Duration {
+			return 1
+		}
+		return strings.Compare(a.Name, b.Name)
+	})
+	if limit > 0 && len(entries) > limit {
+		return entries[:limit]
+	}
+	return entries
+}
+
+func printInstallTimingSummary(stageTiming map[string]time.Duration, totalDuration time.Duration, installErr error) {
+	if len(stageTiming) == 0 {
+		return
+	}
+
+	util.Hdr("Install Timing Summary")
+	if installErr != nil {
+		util.Msg("  Result: incomplete; timings show work completed before the failure")
+	}
+
+	const limit = 8
+	for _, entry := range slowestTimingEntries(stageTiming, limit) {
+		util.Msgf("  %-25s %v", entry.Name+":", entry.Duration.Round(time.Second))
+	}
+	if omitted := len(stageTiming) - limit; omitted > 0 {
+		util.Msgf("  %-25s %d additional phase(s) omitted", "...", omitted)
+	}
+	util.Msgf("  %-25s %v", "TOTAL:", totalDuration.Round(time.Second))
+}
+
+// TfDestroyWithRetry attempts to destroy a stage with retry logic for transient failures.
+// It retries on known transient errors (dependency violations, timeouts) with a simple
+// delay between attempts. Cleanup of blocking resources is handled by Helm pre-delete
+// hooks running in-cluster.
 //
 // Parameters:
 //   - ctx: The context for the operation.
@@ -259,8 +2216,6 @@ func printCleanupTimingSummary(stageTiming map[string]time.Duration, totalDurati
 //   - error: An error if all attempts fail, otherwise nil.
 func TfDestroyWithRetry(ctx context.Context, stage string, p *CommandParams, maxRetries int, retryDelay time.Duration) error {
 	var lastErr error
-	awsCleanupRun := false
-	k8sCleanupRun := false
 
 	for attempt := 0; attempt <= maxRetries; attempt++ {
 		if attempt > 0 {
@@ -274,42 +2229,89 @@ func TfDestroyWithRetry(ctx context.Context, stage string, p *CommandParams, max
 			return nil
 		}
 
-		// Check if this is a retryable error
 		errStr := lastErr.Error()
+
+		// Attempt automatic stale lock recovery
+		if strings.Contains(errStr, "Error acquiring the state lock") || strings.Contains(errStr, "state blob is already locked") {
+			_ = recoverStaleLock(ctx, stage, p, errStr)
+		}
+
+		// Self-heal orphaned in-cluster state: when the destroy fails because the
+		// Kubernetes/Helm provider can't reach the cluster, OR because Helm could
+		// not delete its own release record, the backing objects are already gone
+		// (they vanished with the cluster / were deprovisioned by the pre-delete
+		// hook). If the cluster is confirmed absent, drop just those orphaned
+		// in-cluster resources from state and retry so the stage — and ultimately
+		// the state backend teardown — can complete. AWS resources are untouched.
+		if (isClusterUnreachableError(errStr) || isHelmReleaseRecordError(errStr)) && clusterAbsent(ctx, p) {
+			removed, clearErr := clearOrphanedClusterState(ctx, stage, p)
+			if clearErr != nil {
+				log.Warn("Failed to clear orphaned in-cluster state", "stage", stage, "error", clearErr)
+			} else if removed > 0 {
+				util.Msgf("Cluster absent — removed %d orphaned in-cluster resource(s) from stage %s state, retrying destroy", removed, stage)
+				// Retry immediately; the remaining (cloud) resources can destroy.
+				if retryErr := TfDestroy(ctx, stage, p); retryErr == nil {
+					return nil
+				} else {
+					lastErr = retryErr
+					errStr = retryErr.Error()
+				}
+			}
+		}
+
+		// Tolerate already-absent git refs on resumed/re-run cleans: a previous
+		// clean may have already deleted the apps branch, so GitHub answers the
+		// delete with 422 "Reference does not exist". The branch is genuinely
+		// gone, so drop the stale github_branch entries from state and retry
+		// rather than fail teardown. This is safe — github_branch manages only a
+		// git ref (no cloud/cluster infra), so removing it from state never
+		// orphans real resources.
+		if isGitRefAbsentError(errStr) {
+			removed, clearErr := clearAbsentGitRefState(ctx, stage, p)
+			if clearErr != nil {
+				log.Warn("Failed to clear already-absent git ref state", "stage", stage, "error", clearErr)
+			} else if removed > 0 {
+				util.Msgf("Git ref already absent — removed %d stale branch resource(s) from stage %s state, retrying destroy", removed, stage)
+				if retryErr := TfDestroy(ctx, stage, p); retryErr == nil {
+					return nil
+				} else {
+					lastErr = retryErr
+					errStr = retryErr.Error()
+				}
+			}
+		}
+
+		// Recover a foundation-stage false negative where the external-secrets
+		// pre-delete cleanup finished, but Helm timed out deleting its own
+		// release record before reporting success back to OpenTofu.
+		if isRecoverableExternalSecretsDestroyTimeout(stage, errStr) {
+			recovered, recoverErr := recoverTimedOutExternalSecretsDestroy(ctx, stage, p, errStr)
+			if recoverErr != nil {
+				log.Warn("Failed to recover timed-out external-secrets destroy", "stage", stage, "error", recoverErr)
+			} else if recovered {
+				if retryErr := TfDestroy(ctx, stage, p); retryErr == nil {
+					return nil
+				} else {
+					lastErr = retryErr
+					errStr = retryErr.Error()
+				}
+			}
+		}
+
+		// Check if this is a retryable error
 		if !isRetryableDestroyError(errStr) {
 			log.Warn("Non-retryable error during destroy", "stage", stage, "error", lastErr)
 			return lastErr
 		}
 
 		log.Warn("Retryable error during destroy", "stage", stage, "attempt", attempt, "error", lastErr)
-
-		// If it's a Helm release error (cluster unreachable, webhooks, etc.),
-		// try cleaning up K8s blocking resources first
-		if isHelmReleaseError(errStr) && !k8sCleanupRun {
-			util.Hdr("Running Kubernetes Cleanup (retry)")
-			util.Msg("Terraform encountered a Helm/Kubernetes error. Cleaning up blocking resources...")
-			cleanupKubernetesBlockers(ctx)
-			k8sCleanupRun = true
-		}
-
-		// Run AWS CLI cleanup as fallback (only once)
-		// This handles orphaned EC2 instances, ENIs, and security groups that may be
-		// blocking Terraform destroy. The primary cleanup runs via Helm pre-delete hooks,
-		// but those may fail if the cluster is unreachable or has other issues.
-		if !awsCleanupRun {
-			util.Hdr("Running AWS Resource Cleanup (fallback)")
-			util.Msg("Terraform encountered a dependency error. Running AWS CLI cleanup to remove orphaned resources...")
-			if cleanupErr := ForceAWSCleanup(ctx, p); cleanupErr != nil {
-				log.Warn("AWS cleanup encountered errors (continuing)", "error", cleanupErr)
-			}
-			awsCleanupRun = true
-		}
 	}
 
 	return lastErr
 }
 
 // isRetryableDestroyError checks if an error is likely transient and worth retrying.
+// Release lifecycle is managed by Flux remediation; quartzctl retries only infra transients.
 func isRetryableDestroyError(errStr string) bool {
 	retryablePatterns := []string{
 		"DependencyViolation",
@@ -317,48 +2319,523 @@ func isRetryableDestroyError(errStr string) bool {
 		"is currently in use",
 		"NetworkInterfaceInUse",
 		"InvalidGroup.InUse",
-		// Helm release errors that occur when cluster is unreachable
-		"failed to delete release",
 		"Kubernetes cluster unreachable",
 		"connection refused",
 		"no endpoints available",
 		"i/o timeout",
+		"Error acquiring the state lock",
+		"state blob is already locked",
 	}
 	for _, pattern := range retryablePatterns {
-		if len(errStr) > 0 && contains(errStr, pattern) {
+		if len(errStr) > 0 && strings.Contains(errStr, pattern) {
 			return true
 		}
 	}
 	return false
 }
 
-// isHelmReleaseError checks if the error is specifically a Helm release failure
-// (cluster unreachable, release already gone, etc.)
-func isHelmReleaseError(errStr string) bool {
-	helmPatterns := []string{
-		"failed to delete release",
-		"release: not found",
+// isClusterUnreachableError reports whether a destroy/refresh error stems from
+// the Kubernetes/Helm providers being unable to reach the cluster's API server.
+// This is distinct from a retryable transient (handled by isRetryableDestroyError):
+// when the cluster is permanently gone these never succeed on retry, so the
+// orphaned in-cluster state must be cleared instead. The patterns cover the
+// EKS data-source lookup 404, the kubernetes provider config_path failure, and
+// the discovery-client/RESTMapper failures observed during teardown.
+func isClusterUnreachableError(errStr string) bool {
+	unreachablePatterns := []string{
+		"ResourceNotFoundException",
+		"No cluster found",
+		"couldn't find resource",          // data.aws_eks_cluster lookup miss
+		"cannot create discovery client",  // kubernetes provider, no client config
+		"Failed to get RESTMapper client", // kubernetes_resource data source
+		"config_path",                     // provider "kubernetes" {} invalid kubeconfig path
 		"Kubernetes cluster unreachable",
+		"the server could not find the requested resource",
+	}
+	for _, pattern := range unreachablePatterns {
+		if len(errStr) > 0 && strings.Contains(errStr, pattern) {
+			return true
+		}
+	}
+	return false
+}
+
+// isHelmReleaseRecordError reports whether a destroy error is the Helm
+// "release record" deletion failure — the pre-delete hook already deprovisioned
+// the backing cloud/in-cluster objects, but Helm could not delete its own
+// release bookkeeping (e.g. a stuck finalizer on an orphaned CRD). The managed
+// infrastructure is already gone, so the remedy is to drop the stuck
+// helm_release from state rather than fail the whole teardown.
+func isHelmReleaseRecordError(errStr string) bool {
+	recordPatterns := []string{
+		"failed to delete release",
+		"Unable to uninstall Helm release",
+	}
+	for _, pattern := range recordPatterns {
+		if len(errStr) > 0 && strings.Contains(errStr, pattern) {
+			return true
+		}
+	}
+	return false
+}
+
+func isRecoverableExternalSecretsDestroyTimeout(stage string, errStr string) bool {
+	if stage != "foundation" || len(errStr) == 0 {
+		return false
+	}
+	if !strings.Contains(errStr, "external-secrets") {
+		return false
+	}
+	if !isHelmReleaseRecordError(errStr) {
+		return false
+	}
+	return strings.Contains(errStr, "context deadline exceeded") ||
+		strings.Contains(errStr, "timeout while waiting")
+}
+
+// clusterAbsent reports whether the target EKS cluster is confirmed gone. It is
+// used to gate destructive state surgery (dropping orphaned in-cluster resources)
+// so we only do so when the cluster genuinely no longer exists — never on a
+// transient connectivity blip. A nil error (cluster reachable) or any non
+// "not found" error returns false.
+func clusterAbsent(ctx context.Context, p *CommandParams) bool {
+	_, err := p.Provider().Kubernetes(ctx)
+	if err == nil {
+		return false
+	}
+	return isClusterNotFoundError(err)
+}
+
+// clearOrphanedClusterState drops the in-cluster (Helm/Kubernetes) MANAGED
+// resources from a stage's state so a subsequent destroy can complete. It is a
+// no-op returning (0, nil) when there is nothing to clear. AWS-provider
+// resources in the stage are preserved for normal destruction.
+func clearOrphanedClusterState(ctx context.Context, stage string, p *CommandParams) (int, error) {
+	client := tofu.Instance(ctx, *p.Settings())
+	s := p.Settings().Config.Stages[stage]
+	return client.StateRemoveOrphanedClusterResources(ctx, s)
+}
+
+// recoverTimedOutExternalSecretsDestroy converts a timed-out external-secrets
+// uninstall into a clean retry when Quartz can prove the release is already
+// gone and only stale Helm bookkeeping remains.
+func recoverTimedOutExternalSecretsDestroy(ctx context.Context, stage string, p *CommandParams, errStr string) (bool, error) {
+	if !isRecoverableExternalSecretsDestroyTimeout(stage, errStr) {
+		return false, nil
+	}
+
+	k8s, err := p.Provider().Kubernetes(ctx)
+	if err != nil {
+		return false, err
+	}
+
+	scrubbed, scrubErr := k8s.ScrubStuckHelmReleaseSecrets(ctx, 0)
+	if scrubErr != nil {
+		log.Warn("Failed to scrub stuck Helm release secrets during external-secrets recovery", "stage", stage, "error", scrubErr)
+	}
+
+	assessment, err := k8s.AssessExternalSecretsTeardown(ctx)
+	if err != nil {
+		return false, err
+	}
+	if !assessment.Recoverable {
+		log.Info("Timed-out external-secrets destroy is not yet recoverable",
+			"stage", stage,
+			"summary", assessment.Summary,
+			"helmReleaseSecrets", assessment.HelmReleaseSecrets,
+			"remainingResources", assessment.RemainingResources)
+		return false, nil
+	}
+
+	removed, err := clearTimedOutExternalSecretsState(ctx, stage, p)
+	if err != nil {
+		return false, err
+	}
+	if removed == 0 {
+		return false, nil
+	}
+
+	util.Msg(externalSecretsDestroyRecoveryMessage(stage, removed, len(scrubbed)))
+	return true, nil
+}
+
+func externalSecretsDestroyRecoveryMessage(stage string, removed int, scrubbed int) string {
+	extra := ""
+	if scrubbed > 0 {
+		extra = fmt.Sprintf(" after scrubbing %d stuck Helm record(s)", scrubbed)
+	}
+	return fmt.Sprintf(
+		"Quartz verified External Secrets was already torn down in-cluster%s; removed %d stale state record(s) from stage %s and is continuing cleanup",
+		extra,
+		removed,
+		stage,
+	)
+}
+
+func clearTimedOutExternalSecretsState(ctx context.Context, stage string, p *CommandParams) (int, error) {
+	client := tofu.Instance(ctx, *p.Settings())
+	s := p.Settings().Config.Stages[stage]
+	addrs, err := client.StateList(ctx, s, "helm_release.external_secrets")
+	if err != nil {
+		return 0, err
+	}
+	if len(addrs) == 0 {
+		return 0, nil
+	}
+	if err := client.StateRemove(ctx, s, addrs...); err != nil {
+		return 0, err
+	}
+	return len(addrs), nil
+}
+
+// isGitRefAbsentError reports whether a destroy error stems from deleting a git
+// ref (branch) that is already gone. GitHub answers a delete of a non-existent
+// ref with 422 "Reference does not exist", which surfaces on a resumed or
+// repeated clean after the branch was removed by an earlier run.
+func isGitRefAbsentError(errStr string) bool {
+	return len(errStr) > 0 && strings.Contains(errStr, "Reference does not exist")
+}
+
+// clearAbsentGitRefState drops github_branch resources from a stage's state so a
+// subsequent destroy can converge when the underlying ref is already gone. It
+// is safe because github_branch manages only a git ref — removing it from state
+// never orphans cloud or cluster infrastructure. Returns the number of entries
+// removed (0 when there is nothing to clear).
+func clearAbsentGitRefState(ctx context.Context, stage string, p *CommandParams) (int, error) {
+	client := tofu.Instance(ctx, *p.Settings())
+	s := p.Settings().Config.Stages[stage]
+	addrs, err := client.StateList(ctx, s, "github_branch.")
+	if err != nil {
+		return 0, err
+	}
+	if len(addrs) == 0 {
+		return 0, nil
+	}
+	if err := client.StateRemove(ctx, s, addrs...); err != nil {
+		return 0, err
+	}
+	return len(addrs), nil
+}
+
+// stageStateEmpty reports whether a stage's state has no resource instances
+// recorded (the structured equivalent of an empty `tofu state list`). It is used
+// to skip the pre-destroy refresh for stages with nothing to refresh — which
+// both saves time and, more importantly, avoids noisy provider-config errors
+// (e.g. the kubernetes provider failing on a missing kubeconfig) for stages that
+// have no objects to reconcile. On any read error it returns false so the caller
+// falls back to the normal refresh path.
+func stageStateEmpty(ctx context.Context, stage string, p *CommandParams) bool {
+	client := tofu.Instance(ctx, *p.Settings())
+	s := p.Settings().Config.Stages[stage]
+	addrs, err := client.StateList(ctx, s)
+	if err != nil {
+		log.Debug("Could not determine if stage state is empty, assuming non-empty", "stage", stage, "error", err)
+		return false
+	}
+	return len(addrs) == 0
+}
+
+// TfApplyWithRetry attempts to apply a stage with retry logic for transient failures.
+// It retries on known transient errors (state locks, timeouts, API throttling) with
+// exponential backoff between attempts.
+func TfApplyWithRetry(ctx context.Context, stage string, p *CommandParams, maxRetries int, retryDelay time.Duration) error {
+	var lastErr error
+
+	for attempt := 0; attempt <= maxRetries; attempt++ {
+		if attempt > 0 {
+			// Exponential backoff: retryDelay * 2^(attempt-1)
+			backoff := retryDelay * time.Duration(1<<(attempt-1))
+			log.Info("Retrying apply after transient failure", "stage", stage, "attempt", attempt, "maxRetries", maxRetries)
+			util.Msgf("Waiting %v before retry %d/%d for stage %s...", backoff, attempt, maxRetries, stage)
+			time.Sleep(backoff)
+		}
+
+		lastErr = TfApply(ctx, stage, p)
+		if lastErr == nil {
+			return nil
+		}
+
+		errStr := lastErr.Error()
+
+		// Attempt automatic stale lock recovery
+		if strings.Contains(errStr, "Error acquiring the state lock") || strings.Contains(errStr, "state blob is already locked") {
+			_ = recoverStaleLock(ctx, stage, p, errStr)
+		}
+
+		if !isRetryableApplyError(errStr) {
+			log.Warn("Non-retryable error during apply", "stage", stage, "error", lastErr)
+			return lastErr
+		}
+
+		log.Warn("Retryable error during apply", "stage", stage, "attempt", attempt, "error", lastErr)
+	}
+
+	return lastErr
+}
+
+// isRetryableApplyError checks if an apply error is likely transient and worth retrying.
+// Application-level lifecycle errors (MissingRollbackTarget, upgrade retries) are handled
+// declaratively by Flux remediation in the chart; quartzctl only retries infra transients.
+func isRetryableApplyError(errStr string) bool {
+	retryablePatterns := []string{
+		"Error acquiring the state lock",
+		"state blob is already locked",
+		"Kubernetes cluster unreachable",
+		"connection refused",
 		"no endpoints available",
+		"i/o timeout",
+		"timeout while waiting for state to become",
+		"TooManyRequestsException",
+		"Throttling",
+		"RequestLimitExceeded",
+		"ServiceUnavailable",
+		"context deadline exceeded",
+		// Keycloak provisions realms against a multi-replica StatefulSet behind a
+		// Service. While Keycloak is still rolling out (or being rescaled), the
+		// parallel realm-create requests load-balance across replicas and one may
+		// hit a pod whose theme cache has not finished loading yet, yielding
+		// `validation error: theme "quartz" does not exist on the server`. The
+		// theme does exist (sibling realms in the same apply succeed); this is an
+		// eventual-consistency race that clears once the rollout settles, so retry.
+		// Re-apply is idempotent: realms created before the failure are already in
+		// state and plan as no-ops.
+		"does not exist on the server",
 	}
-	for _, pattern := range helmPatterns {
-		if len(errStr) > 0 && contains(errStr, pattern) {
+	for _, pattern := range retryablePatterns {
+		if len(errStr) > 0 && strings.Contains(errStr, pattern) {
 			return true
 		}
 	}
 	return false
 }
 
-// contains checks if a string contains a substring (case-insensitive would be better but keeping simple)
-func contains(s, substr string) bool {
-	return len(s) >= len(substr) && (s == substr || len(s) > 0 && findSubstring(s, substr))
+// recoverStaleLock examines a state lock error, extracts the lock ID,
+// and force-unlocks it. During retry loops, locks are always from our own
+// prior failed attempt — no age check needed.
+// Returns true if the lock was successfully recovered.
+func recoverStaleLock(ctx context.Context, stage string, p *CommandParams, errStr string) bool { //nolint:unparam
+	lockID, ok := tofu.ExtractLockID(errStr)
+	if !ok {
+		return false
+	}
+
+	log.Warn("State lock detected, force-unlocking", "stage", stage, "lockID", lockID)
+
+	client := tofu.Instance(ctx, *p.Settings())
+	s := p.Settings().Config.Stages[stage]
+	if unlockErr := client.ForceUnlock(ctx, s, lockID); unlockErr != nil {
+		log.Warn("Force-unlock failed", "stage", stage, "lockID", lockID, "error", unlockErr)
+		return false
+	}
+
+	util.Msgf("Successfully force-unlocked state for stage %s (lock ID: %s)", stage, lockID)
+	return true
 }
 
-func findSubstring(s, substr string) bool {
-	for i := 0; i <= len(s)-len(substr); i++ {
-		if s[i:i+len(substr)] == substr {
-			return true
+// buildDestroyWaves groups stages into waves for parallel destruction.
+// Stages in the same wave have no dependency relationships between them.
+// Waves are ordered so that dependents are destroyed before their dependencies
+// (highest-order stages first).
+func buildDestroyWaves(stages []schema.StageConfig) [][]schema.StageConfig {
+	// Build a set of stage IDs for quick lookup
+	stageMap := make(map[string]schema.StageConfig)
+	for _, s := range stages {
+		stageMap[s.Id] = s
+	}
+
+	// Group stages by order (stages with the same order are independent)
+	orderGroups := make(map[int][]schema.StageConfig)
+	var orders []int
+	for _, s := range stages {
+		if _, exists := orderGroups[s.Order]; !exists {
+			orders = append(orders, s.Order)
+		}
+		orderGroups[s.Order] = append(orderGroups[s.Order], s)
+	}
+
+	// Sort orders descending (highest first = destroy dependents before dependencies)
+	slices.Sort(orders)
+	slices.Reverse(orders)
+
+	var waves [][]schema.StageConfig
+	for _, order := range orders {
+		waves = append(waves, orderGroups[order])
+	}
+
+	return waves
+}
+
+// parallelInitRefresh initializes and refreshes every stage concurrently in
+// preparation for destroy. Each stage operates on its own working directory and
+// remote state, so there is no inter-stage ordering requirement here (unlike
+// destroy, which must respect reverse dependencies). Failures are logged but
+// not returned: a stage that cannot init or refresh is still attempted during
+// the destroy phase, matching the prior serial behavior.
+func parallelInitRefresh(ctx context.Context, stages []schema.StageConfig, p *CommandParams) {
+	var wg sync.WaitGroup
+	for _, s := range stages {
+		wg.Add(1)
+		go func(stage schema.StageConfig) {
+			defer wg.Done()
+
+			if err := TfInit(ctx, stage.Id, p); err != nil {
+				log.Warn("Init failed for stage, will attempt destroy anyway", "stage", stage.Id, "error", err)
+			}
+
+			// Skip the pre-destroy refresh for stages with empty state: there
+			// is nothing to reconcile, and refreshing a service-dependent stage
+			// whose cluster is already gone only produces noisy provider-config
+			// errors.
+			if stageStateEmpty(ctx, stage.Id, p) {
+				log.Debug("Stage state empty, skipping pre-destroy refresh", "stage", stage.Id)
+				return
+			}
+
+			if err := TfRefreshWithUnlock(ctx, stage.Id, p); err != nil {
+				// The umbrella Helm release is version-stamped by Flux
+				// ("1.0.0+<sha>") once it adopts the bootstrap release, so a
+				// pre-destroy refresh of the core stage surfaces the benign Helm
+				// provider "Planned version is different from configured
+				// version" mismatch. The subsequent destroy runs with
+				// Refresh(false) and is unaffected, so this is cosmetic — demote
+				// it to debug to avoid alarming clean output.
+				if isFluxOwnedReleaseDrift(err) {
+					log.Debug("Refresh reported benign Flux-owned release version drift, continuing", "stage", stage.Id, "error", err)
+				} else {
+					log.Warn("Refresh failed for stage", "stage", stage.Id, "error", err)
+				}
+			}
+		}(s)
+	}
+	wg.Wait()
+}
+
+// parallelDestroy destroys multiple independent stages concurrently.
+// Returns a slice of errors from any stages that failed.
+func parallelDestroy(ctx context.Context, stages []schema.StageConfig, p *CommandParams) []error {
+	type result struct {
+		stageId string
+		err     error
+	}
+
+	results := make(chan result, len(stages))
+
+	for _, s := range stages {
+		go func(stage schema.StageConfig) {
+			err := TfDestroyWithRetry(ctx, stage.Id, p, 2, 30*time.Second)
+			results <- result{stageId: stage.Id, err: err}
+		}(s)
+	}
+
+	var errs []error
+	for range stages {
+		r := <-results
+		if r.err != nil {
+			log.Warn("Stage destroy failed in parallel wave", "stage", r.stageId, "error", r.err)
+			errs = append(errs, fmt.Errorf("stage %s: %w", r.stageId, r.err))
 		}
 	}
-	return false
+
+	return errs
+}
+
+// the live infrastructure has drifted from the desired configuration. It is
+// used on resume to decide whether an already-checkpointed stage can be safely
+// skipped or must be re-applied. Returns true when the plan contains changes.
+func stageHasDrift(ctx context.Context, stage string, p *CommandParams) (bool, error) {
+	if err := TfInit(ctx, stage, p); err != nil {
+		return false, err
+	}
+
+	if err := tfStagePrep(ctx, stage, p); err != nil {
+		return false, err
+	}
+
+	client := tofu.Instance(ctx, *p.Settings())
+	s := p.Settings().Config.Stages[stage]
+	hasChanges, err := client.Plan(ctx, s)
+	if err != nil {
+		// The core stage bootstraps the umbrella Helm release once and then
+		// hands ownership to Flux, which re-renders the chart from git and
+		// stamps the release version with the git revision as semver build
+		// metadata (e.g. "1.0.0+<sha>"). The local bootstrap chart is bare
+		// "1.0.0", so the Helm provider can never reconcile the two: it raises
+		// "Planned version is different from configured version" at plan time.
+		// This is NOT actionable drift — Flux solely owns the release after
+		// bootstrap — so treat it as in-sync and skip rather than failing the
+		// drift check or (worse) re-applying the bootstrap render, which would
+		// prune Flux's entire rendered stack.
+		if isFluxOwnedReleaseDrift(err) {
+			log.Debug("Plan reported Flux-owned release version drift; treating stage as in sync",
+				"stage", stage, "error", err)
+			return false, nil
+		}
+		return false, err
+	}
+	return hasChanges, nil
+}
+
+// isFluxOwnedReleaseDrift reports whether a plan error is the benign Helm
+// provider version-mismatch that occurs when OpenTofu's bootstrap Helm release
+// has since been adopted and re-versioned by Flux. Such drift is expected and
+// must not trigger a destructive re-apply on resume.
+func isFluxOwnedReleaseDrift(err error) bool {
+	return err != nil &&
+		strings.Contains(err.Error(), "Planned version is different from configured version")
+}
+
+// checkpoint tracks which stages have completed successfully during an install.
+// On re-entry after a failure, completed stages are skipped for idempotent behavior.
+const checkpointFileName = "install-checkpoint.json"
+
+type checkpoint struct {
+	Stages map[string]time.Time `json:"stages"`
+}
+
+func checkpointPath(p *CommandParams) string {
+	return filepath.Join(p.Settings().Config.Tmp, checkpointFileName)
+}
+
+func loadCheckpoint(p *CommandParams) *checkpoint {
+	cp := &checkpoint{Stages: make(map[string]time.Time)}
+	data, err := os.ReadFile(checkpointPath(p))
+	if err != nil {
+		return cp
+	}
+	if err := json.Unmarshal(data, cp); err != nil {
+		log.Warn("Corrupt checkpoint file, starting fresh", "error", err)
+		return &checkpoint{Stages: make(map[string]time.Time)}
+	}
+	if len(cp.Stages) > 0 {
+		util.Msgf("Found install checkpoint with %d completed stage(s)", len(cp.Stages))
+	}
+	return cp
+}
+
+func (cp *checkpoint) isCompleted(stageId string) bool {
+	_, ok := cp.Stages[stageId]
+	return ok
+}
+
+func (cp *checkpoint) markCompleted(stageId string) {
+	cp.Stages[stageId] = time.Now()
+}
+
+func (cp *checkpoint) save(p *CommandParams) {
+	data, err := json.MarshalIndent(cp, "", "  ")
+	if err != nil {
+		log.Warn("Failed to marshal checkpoint", "error", err)
+		return
+	}
+	if err := os.MkdirAll(filepath.Dir(checkpointPath(p)), 0750); err != nil {
+		log.Warn("Failed to create checkpoint directory", "error", err)
+		return
+	}
+	if err := os.WriteFile(checkpointPath(p), data, 0600); err != nil {
+		log.Warn("Failed to write checkpoint", "error", err)
+	}
+}
+
+func (cp *checkpoint) clear(p *CommandParams) {
+	os.Remove(checkpointPath(p))
 }

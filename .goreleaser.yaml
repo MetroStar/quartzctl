@@ -8,6 +8,7 @@ builds:
       - -s -w -X main.version={{ .Version }} -X main.buildDate={{ .Timestamp }}
     env:
       - CGO_ENABLED=0
+      - GOFIPS140=latest
     goos:
       - linux
       - darwin

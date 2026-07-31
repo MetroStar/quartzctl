@@ -20,7 +20,7 @@ type StageConfig struct {
 	Id           string                       `koanf:"id"`
 	Description  string                       `koanf:"description"`
 	Path         string                       `koanf:"path"`
-	Type         string                       `koanf:"type"`         // terraform, other
+	Type         string                       `koanf:"type"`         // opentofu, other
 	Dependencies []string                     `koanf:"dependencies"` // slice of stages that have to run before
 	Disabled     bool                         `koanf:"disabled"`
 	Manual       bool                         `koanf:"manual"`
@@ -30,7 +30,20 @@ type StageConfig struct {
 	Vars         map[string]StageVarsConfig   `koanf:"vars"`
 	Checks       map[string]StageChecksConfig `koanf:"checks"`
 	Destroy      StageDestroyConfig           `koanf:"destroy"`
+	Flux         StageFluxConfig              `koanf:"flux"`
 	Debug        StageDebugConfig             `koanf:"debug"`
+}
+
+// StageFluxConfig configures how a stage behaves once its bootstrap Helm release
+// has been adopted by Flux. After adoption Flux re-renders the chart from git and
+// stamps the release version with the git revision ("1.0.0+<sha>"), so any later
+// untargeted apply aborts at plan time with "Planned version is different from
+// configured version" before the stage's other resources can converge.
+// ConvergeTargets lists the resource addresses (e.g. the values overlay Secret)
+// to re-apply with -target on that drift so day-2 configuration changes still take
+// effect without disturbing the Flux-owned release.
+type StageFluxConfig struct {
+	ConvergeTargets []string `koanf:"converge_targets"`
 }
 
 // StageChecksConfig represents the configuration for checks associated with a stage.
@@ -41,6 +54,7 @@ type StageChecksConfig struct {
 	Kubernetes []StageChecksKubernetesConfig `koanf:"kubernetes"`
 	DaemonSet  []StageChecksDaemonSetConfig  `koanf:"daemonset"`
 	State      []StageChecksStateConfig      `koanf:"state"`
+	Oidc       []StageChecksOidcConfig       `koanf:"oidc"`
 	Order      int                           `koanf:"order"`
 }
 
@@ -71,7 +85,7 @@ type StageChecksHttpConfig struct {
 	App         string                       `koanf:"app"`
 	StatusCodes []int                        `koanf:"status_codes"`
 	Content     StageChecksHttpContentConfig `koanf:"content"`
-	Verify      bool                         `koanf:"verify"`
+	Insecure    bool                         `koanf:"insecure"`
 	Retry       StageChecksRetryConfig       `koanf:"retry"`
 }
 
@@ -118,6 +132,16 @@ type StageChecksDaemonSetConfig struct {
 type StageChecksRetryConfig struct {
 	Limit       int `koanf:"limit"`
 	WaitSeconds int `koanf:"wait_seconds"`
+}
+
+// StageChecksOidcConfig represents the configuration for OIDC validation checks.
+type StageChecksOidcConfig struct {
+	App          string                 `koanf:"app"`
+	ClientID     string                 `koanf:"client_id"`
+	ClientSecret string                 `koanf:"client_secret"`
+	TokenURL     string                 `koanf:"token_url"`
+	SecretPath   string                 `koanf:"secret_path"`
+	Retry        StageChecksRetryConfig `koanf:"retry"`
 }
 
 // StageDestroyConfig represents the configuration for destroying resources in a stage.

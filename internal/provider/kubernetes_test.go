@@ -24,14 +24,68 @@ import (
 	"path"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/MetroStar/quartzctl/internal/config/schema"
 	"github.com/MetroStar/quartzctl/internal/util"
+	admissionregistrationv1 "k8s.io/api/admissionregistration/v1"
 	corev1 "k8s.io/api/core/v1"
+	discoveryv1 "k8s.io/api/discovery/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	k8sSchema "k8s.io/apimachinery/pkg/runtime/schema"
 )
+
+func ptr[T any](v T) *T {
+	return &v
+}
+
+func TestProviderPrometheusProxyPodName(t *testing.T) {
+	port := int32(9090)
+	api := NewKubernetesApiMock().WithClientObjects(&discoveryv1.EndpointSlice{
+		ObjectMeta: metav1.ObjectMeta{
+			Namespace: "monitoring",
+			Name:      "monitoring-monitoring-kube-prometheus-abc12",
+			Labels: map[string]string{
+				"kubernetes.io/service-name": "monitoring-monitoring-kube-prometheus",
+			},
+		},
+		Ports: []discoveryv1.EndpointPort{
+			{
+				Name:     ptr("http-web"),
+				Port:     &port,
+				Protocol: ptr(corev1.ProtocolTCP),
+			},
+		},
+		Endpoints: []discoveryv1.Endpoint{
+			{
+				TargetRef: &corev1.ObjectReference{
+					Kind:      "Pod",
+					Namespace: "monitoring",
+					Name:      "prometheus-0",
+				},
+			},
+		},
+	})
+	c, err := NewKubernetesClient(api, KubeconfigInfo{}, schema.QuartzConfig{})
+	if err != nil {
+		t.Fatalf("unexpected error constructing kubernetes client: %v", err)
+	}
+
+	clientset, err := c.api.ClientSet()
+	if err != nil {
+		t.Fatalf("unexpected error constructing clientset: %v", err)
+	}
+
+	podName, err := prometheusProxyPodName(context.Background(), clientset, "monitoring", "monitoring-monitoring-kube-prometheus", 9090)
+	if err != nil {
+		t.Fatalf("unexpected lookup error: %v", err)
+	}
+
+	if podName != "prometheus-0" {
+		t.Fatalf("unexpected pod name %q", podName)
+	}
+}
 
 func TestProviderKubernetesClientCtor(t *testing.T) {
 	t.Setenv("KUBECONFIG", "")
@@ -383,6 +437,55 @@ func TestProviderKubernetesClientGetConfigMapValue(t *testing.T) {
 		m["key1"] != "val1" ||
 		m["key2"] != "val2" {
 		t.Errorf("unexpected response from kubernetes client get cm, %v", m)
+	}
+}
+
+func TestProviderKubernetesClientGetCleanupStatus(t *testing.T) {
+	cm := corev1.ConfigMap{}
+	cm.Name = "quartz-cleanup-status"
+	cm.Namespace = "quartz"
+	cm.Data = map[string]string{
+		"phase":  "complete",
+		"status": "Succeeded",
+		"cleanupEvents": `[
+			{"at":"2026-06-11T11:59:59Z","kind":"status","phase":"flux","status":"Running","detail":"Suspending Flux reconciliation"},
+			{"at":"2026-06-11T12:00:00Z","kind":"degraded","phase":"nodeclaims","status":"Degraded","detail":"Karpenter finalizer lag detected"}
+		]`,
+	}
+	event := corev1.Event{}
+	event.Name = "quartz-cleanup-abc"
+	event.Namespace = "quartz"
+	event.Labels = map[string]string{"app.kubernetes.io/name": "quartz-cleanup"}
+	event.Reason = "KarpenterFinalizerLag"
+	event.Type = "Warning"
+	event.Message = "finalizer lag"
+	event.Count = 2
+	event.LastTimestamp = metav1.NewTime(time.Date(2026, 6, 11, 12, 0, 0, 0, time.UTC))
+	api := NewKubernetesApiMock().WithClientObjects(&cm, &event)
+
+	c, err := NewKubernetesClient(api, KubeconfigInfo{}, schema.QuartzConfig{})
+	if err != nil {
+		t.Errorf("unexpected error from kubernetes client constructor, %v", err)
+		return
+	}
+
+	status, err := c.GetCleanupStatus(context.Background(), "quartz", "quartz-cleanup-status")
+	if err != nil {
+		t.Errorf("unexpected error from kubernetes client get cleanup status, %v", err)
+		return
+	}
+
+	if status.Data["status"] != "Succeeded" || status.Data["phase"] != "complete" {
+		t.Errorf("unexpected cleanup status data, %v", status.Data)
+	}
+	if len(status.Events) != 1 || status.Events[0].Reason != "KarpenterFinalizerLag" || status.Events[0].Count != 2 {
+		t.Errorf("unexpected cleanup events, %v", status.Events)
+	}
+	if len(status.HookEvents) != 2 ||
+		status.HookEvents[0].Phase != "flux" ||
+		status.HookEvents[1].Kind != "degraded" ||
+		status.HookEvents[1].Status != "Degraded" {
+		t.Errorf("unexpected cleanup hook history, %v", status.HookEvents)
 	}
 }
 
@@ -863,7 +966,27 @@ func TestProviderKubernetesClientListVirtualServices(t *testing.T) {
 
 func TestProviderKubernetesClientListVirtualServicesNotFound(t *testing.T) {
 	// Test when VirtualService CRD doesn't exist
+	// Clear the shared cache so a prior test's lookup doesn't leak in
+	defaultCache.mutex.Lock()
+	defaultCache.kinds = map[string]k8sSchema.GroupVersionResource{}
+	defaultCache.mutex.Unlock()
+
 	api := NewKubernetesApiMock()
+	// Remove VirtualService from discovery resources so LookupKind fails
+	api.resources = []*metav1.APIResourceList{
+		{
+			GroupVersion: "external-secrets.io/v1beta1",
+			APIResources: []metav1.APIResource{
+				{Name: "externalsecrets", Namespaced: true, Kind: "ExternalSecret"},
+			},
+		},
+		{
+			GroupVersion: "apps/v1",
+			APIResources: []metav1.APIResource{
+				{Name: "deployments", Namespaced: true, Kind: "Deployment"},
+			},
+		},
+	}
 	cfg := schema.QuartzConfig{}
 	kubeconfig := KubeconfigInfo{}
 
@@ -1261,4 +1384,319 @@ func TestProviderKubernetesClientExportEmpty(t *testing.T) {
 	if len(result) != 0 {
 		t.Errorf("expected empty result for empty objects list, got %d entries", len(result))
 	}
+}
+
+func TestProviderKubernetesClientReapOrphanedAdmissionWebhooks(t *testing.T) {
+	svcRef := func(ns, name string) *admissionregistrationv1.ServiceReference {
+		return &admissionregistrationv1.ServiceReference{Namespace: ns, Name: name}
+	}
+
+	// A live service backing one webhook; the other webhooks reference services
+	// that do not exist and must be reaped.
+	liveSvc := &corev1.Service{
+		ObjectMeta: metav1.ObjectMeta{Namespace: "kyverno", Name: "kyverno-svc"},
+	}
+
+	orphanVwc := &admissionregistrationv1.ValidatingWebhookConfiguration{
+		ObjectMeta: metav1.ObjectMeta{Name: "orphan-validating"},
+		Webhooks: []admissionregistrationv1.ValidatingWebhook{{
+			Name:         "v.orphan.svc",
+			ClientConfig: admissionregistrationv1.WebhookClientConfig{Service: svcRef("gone-ns", "gone-svc")},
+		}},
+	}
+	liveVwc := &admissionregistrationv1.ValidatingWebhookConfiguration{
+		ObjectMeta: metav1.ObjectMeta{Name: "live-validating"},
+		Webhooks: []admissionregistrationv1.ValidatingWebhook{{
+			Name:         "v.live.svc",
+			ClientConfig: admissionregistrationv1.WebhookClientConfig{Service: svcRef("kyverno", "kyverno-svc")},
+		}},
+	}
+	orphanMwc := &admissionregistrationv1.MutatingWebhookConfiguration{
+		ObjectMeta: metav1.ObjectMeta{Name: "orphan-mutating"},
+		Webhooks: []admissionregistrationv1.MutatingWebhook{{
+			Name:         "m.orphan.svc",
+			ClientConfig: admissionregistrationv1.WebhookClientConfig{Service: svcRef("gone-ns", "gone-svc")},
+		}},
+	}
+
+	api := NewKubernetesApiMock().WithClientObjects(liveSvc, orphanVwc, liveVwc, orphanMwc)
+	cfg := schema.QuartzConfig{}
+	c, err := NewKubernetesClient(api, KubeconfigInfo{}, cfg)
+	if err != nil {
+		t.Fatalf("unexpected error from kubernetes client constructor, %v", err)
+	}
+
+	reaped, err := c.ReapOrphanedAdmissionWebhooks(context.Background())
+	if err != nil {
+		t.Fatalf("unexpected error from ReapOrphanedAdmissionWebhooks, %v", err)
+	}
+
+	// Only the two webhooks whose backing service is gone should be reaped; the
+	// webhook backed by the live service must be left untouched.
+	got := map[string]bool{}
+	for _, r := range reaped {
+		got[r] = true
+	}
+	if len(reaped) != 2 || !got["validating/orphan-validating"] || !got["mutating/orphan-mutating"] {
+		t.Fatalf("expected to reap [validating/orphan-validating mutating/orphan-mutating], got %v", reaped)
+	}
+	if got["validating/live-validating"] {
+		t.Errorf("live-validating (backed by an existing service) must not be reaped")
+	}
+}
+
+func TestPodUnhealthy(t *testing.T) {
+	waiting := func(reason string) corev1.Pod {
+		return corev1.Pod{
+			Status: corev1.PodStatus{
+				Phase: corev1.PodPending,
+				ContainerStatuses: []corev1.ContainerStatus{{
+					State: corev1.ContainerState{Waiting: &corev1.ContainerStateWaiting{Reason: reason}},
+				}},
+			},
+		}
+	}
+
+	now := metav1.Now()
+	tests := []struct {
+		name string
+		pod  corev1.Pod
+		want bool
+	}{
+		{name: "running healthy", pod: corev1.Pod{Status: corev1.PodStatus{Phase: corev1.PodRunning}}, want: false},
+		{name: "succeeded", pod: corev1.Pod{Status: corev1.PodStatus{Phase: corev1.PodSucceeded}}, want: false},
+		{name: "pending no failure", pod: corev1.Pod{Status: corev1.PodStatus{Phase: corev1.PodPending}}, want: false},
+		{name: "crashloop", pod: waiting("CrashLoopBackOff"), want: true},
+		{name: "imagepull", pod: waiting("ImagePullBackOff"), want: true},
+		{name: "config error", pod: waiting("CreateContainerConfigError"), want: true},
+		{name: "benign waiting (ContainerCreating)", pod: waiting("ContainerCreating"), want: false},
+		{name: "failed phase", pod: corev1.Pod{Status: corev1.PodStatus{Phase: corev1.PodFailed}}, want: true},
+		{
+			name: "running but container wedged",
+			pod: corev1.Pod{Status: corev1.PodStatus{
+				Phase: corev1.PodRunning,
+				ContainerStatuses: []corev1.ContainerStatus{{
+					State: corev1.ContainerState{Waiting: &corev1.ContainerStateWaiting{Reason: "CrashLoopBackOff"}},
+				}},
+			}},
+			want: true,
+		},
+		{
+			name: "terminating ignored",
+			pod: corev1.Pod{
+				ObjectMeta: metav1.ObjectMeta{DeletionTimestamp: &now},
+				Status:     corev1.PodStatus{Phase: corev1.PodFailed},
+			},
+			want: false,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := podUnhealthy(tt.pod); got != tt.want {
+				t.Errorf("podUnhealthy() = %v, want %v", got, tt.want)
+			}
+		})
+	}
+}
+
+func TestClusterProgressSummary(t *testing.T) {
+	p := ClusterProgress{
+		HelmReleasesReady:     10,
+		HelmReleasesTotal:     34,
+		UnhealthyPods:         []string{"quartz/epyon-0"},
+		TerminatingNamespaces: []string{"cert-manager"},
+		Releases: []HelmReleaseStatus{
+			{Namespace: "quartz", Name: "post-install", ReadyMsg: "running install"},
+			{Namespace: "monitoring", Name: "alloy", ReadyMsg: "upgrade retries in progress"},
+		},
+	}
+	got := p.Summary()
+	if !strings.Contains(got, "10/34 ready") ||
+		!strings.Contains(got, "1 unhealthy pod") ||
+		!strings.Contains(got, "terminating ns: cert-manager") {
+		t.Errorf("unexpected summary: %q", got)
+	}
+	withStragglers := p.SummaryWithStragglers(1)
+	if !strings.Contains(withStragglers, "waiting on: quartz/post-install (running install)") ||
+		!strings.Contains(withStragglers, "+1 more") {
+		t.Errorf("unexpected straggler summary: %q", withStragglers)
+	}
+
+	clean := ClusterProgress{HelmReleasesReady: 34, HelmReleasesTotal: 34}
+	if got := clean.Summary(); got != "HelmReleases 34/34 ready" {
+		t.Errorf("unexpected clean summary: %q", got)
+	}
+}
+
+func TestHelmActionTimeout(t *testing.T) {
+	got := helmActionTimeout("Running 'install' action with timeout of 45m0s")
+	if got != 45*time.Minute {
+		t.Fatalf("helmActionTimeout() = %v, want 45m", got)
+	}
+
+	if got := helmActionTimeout("upgrade is progressing"); got != 0 {
+		t.Fatalf("helmActionTimeout() = %v, want 0", got)
+	}
+}
+
+func TestPrometheusQueryResponseScalarValue(t *testing.T) {
+	res := PrometheusQueryResponse{
+		Data: PrometheusQueryData{
+			Result: []PrometheusQueryResult{
+				{Value: []any{1718390000.0, "42.5"}},
+			},
+		},
+	}
+
+	got, ok := res.ScalarValue()
+	if !ok {
+		t.Fatalf("expected scalar value")
+	}
+	if got != 42.5 {
+		t.Fatalf("ScalarValue() = %v, want 42.5", got)
+	}
+
+	empty := PrometheusQueryResponse{}
+	if got, ok := empty.ScalarValue(); ok || got != 0 {
+		t.Fatalf("empty ScalarValue() = %v/%v, want 0/false", got, ok)
+	}
+}
+
+func TestProviderKubernetesClientScrubStuckHelmReleaseSecrets(t *testing.T) {
+	helmSecret := func(ns, name, release, status string) *corev1.Secret {
+		return &corev1.Secret{
+			ObjectMeta: metav1.ObjectMeta{
+				Namespace: ns,
+				Name:      name,
+				Labels:    map[string]string{"owner": "helm", "name": release, "status": status},
+				// Zero creationTimestamp => effectively ancient, so these are
+				// always older than any grace window and remain eligible.
+			},
+			Type: "helm.sh/release.v1",
+		}
+	}
+
+	// Stuck records that must be scrubbed.
+	stuckUninstalling := helmSecret("quartz", "sh.helm.release.v1.foo.v3", "foo", "uninstalling")
+	stuckPending := helmSecret("quartz", "sh.helm.release.v1.bar.v1", "bar", "pending-install")
+	// Healthy records that must be preserved.
+	deployed := helmSecret("quartz", "sh.helm.release.v1.foo.v2", "foo", "deployed")
+	superseded := helmSecret("quartz", "sh.helm.release.v1.foo.v1", "foo", "superseded")
+	// A pending record created just now: a controller is actively driving this
+	// operation, so it must be preserved when a grace window is in effect.
+	freshPending := helmSecret("quartz", "sh.helm.release.v1.baz.v2", "baz", "pending-upgrade")
+	freshPending.CreationTimestamp = metav1.NewTime(time.Now())
+	// A non-helm secret that shares the owner label must be ignored (wrong type).
+	notHelm := &corev1.Secret{
+		ObjectMeta: metav1.ObjectMeta{
+			Namespace: "quartz", Name: "random",
+			Labels: map[string]string{"owner": "helm", "status": "uninstalling"},
+		},
+		Type: "Opaque",
+	}
+
+	api := NewKubernetesApiMock().WithClientObjects(stuckUninstalling, stuckPending, deployed, superseded, freshPending, notHelm)
+	c, err := NewKubernetesClient(api, KubeconfigInfo{}, schema.QuartzConfig{})
+	if err != nil {
+		t.Fatalf("unexpected error from kubernetes client constructor, %v", err)
+	}
+
+	scrubbed, err := c.ScrubStuckHelmReleaseSecrets(context.Background(), 10*time.Minute)
+	if err != nil {
+		t.Fatalf("unexpected error from ScrubStuckHelmReleaseSecrets, %v", err)
+	}
+
+	got := map[string]bool{}
+	for _, r := range scrubbed {
+		got[r] = true
+	}
+	if len(scrubbed) != 2 ||
+		!got["quartz/sh.helm.release.v1.foo.v3"] ||
+		!got["quartz/sh.helm.release.v1.bar.v1"] {
+		t.Fatalf("expected to scrub the two stuck helm release secrets, got %v", scrubbed)
+	}
+	if got["quartz/sh.helm.release.v1.foo.v2"] || got["quartz/sh.helm.release.v1.foo.v1"] || got["quartz/random"] {
+		t.Errorf("healthy/non-helm secrets must not be scrubbed, got %v", scrubbed)
+	}
+	if got["quartz/sh.helm.release.v1.baz.v2"] {
+		t.Errorf("a freshly-created pending record (active reconcile) must not be scrubbed within the grace window, got %v", scrubbed)
+	}
+}
+
+func TestProviderKubernetesClientAssessExternalSecretsTeardown(t *testing.T) {
+	helmSecret := func(ns, name, release, status string) *corev1.Secret {
+		return &corev1.Secret{
+			ObjectMeta: metav1.ObjectMeta{
+				Namespace: ns,
+				Name:      name,
+				Labels:    map[string]string{"owner": "helm", "name": release, "status": status},
+			},
+			Type: "helm.sh/release.v1",
+		}
+	}
+
+	t.Run("recoverable when release secrets and CRs are gone", func(t *testing.T) {
+		api := NewKubernetesApiMock()
+		c, err := NewKubernetesClient(api, KubeconfigInfo{}, schema.QuartzConfig{})
+		if err != nil {
+			t.Fatalf("unexpected error from kubernetes client constructor, %v", err)
+		}
+
+		assessment, err := c.AssessExternalSecretsTeardown(context.Background())
+		if err != nil {
+			t.Fatalf("unexpected error from AssessExternalSecretsTeardown, %v", err)
+		}
+
+		if !assessment.Recoverable {
+			t.Fatalf("expected recoverable assessment, got %#v", assessment)
+		}
+		if len(assessment.HelmReleaseSecrets) != 0 || len(assessment.RemainingResources) != 0 {
+			t.Fatalf("expected no lingering resources, got %#v", assessment)
+		}
+	})
+
+	t.Run("not recoverable while helm release secret remains", func(t *testing.T) {
+		api := NewKubernetesApiMock().WithClientObjects(
+			helmSecret("external-secrets", "sh.helm.release.v1.external-secrets.v1", "external-secrets", "uninstalling"),
+		)
+		c, err := NewKubernetesClient(api, KubeconfigInfo{}, schema.QuartzConfig{})
+		if err != nil {
+			t.Fatalf("unexpected error from kubernetes client constructor, %v", err)
+		}
+
+		assessment, err := c.AssessExternalSecretsTeardown(context.Background())
+		if err != nil {
+			t.Fatalf("unexpected error from AssessExternalSecretsTeardown, %v", err)
+		}
+
+		if assessment.Recoverable {
+			t.Fatalf("expected non-recoverable assessment, got %#v", assessment)
+		}
+		if len(assessment.HelmReleaseSecrets) != 1 {
+			t.Fatalf("expected one lingering helm secret, got %#v", assessment)
+		}
+	})
+
+	t.Run("not recoverable while external secret resource remains", func(t *testing.T) {
+		api := NewKubernetesApiMock().WithDynamicObjects(
+			newK8sObject("external-secrets.io/v1beta1", "ExternalSecret", "external-secrets", "example"),
+		)
+		c, err := NewKubernetesClient(api, KubeconfigInfo{}, schema.QuartzConfig{})
+		if err != nil {
+			t.Fatalf("unexpected error from kubernetes client constructor, %v", err)
+		}
+
+		assessment, err := c.AssessExternalSecretsTeardown(context.Background())
+		if err != nil {
+			t.Fatalf("unexpected error from AssessExternalSecretsTeardown, %v", err)
+		}
+
+		if assessment.Recoverable {
+			t.Fatalf("expected non-recoverable assessment, got %#v", assessment)
+		}
+		if len(assessment.RemainingResources) != 1 || !strings.Contains(assessment.RemainingResources[0], "ExternalSecret external-secrets/example") {
+			t.Fatalf("expected lingering external secret, got %#v", assessment)
+		}
+	})
 }

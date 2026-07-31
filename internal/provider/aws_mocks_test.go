@@ -29,8 +29,6 @@ import (
 	"github.com/aws/aws-sdk-go-v2/service/s3"
 	s3Types "github.com/aws/aws-sdk-go-v2/service/s3/types"
 	"github.com/aws/aws-sdk-go-v2/service/sts"
-	"github.com/aws/aws-sdk-go/aws/session"
-	"github.com/aws/aws-sdk-go/service/sts/stsiface"
 	"github.com/aws/smithy-go"
 	"sigs.k8s.io/aws-iam-authenticator/pkg/token"
 )
@@ -228,7 +226,7 @@ func (c EksClientMock) DescribeCluster(ctx context.Context, params *eks.Describe
 }
 
 // GetWithOptions returns a mock token for the GetWithOptions API call.
-func (c EksTokenGeneratorMock) GetWithOptions(options *token.GetTokenOptions) (token.Token, error) {
+func (c EksTokenGeneratorMock) GetWithOptions(ctx context.Context, options *token.GetTokenOptions) (token.Token, error) {
 	return token.Token{
 		Token:      c.token,
 		Expiration: c.expiration,
@@ -240,18 +238,6 @@ func (c EksTokenGeneratorMock) FormatJSON(token.Token) string {
 	return c.json
 }
 
-func (c EksTokenGeneratorMock) Get(string) (token.Token, error) {
-	panic("unused")
-}
-
-func (c EksTokenGeneratorMock) GetWithRole(clusterID, roleARN string) (token.Token, error) {
-	panic("unused")
-}
-
-func (c EksTokenGeneratorMock) GetWithRoleForSession(clusterID string, roleARN string, sess *session.Session) (token.Token, error) {
-	panic("unused")
-}
-
-func (c EksTokenGeneratorMock) GetWithSTS(clusterID string, stsAPI stsiface.STSAPI) (token.Token, error) {
+func (c EksTokenGeneratorMock) GetWithSTS(clusterID string, stsClient *sts.Client) (token.Token, error) {
 	panic("unused")
 }

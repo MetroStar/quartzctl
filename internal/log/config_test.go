@@ -83,10 +83,10 @@ func TestDefaultLogConfig_FileLogConfig(t *testing.T) {
 	assert.Equal(t, "info", DefaultLogConfig.Log.File.Level, "Default file log level should be 'info'")
 }
 
-func TestDefaultLogConfig_TerraformLogConfig(t *testing.T) {
-	assert.False(t, DefaultLogConfig.Log.Terraform.Enabled, "Default Terraform logging should be disabled")
-	assert.Equal(t, "log/$name.$date.tf.log", DefaultLogConfig.Log.Terraform.Path, "Default Terraform log path should match")
-	assert.Equal(t, "trace", DefaultLogConfig.Log.Terraform.Level, "Default Terraform log level should be 'trace'")
+func TestDefaultLogConfig_TofuLogConfig(t *testing.T) {
+	assert.False(t, DefaultLogConfig.Log.Tofu.Enabled, "Default OpenTofu logging should be disabled")
+	assert.Equal(t, "log/$name.$date.tf.log", DefaultLogConfig.Log.Tofu.Path, "Default OpenTofu log path should match")
+	assert.Equal(t, "debug", DefaultLogConfig.Log.Tofu.Level, "Default OpenTofu log level should be 'debug'")
 }
 
 func TestNewLogConfig_ReturnsDefaultOnEmptyPath(t *testing.T) {
@@ -106,9 +106,9 @@ log:
     enabled: true
     path: /var/log/test.log
     level: warn
-  terraform:
+  tofu:
     enabled: true
-    path: /var/log/terraform.log
+    path: /var/log/tofu.log
     level: info
 `)
 	cfgFile := filepath.Join(tmp, "log-config.yaml")
@@ -123,9 +123,9 @@ log:
 	assert.True(t, config.Log.File.Enabled, "File logging should be enabled as per the file content")
 	assert.Equal(t, "/var/log/test.log", config.Log.File.Path, "File log path should match the file content")
 	assert.Equal(t, "warn", config.Log.File.Level, "File log level should match the file content")
-	assert.True(t, config.Log.Terraform.Enabled, "Terraform logging should be enabled as per the file content")
-	assert.Equal(t, "/var/log/terraform.log", config.Log.Terraform.Path, "Terraform log path should match the file content")
-	assert.Equal(t, "info", config.Log.Terraform.Level, "Terraform log level should match the file content")
+	assert.True(t, config.Log.Tofu.Enabled, "OpenTofu logging should be enabled as per the file content")
+	assert.Equal(t, "/var/log/tofu.log", config.Log.Tofu.Path, "OpenTofu log path should match the file content")
+	assert.Equal(t, "info", config.Log.Tofu.Level, "OpenTofu log level should match the file content")
 }
 
 func TestNewLogConfig_ReturnsDefaultOnInvalidFile(t *testing.T) {

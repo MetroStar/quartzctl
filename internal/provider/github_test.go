@@ -25,7 +25,7 @@ import (
 
 	"github.com/MetroStar/quartzctl/internal/config/schema"
 	"github.com/MetroStar/quartzctl/internal/util"
-	"github.com/google/go-github/v63/github"
+	"github.com/google/go-github/v72/github"
 )
 
 func TestProviderGithubClientProviderName(t *testing.T) {
@@ -69,7 +69,7 @@ func TestProviderGithubClientCheckAccess(t *testing.T) {
 			}
 
 			repo, _ := json.Marshal(github.Repository{
-				FullName: github.String("test"),
+				FullName: github.Ptr("test"),
 				Permissions: map[string]bool{
 					"pull":     false,
 					"push":     true,
@@ -94,11 +94,6 @@ func TestProviderGithubClientCheckAccess(t *testing.T) {
 				Name:         "testinfrarepo",
 				Organization: "example",
 				RepoUrl:      "https://github.com/example/testinfrarepo",
-			},
-			Apps: schema.RepositoryConfig{
-				Name:         "testappsrepo",
-				Organization: "example",
-				RepoUrl:      "https://github.com/example/testappsrepo",
 			},
 		},
 		Applications: map[string]schema.ApplicationRepositoryConfig{
@@ -139,7 +134,7 @@ func TestProviderGithubClientCheckAccess(t *testing.T) {
 	}
 
 	headers, rows := res.ToTable()
-	if len(rows) != 4 {
+	if len(rows) != 3 {
 		t.Errorf("unexpected response from github check access table, %v, %v", headers, rows)
 	}
 
@@ -151,7 +146,7 @@ func TestProviderGithubClientCheckAccess(t *testing.T) {
 		}
 	}
 
-	if errorCount != 4 {
-		t.Errorf("expected 4 errors, found %v", errorCount)
+	if errorCount != 3 {
+		t.Errorf("expected 3 errors, found %v", errorCount)
 	}
 }

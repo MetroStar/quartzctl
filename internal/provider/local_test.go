@@ -36,6 +36,11 @@ func TestProviderLocalClient(t *testing.T) {
 	c.PrintClusterInfo(context.Background())
 	c.PrepareAccount(context.Background())
 
+	exists, err := c.StateBackendExists(context.Background())
+	if err != nil || !exists {
+		t.Errorf("expected local provider StateBackendExists true/nil, got %v/%v", exists, err)
+	}
+
 	if name != "Local" ||
 		cfgRes != nil ||
 		accRes == nil ||

@@ -17,16 +17,20 @@ package cmd
 import (
 	"bytes"
 	"context"
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
+	"slices"
+	"strings"
 	"testing"
 	"time"
 
 	"github.com/MetroStar/quartzctl/internal/config"
+	"github.com/MetroStar/quartzctl/internal/config/schema"
 	"github.com/MetroStar/quartzctl/internal/provider"
 	"github.com/MetroStar/quartzctl/internal/stages"
-	"github.com/MetroStar/quartzctl/internal/terraform"
+	"github.com/MetroStar/quartzctl/internal/tofu"
 	"github.com/MetroStar/quartzctl/internal/util"
 	"github.com/knadh/koanf/v2"
 	"github.com/stretchr/testify/assert"
@@ -43,7 +47,7 @@ func TestNewRootLoginCommand(t *testing.T) {
 	cmd := NewRootLoginCommand(p).Command
 
 	assert.Equal(t, "login", cmd.Name)
-	assert.Equal(t, "Generate a kubeconfig for the current cluster", cmd.Usage)
+	assert.Equal(t, "Generate/refresh a kubeconfig for the current cluster", cmd.Usage)
 	assert.Len(t, cmd.Flags, 1)
 
 	flag := cmd.Flags[0].(*cli.StringFlag)
@@ -70,6 +74,12 @@ func TestNewRootCheckCommand(t *testing.T) {
 
 	assert.Equal(t, "check", cmd.Name)
 	assert.Equal(t, "Check environment and configuration for required values", cmd.Usage)
+	assert.Len(t, cmd.Flags, 2)
+
+	flag := cmd.Flags[0].(*cli.BoolFlag)
+	assert.Equal(t, "ai-telemetry", flag.Name)
+	flag = cmd.Flags[1].(*cli.BoolFlag)
+	assert.Equal(t, "install-readiness", flag.Name)
 
 	err := cmd.Action(context.Background(), &cli.Command{})
 	assert.NoError(t, err)
@@ -199,6 +209,19 @@ func TestCmdClusterInfo(t *testing.T) {
 	}
 }
 
+func TestCmdClusterInfoIncludesModelWarmerNote(t *testing.T) {
+	p := defaultTestConfig(t)
+
+	var buf bytes.Buffer
+	util.SetWriter(&buf)
+	t.Cleanup(func() { util.SetWriter(os.Stdout) })
+
+	err := ClusterInfo(context.Background(), p)
+	assert.NoError(t, err)
+	assert.Contains(t, buf.String(), "Background tasks")
+	assert.Contains(t, buf.String(), "Ollama persistent model store is not ready yet")
+}
+
 func TestCmdClusterLogin(t *testing.T) {
 	p := defaultTestConfig(t)
 
@@ -210,9 +233,142 @@ func TestCmdClusterLogin(t *testing.T) {
 	}
 }
 
+func TestIsClusterNotFoundError(t *testing.T) {
+	tests := []struct {
+		name string
+		err  error
+		want bool
+	}{
+		{"nil", nil, false},
+		{"resource not found", errors.New("operation error EKS: DescribeCluster, ResourceNotFoundException: No cluster found for name: foo"), true},
+		{"no cluster found", errors.New("No cluster found for name: foo"), true},
+		{"status 404", errors.New("https response error StatusCode: 404, request id: abc"), true},
+		{"transient connectivity", errors.New("dial tcp: i/o timeout"), false},
+		{"unrelated", errors.New("some other error"), false},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := isClusterNotFoundError(tt.err); got != tt.want {
+				t.Errorf("isClusterNotFoundError(%v) = %v, want %v", tt.err, got, tt.want)
+			}
+		})
+	}
+}
+
 func TestCmdCheck(t *testing.T) {
 	p := defaultTestConfig(t)
 	Check(context.Background(), p)
+}
+
+func TestLoadAITelemetryConfigFromConfigMap(t *testing.T) {
+	api := provider.NewKubernetesApiMock().WithClientObjects(&corev1.ConfigMap{
+		ObjectMeta: metav1.ObjectMeta{
+			Namespace: "agentgateway",
+			Name:      "agentgateway-telemetry-queries",
+		},
+		Data: map[string]string{
+			"prometheusNamespace": "obs",
+			"prometheusService":   "prom",
+			"prometheusPort":      "9091",
+			"window":              "30m",
+			"query.scrape_up":     "vector(1)",
+		},
+	})
+	k8s, err := provider.NewKubernetesClient(api, provider.KubeconfigInfo{}, schema.QuartzConfig{})
+	assert.NoError(t, err)
+
+	cfg := loadAITelemetryConfig(context.Background(), k8s)
+
+	assert.Equal(t, "obs", cfg.PrometheusNamespace)
+	assert.Equal(t, "prom", cfg.PrometheusService)
+	assert.Equal(t, 9091, cfg.PrometheusPort)
+	assert.Equal(t, "30m", cfg.Window)
+	assert.Equal(t, "vector(1)", cfg.Queries["scrape_up"])
+	assert.NotEmpty(t, cfg.Queries["recent_requests"])
+}
+
+func TestDefaultAITelemetryConfig(t *testing.T) {
+	cfg := defaultAITelemetryConfig()
+
+	assert.Equal(t, "monitoring", cfg.PrometheusNamespace)
+	assert.Equal(t, "monitoring-monitoring-kube-prometheus", cfg.PrometheusService)
+	assert.Equal(t, 9090, cfg.PrometheusPort)
+	assert.Contains(t, cfg.Queries["recent_requests"], "agentgateway_requests_total")
+	assert.Contains(t, cfg.Queries["recent_requests"], "agentgateway_gen_ai_server_request_duration_count")
+}
+
+func TestAITelemetryStatus(t *testing.T) {
+	tests := []struct {
+		key        string
+		value      float64
+		wantStatus string
+	}{
+		{key: "scrape_up", value: 1, wantStatus: "OK"},
+		{key: "scrape_up", value: 0, wantStatus: "Missing"},
+		{key: "recent_requests", value: 0, wantStatus: "No traffic"},
+		{key: "recent_5xx", value: 0, wantStatus: "OK"},
+		{key: "recent_5xx", value: 2, wantStatus: "Errors"},
+		{key: "model_not_found", value: 0, wantStatus: "OK"},
+		{key: "model_not_found", value: 1, wantStatus: "Errors"},
+	}
+
+	for _, tt := range tests {
+		t.Run(fmt.Sprintf("%s/%f", tt.key, tt.value), func(t *testing.T) {
+			status, _ := aiTelemetryStatus(tt.key, tt.value)
+			assert.Equal(t, tt.wantStatus, status)
+		})
+	}
+}
+
+func TestAITelemetryQueryTimeout(t *testing.T) {
+	t.Setenv("QUARTZ_AI_TELEMETRY_TIMEOUT", "11s")
+	assert.Equal(t, 11*time.Second, aiTelemetryQueryTimeout())
+
+	t.Setenv("QUARTZ_AI_TELEMETRY_TIMEOUT", "bogus")
+	assert.Equal(t, 8*time.Second, aiTelemetryQueryTimeout())
+}
+
+func TestSummarizeAITelemetryError(t *testing.T) {
+	cfg := aiTelemetryConfig{
+		PrometheusNamespace: "monitoring",
+		PrometheusService:   "monitoring-monitoring-kube-prometheus",
+		PrometheusPort:      9090,
+	}
+
+	tests := []struct {
+		name string
+		err  error
+		want string
+	}{
+		{
+			name: "deadline",
+			err:  context.DeadlineExceeded,
+			want: "timed out after 8s",
+		},
+		{
+			name: "not found",
+			err:  errors.New(`services "http:prometheus-operated:9090" not found`),
+			want: "was not found",
+		},
+		{
+			name: "service unavailable",
+			err:  errors.New("the server is currently unable to handle the request"),
+			want: "returned service unavailable",
+		},
+		{
+			name: "generic",
+			err:  errors.New("x509: certificate signed by unknown authority"),
+			want: "failed",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			err := summarizeAITelemetryError(tt.err, cfg, 8*time.Second)
+			assert.ErrorContains(t, err, "monitoring/monitoring-monitoring-kube-prometheus:9090")
+			assert.ErrorContains(t, err, tt.want)
+		})
+	}
 }
 
 func TestCmdRefreshSecrets(t *testing.T) {
@@ -222,6 +378,19 @@ func TestCmdRefreshSecrets(t *testing.T) {
 	if err != nil {
 		t.Errorf("unexpected error in cmd RefreshSecrets, %v", err)
 	}
+}
+
+func TestSummarizeResourceNamespaces(t *testing.T) {
+	resources := []provider.KubernetesResource{
+		{Namespace: "argocd"},
+		{Namespace: "argocd"},
+		{Namespace: "epyon"},
+		{Namespace: "jenkins"},
+	}
+
+	assert.Equal(t, 3, countResourceNamespaces(resources))
+	assert.Equal(t, "argocd(2), epyon(1), jenkins(1)", summarizeResourceNamespaces(resources, 6))
+	assert.Equal(t, "argocd(2), +2 more", summarizeResourceNamespaces(resources, 1))
 }
 
 func TestCmdCleanup(t *testing.T) {
@@ -246,6 +415,16 @@ func TestCmdConfirm(t *testing.T) {
 	}
 }
 
+func TestCmdConfirmAssumeYes(t *testing.T) {
+	p := defaultTestConfig(t)
+	p.assumeYes = true
+
+	err := Confirm(context.Background(), "Are you sure you want to run this test?", p)
+	if err != nil {
+		t.Errorf("unexpected error in cmd Confirm with assumeYes, %v", err)
+	}
+}
+
 func TestCmdExport(t *testing.T) {
 	p := defaultTestConfig(t)
 
@@ -266,10 +445,180 @@ func TestCmdPrepareAccount(t *testing.T) {
 	}
 }
 
+func TestClassifySSO(t *testing.T) {
+	tests := []struct {
+		name           string
+		app            string
+		callbackPaths  []string
+		public         bool
+		wantSSO        string
+		wantClientType string
+		wantRealm      string
+	}{
+		{
+			name:           "keycloak is the IdP itself",
+			app:            "keycloak",
+			callbackPaths:  nil,
+			wantSSO:        "IdP (admin)",
+			wantClientType: "—",
+			wantRealm:      "master",
+		},
+		{
+			name:           "no callbacks means no SSO",
+			app:            "k8sgpt",
+			callbackPaths:  nil,
+			wantSSO:        "none",
+			wantClientType: "—",
+			wantRealm:      "—",
+		},
+		{
+			name:           "oauth2-proxy callback path",
+			app:            "epyon",
+			callbackPaths:  []string{"/oauth2/callback"},
+			wantSSO:        "OIDC (oauth2-proxy)",
+			wantClientType: "confidential",
+			wantRealm:      "infra",
+		},
+		{
+			name:           "native confidential client",
+			app:            "argocd",
+			callbackPaths:  []string{"/auth/callback", "/api/dex/callback"},
+			wantSSO:        "OIDC (native)",
+			wantClientType: "confidential",
+			wantRealm:      "infra",
+		},
+		{
+			name:           "native public client",
+			app:            "headlamp",
+			callbackPaths:  []string{"/oidc-callback"},
+			public:         true,
+			wantSSO:        "OIDC (native)",
+			wantClientType: "public",
+			wantRealm:      "infra",
+		},
+		{
+			name:           "sonarqube nested oauth2 path stays native",
+			app:            "sonarqube",
+			callbackPaths:  []string{"/oauth2/callback/oidc"},
+			wantSSO:        "OIDC (native)",
+			wantClientType: "confidential",
+			wantRealm:      "infra",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			sso, clientType, realm := classifySSO(tt.app, tt.callbackPaths, tt.public)
+			assert.Equal(t, tt.wantSSO, sso)
+			assert.Equal(t, tt.wantClientType, clientType)
+			assert.Equal(t, tt.wantRealm, realm)
+		})
+	}
+}
+
+func TestTruncateDetail(t *testing.T) {
+	tests := []struct {
+		name string
+		in   string
+		max  int
+		want string
+	}{
+		{name: "short string unchanged", in: "ready", max: 10, want: "ready"},
+		{name: "trims surrounding whitespace", in: "  ready  ", max: 10, want: "ready"},
+		{name: "exact length unchanged", in: "abcde", max: 5, want: "abcde"},
+		{name: "truncated with ellipsis", in: "abcdefghij", max: 5, want: "abcd…"},
+		{name: "max of one returns single rune", in: "abcdef", max: 1, want: "a"},
+		{name: "unicode counted by rune", in: "héllo wörld", max: 6, want: "héllo…"},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			assert.Equal(t, tt.want, truncateDetail(tt.in, tt.max))
+		})
+	}
+}
+
+func TestBuildSSOSummaryRows(t *testing.T) {
+	cfg := schema.QuartzConfig{
+		Core: schema.InfrastructureEnvironmentConfig{
+			Applications: map[string]schema.InfrastructureApplicationConfig{
+				"argocd": {
+					Description:  "ArgoCD",
+					CallbackUrls: []schema.ApplicationCallbackConfig{{Path: "/auth/callback"}},
+				},
+				"epyon": {
+					Description:  "Epyon",
+					CallbackUrls: []schema.ApplicationCallbackConfig{{Path: "/oauth2/callback"}},
+				},
+				"keycloak": {
+					Description: "Keycloak",
+				},
+				"disabled-app": {
+					Description:  "Disabled",
+					Disabled:     true,
+					CallbackUrls: []schema.ApplicationCallbackConfig{{Path: "/cb"}},
+				},
+			},
+		},
+	}
+
+	rows := buildSSOSummaryRows(cfg)
+
+	// Build a lookup by package name for easy assertions.
+	byPkg := make(map[string][]string, len(rows))
+	for _, r := range rows {
+		byPkg[r[0]] = r
+	}
+
+	// Configured apps with their derived posture.
+	assert.Equal(t, []string{"ArgoCD", "OIDC (native)", "confidential", "infra"}, byPkg["ArgoCD"])
+	assert.Equal(t, []string{"Epyon", "OIDC (oauth2-proxy)", "confidential", "infra"}, byPkg["Epyon"])
+	assert.Equal(t, []string{"Keycloak", "IdP (admin)", "—", "master"}, byPkg["Keycloak"])
+
+	// Backends without SSO are appended for a complete package picture.
+	assert.Equal(t, []string{"agentgateway", "none", "—", "—"}, byPkg["agentgateway"])
+	assert.Equal(t, []string{"k8sgpt", "none", "—", "—"}, byPkg["k8sgpt"])
+	assert.Equal(t, []string{"kagent", "none", "—", "—"}, byPkg["kagent"])
+
+	// Disabled apps are omitted.
+	_, ok := byPkg["Disabled"]
+	assert.False(t, ok)
+
+	// Rows are sorted case-insensitively by package name.
+	names := make([]string, 0, len(rows))
+	for _, r := range rows {
+		names = append(names, strings.ToLower(r[0]))
+	}
+	assert.True(t, slices.IsSorted(names))
+}
+
+func TestPrintSSOSummary(t *testing.T) {
+	// Smoke test: the header is written via the util writer; the table body is
+	// rendered to stdout by lipgloss. Verify the header is emitted and the call
+	// does not panic for a representative config.
+	var buf bytes.Buffer
+	util.SetWriter(&buf)
+	t.Cleanup(func() { util.SetWriter(os.Stdout) })
+
+	cfg := schema.QuartzConfig{
+		Core: schema.InfrastructureEnvironmentConfig{
+			Applications: map[string]schema.InfrastructureApplicationConfig{
+				"argocd": {
+					Description:  "ArgoCD",
+					CallbackUrls: []schema.ApplicationCallbackConfig{{Path: "/auth/callback"}},
+				},
+			},
+		},
+	}
+
+	printSSOSummary(cfg)
+	assert.Contains(t, buf.String(), "SSO summary")
+}
+
 func defaultTestConfig(t *testing.T) *CommandParams {
 	t.Setenv("SILENT", "1")
 
-	terraform.ResetInstance()
+	tofu.ResetInstance()
 
 	c := filepath.Join("testdata", "config.happy.yaml")
 	s := filepath.Join("testdata", "secrets.happy.yaml")
@@ -280,6 +629,11 @@ func defaultTestConfig(t *testing.T) *CommandParams {
 	}
 
 	cfg.Config.Tmp = t.TempDir()
+	// Redirect file-log artifacts (e.g. the clean teardown report written by
+	// persistCleanupReport) into a per-test temp dir so Clean()-exercising tests
+	// don't litter the repo working tree with a log/ directory.
+	cfg.Config.Log.File.Path = filepath.Join(t.TempDir(), "$name.$date.log")
+	cfg.Config.Log.Tofu.Path = filepath.Join(t.TempDir(), "$name.$date.tf.log")
 
 	cm := &corev1.ConfigMap{
 		TypeMeta: metav1.TypeMeta{
@@ -292,6 +646,20 @@ func defaultTestConfig(t *testing.T) *CommandParams {
 		},
 		Data: map[string]string{
 			"key1": "true",
+		},
+	}
+
+	modelWarmerCM := &corev1.ConfigMap{
+		TypeMeta: metav1.TypeMeta{
+			Kind:       "ConfigMap",
+			APIVersion: "v1",
+		},
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      modelWarmerStatusCM,
+			Namespace: ollamaNamespace,
+		},
+		Data: map[string]string{
+			"status.json": "\x1b[0m" + `{"phase":"Running","step":"pull","model":"gemma4:12b","detail":"downloading","desiredModels":"gemma4:e4b,gemma4:12b","pulledModels":"gemma4:e4b"}` + "\x00",
 		},
 	}
 
@@ -326,6 +694,7 @@ func defaultTestConfig(t *testing.T) *CommandParams {
 		},
 	).WithClientObjects(
 		cm,
+		modelWarmerCM,
 		deployment,
 	)
 

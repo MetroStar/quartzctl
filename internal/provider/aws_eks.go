@@ -51,6 +51,16 @@ func (c *AwsClient) EksKubeconfigInfo(ctx context.Context) (KubeconfigInfo, EksT
 	}, t, nil
 }
 
+// GenerateEksToken generates an EKS authentication token for the cluster.
+//
+// Unlike EksKubeconfigInfo, this does not call DescribeCluster: the token is
+// produced purely from a presigned STS GetCallerIdentity request, requiring
+// only sts:GetCallerIdentity. This is the path used by the kubeconfig exec
+// credential plugin, where the cluster endpoint and CA are already known.
+func (c *AwsClient) GenerateEksToken(ctx context.Context) (EksToken, error) {
+	return c.generateEksUserToken()
+}
+
 // DescribeEksCluster describes the EKS cluster associated with the client.
 // It returns the cluster details or an error if the operation fails.
 func (c *AwsClient) DescribeEksCluster(ctx context.Context) (*eks.DescribeClusterOutput, error) {
@@ -67,7 +77,7 @@ func (c *AwsClient) generateEksUserToken() (EksToken, error) {
 		return EksToken{}, err
 	}
 
-	t, err := g.GetWithOptions(&token.GetTokenOptions{
+	t, err := g.GetWithOptions(context.Background(), &token.GetTokenOptions{
 		ClusterID: c.id,
 		Region:    c.region,
 	})

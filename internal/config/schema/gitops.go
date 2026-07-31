@@ -29,11 +29,8 @@ func DefaultGitopsConfig(p string) GitopsConfig {
 			Organization: "",
 			Branch:       "main",
 		},
-		Apps: RepositoryConfig{
-			Name:         "quartz-cicd",
-			Provider:     p,
-			Organization: "",
-			Branch:       "", // will be updated to cluster name if not set elsewhere
-		},
+		// `gitops.apps` is deprecated for application delivery and intentionally
+		// left empty unless a user still configures it explicitly.
+		Apps: RepositoryConfig{},
 	}
 }

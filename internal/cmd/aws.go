@@ -19,7 +19,6 @@ import (
 	"fmt"
 	"slices"
 
-	"github.com/MetroStar/quartzctl/internal/log"
 	"github.com/MetroStar/quartzctl/internal/provider"
 	"github.com/urfave/cli/v3"
 )
@@ -77,15 +76,15 @@ func NewGetEksTokenCommand() AwsCommandResult {
 // Returns:
 //   - error: An error if the token retrieval fails, otherwise nil.
 func AwsGetEksToken(ctx context.Context, name string, region string) error {
-	log.Debug("Entering", "command", "aws:get-eks-token")
-	defer log.Debug("Completed", "command", "aws:get-eks-token")
-
 	aws, err := provider.NewLazyAwsClient(ctx, name, region)
 	if err != nil {
 		return err
 	}
 
-	_, token, err := aws.EksKubeconfigInfo(ctx)
+	// The exec credential plugin only needs the token; the cluster endpoint and
+	// CA are already present in the kubeconfig. Minting the token via STS presign
+	// avoids an eks:DescribeCluster call (and the IAM permission it requires).
+	token, err := aws.GenerateEksToken(ctx)
 	if err != nil {
 		return err
 	}

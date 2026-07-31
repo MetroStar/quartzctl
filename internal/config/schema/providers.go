@@ -27,7 +27,7 @@ type ProvidersConfig struct {
 
 // NewProvidersConfig returns a new ProvidersConfig instance with default values.
 func NewProvidersConfig() ProvidersConfig {
-	return ProvidersConfig{
+	return ProvidersConfig{ //nolint:gosec
 		Cloud:         "aws",
 		Dns:           "aws",
 		SourceControl: "github",

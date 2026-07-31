@@ -78,3 +78,78 @@ func TestStagesKubernetesCheckRun(t *testing.T) {
 		return
 	}
 }
+
+// TestStagesKubernetesCheckRunClusterScoped verifies that a check on a
+// cluster-scoped resource (e.g. a CustomResourceDefinition) succeeds without a
+// namespace. Cluster-scoped kinds legitimately have no namespace, so the check
+// must not reject them for an empty namespace.
+func TestStagesKubernetesCheckRunClusterScoped(t *testing.T) {
+	cfg := schema.QuartzConfig{
+		State: schema.NewStateConfig(),
+	}
+
+	o := &unstructured.Unstructured{
+		Object: map[string]interface{}{
+			"apiVersion": "apiextensions.k8s.io/v1",
+			"kind":       "CustomResourceDefinition",
+			"metadata": map[string]interface{}{
+				"name": "widgets.example.io",
+			},
+		},
+	}
+	unstructured.SetNestedSlice(o.Object, []interface{}{
+		map[string]interface{}{"status": "True", "type": "Established"},
+	}, "status", "conditions")
+
+	api := provider.NewKubernetesApiMock().
+		WithDynamicObjects(o).
+		AddResources(&metav1.APIResourceList{
+			GroupVersion: "apiextensions.k8s.io/v1",
+			APIResources: []metav1.APIResource{
+				{Name: "customresourcedefinitions", Namespaced: false, Kind: "CustomResourceDefinition"},
+			},
+		})
+	kubeconfig := provider.KubeconfigInfo{}
+	k8s, _ := provider.NewKubernetesClient(api, kubeconfig, cfg)
+	f := provider.NewProviderFactory(cfg, schema.QuartzSecrets{}, provider.WithKubernetesProvider(k8s))
+
+	c := NewKubernetesStageCheck(schema.StageChecksKubernetesConfig{
+		Name:    "widgets.example.io",
+		Kind:    "CustomResourceDefinition",
+		State:   "Established",
+		Timeout: 1,
+	}, *f)
+
+	if err := c.Run(context.Background(), cfg); err != nil {
+		t.Errorf("unexpected error in cluster-scoped kubernetes check, %v", err)
+	}
+}
+
+// TestStagesKubernetesCheckRunMissingName verifies that a check without a name
+// is rejected even when a state is declared.
+func TestStagesKubernetesCheckRunMissingName(t *testing.T) {
+	cfg := schema.QuartzConfig{
+		State: schema.NewStateConfig(),
+	}
+
+	api := provider.NewKubernetesApiMock().
+		AddResources(&metav1.APIResourceList{
+			GroupVersion: "apiextensions.k8s.io/v1",
+			APIResources: []metav1.APIResource{
+				{Name: "customresourcedefinitions", Namespaced: false, Kind: "CustomResourceDefinition"},
+			},
+		})
+	kubeconfig := provider.KubeconfigInfo{}
+	k8s, _ := provider.NewKubernetesClient(api, kubeconfig, cfg)
+	f := provider.NewProviderFactory(cfg, schema.QuartzSecrets{}, provider.WithKubernetesProvider(k8s))
+
+	c := NewKubernetesStageCheck(schema.StageChecksKubernetesConfig{
+		Kind:    "CustomResourceDefinition",
+		State:   "Established",
+		Timeout: 1,
+	}, *f)
+
+	if err := c.Run(context.Background(), cfg); err == nil {
+		t.Errorf("expected error for missing name, got nil")
+	}
+}

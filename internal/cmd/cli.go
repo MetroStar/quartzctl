@@ -55,7 +55,7 @@ func NewCliCommand(deps CliDependencies, p AppServiceParams) *cli.Command {
 	return &cli.Command{
 		Version:               p.Version,
 		Name:                  "quartz",
-		Description:           "Quartz cloud/kubernetes platform automation tool",
+		Description:           "Quartz platform automation tool",
 		Usage:                 "\b\b ",
 		EnableShellCompletion: true,
 		Commands:              deps.Root.Commands,

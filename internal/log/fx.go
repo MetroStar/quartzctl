@@ -39,8 +39,25 @@ func NewFxLogger() *FxLogger {
 	}
 }
 
+func shouldSuppressFxEvent(event fxevent.Event) bool {
+	if DebugEnvOverride() {
+		return false
+	}
+
+	switch event.(type) {
+	case *fxevent.OnStopExecuting, *fxevent.OnStopExecuted, *fxevent.Stopping:
+		return true
+	default:
+		return false
+	}
+}
+
 // LogEvent logs an fxevent.Event. If the default logger is not yet configured, it uses the fallback logger.
 func (l *FxLogger) LogEvent(event fxevent.Event) {
+	if shouldSuppressFxEvent(event) {
+		return
+	}
+
 	if defaultLogger == nil {
 		l.fallbackLogger.LogEvent(event)
 		return

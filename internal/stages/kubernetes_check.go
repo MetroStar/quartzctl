@@ -61,12 +61,23 @@ func (c KubernetesStageCheck) Run(ctx context.Context, _ schema.QuartzConfig) er
 		}
 	}
 
-	if c.src.Wait == nil || !*(c.src.Wait) {
+	// Default to waiting when a state is specified — the whole point of declaring
+	// a state check is to block until the resource reaches that state.
+	shouldWait := c.src.State != "" // wait if state is declared
+	if c.src.Wait != nil {
+		shouldWait = *c.src.Wait // explicit override
+	}
+	if !shouldWait {
 		return nil
 	}
 
-	if c.src.Name == "" || c.src.Namespace == "" {
-		return errors.New("name and namespace required for check")
+	// Name is always required to identify the resource. Namespace is optional:
+	// cluster-scoped kinds (CustomResourceDefinition, Namespace, ClusterRole,
+	// etc.) legitimately have no namespace, so requiring one here wrongly
+	// rejects valid checks. For namespaced kinds, an omitted namespace surfaces
+	// naturally as a wait error rather than being pre-validated here.
+	if c.src.Name == "" {
+		return errors.New("name required for check")
 	}
 
 	return kube.WaitConditionState(ctx, kind, c.src.Namespace, c.src.Name, c.src.State, c.src.Timeout)

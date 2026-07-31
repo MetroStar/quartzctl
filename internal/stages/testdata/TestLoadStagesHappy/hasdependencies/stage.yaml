@@ -42,4 +42,4 @@ checks:
     - url: https://www.google.com
       status_codes:
       - 200
-      verify: false
+      insecure: true

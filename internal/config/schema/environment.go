@@ -29,6 +29,7 @@ type InfrastructureEnvironmentConfig struct {
 type InfrastructureApplicationConfig struct {
 	Disabled                   bool                              `koanf:"disabled"`
 	Description                string                            `koanf:"description"`
+	Public                     bool                              `koanf:"public"`
 	BaseUrl                    string                            `koanf:"base_url"`
 	CallbackUrls               []ApplicationCallbackConfig       `koanf:"callback_urls"`
 	Db                         InfrastructureApplicationDbConfig `koanf:"db"`
@@ -162,7 +163,7 @@ func NewInfrastructureEnvironmentConfig(name string, desc string) Infrastructure
 				DefaultPath:                "/applications",
 				Scopes:                     []string{"argocd"},
 				AccessTokenLifespanSeconds: 60 * 60 * 12, // 12 hrs
-				Lookup:                     NewApplicationLookupConfig("argocd", "argocd-initial-admin-secret", "admin", "", "password", "argocd-argocd"),
+				Lookup:                     NewApplicationLookupConfig("argocd", "argocd-initial-admin-secret", "admin", "", "password", "argocd"),
 				Keycloak: map[string]interface{}{
 					"mappers": map[string]interface{}{
 						"username": map[string]interface{}{
@@ -252,7 +253,7 @@ func NewInfrastructureEnvironmentConfig(name string, desc string) Infrastructure
 					Enabled: true,
 					Admin:   true,
 				},
-				Lookup: NewApplicationLookupConfig("sonarqube", "quartz-quartz-bigbang-sonarqube", "", "username", "password", "sonarqube-sonarqube"),
+				Lookup: NewApplicationLookupConfig("sonarqube", "quartz-bigbang-sonarqube", "", "username", "password", "sonarqube"),
 			},
 			"jenkins": {
 				Description: "Jenkins",
@@ -316,7 +317,7 @@ func NewInfrastructureEnvironmentConfig(name string, desc string) Infrastructure
 				CallbackUrls: []ApplicationCallbackConfig{
 					{Path: "/openId_auth"},
 				},
-				Lookup: NewApplicationLookupConfig("neuvector", "", "", "", "", "neuvector-neuvector"),
+				Lookup: NewApplicationLookupConfig("neuvector", "", "", "", "", "neuvector"),
 				Keycloak: map[string]interface{}{
 					"mappers": map[string]interface{}{
 						"realm roles": map[string]interface{}{
@@ -342,13 +343,69 @@ func NewInfrastructureEnvironmentConfig(name string, desc string) Infrastructure
 				CallbackUrls: []ApplicationCallbackConfig{
 					{Path: "/login/generic_oauth"},
 				},
-				Lookup: NewApplicationLookupConfig("monitoring", "monitoring-grafana", "", "admin-user", "admin-password", "monitoring-grafana-grafana"),
+				Lookup: NewApplicationLookupConfig("monitoring", "monitoring-grafana", "", "admin-user", "admin-password", "grafana"),
 			},
 			"tempo": {
 				Description: "Tempo",
 				CallbackUrls: []ApplicationCallbackConfig{
 					{Path: "/login"},
 				},
+			},
+			"headlamp": {
+				Description: "Headlamp",
+				Public:      true,
+				CallbackUrls: []ApplicationCallbackConfig{
+					{Path: "/oidc-callback"},
+				},
+				Scopes: []string{"openid", "profile", "email"},
+				Keycloak: map[string]interface{}{
+					"mappers": map[string]interface{}{
+						"groups": map[string]interface{}{
+							"protocol":       "openid-connect",
+							"protocolMapper": "oidc-group-membership-mapper",
+							"config": map[string]string{
+								"claim.name":                "groups",
+								"full.path":                 "true",
+								"multivalued":               "true",
+								"id.token.claim":            "true",
+								"access.token.claim":        "true",
+								"userinfo.token.claim":      "true",
+								"introspection.token.claim": "true",
+							},
+						},
+					},
+				},
+				Lookup: NewApplicationLookupConfig("headlamp", "", "", "", "", "headlamp"),
+			},
+			"open-webui": {
+				Description: "Open WebUI",
+				CallbackUrls: []ApplicationCallbackConfig{
+					{Path: "/oauth/oidc/callback"},
+				},
+				// Open-WebUI's bundled SQLite is a single-writer store that
+				// concurrent replicas corrupt, so the shared infra Postgres
+				// (same RDS instance as sonarqube/keycloak) backs it instead.
+				// Admin:true reuses the master role (no separate role to manage,
+				// like sonarqube); a distinct DbName isolates its tables in a
+				// dedicated database on the shared instance (created by the
+				// chart's ensure-open-webui-db Job).
+				Db: InfrastructureApplicationDbConfig{
+					Enabled: true,
+					Admin:   true,
+					DbName:  "openwebui",
+				},
+				Lookup: NewApplicationLookupConfig("open-webui", "", "", "", "", "open-webui"),
+			},
+			// epyon has no native OIDC support, so a confidential client is
+			// provisioned for an oauth2-proxy front door (callback /oauth2/callback)
+			// that performs the Keycloak login and forwards authenticated traffic to
+			// the epyon web UI. See chart/templates/epyon/oauth2-proxy.yaml.
+			"epyon": {
+				Description: "Epyon",
+				CallbackUrls: []ApplicationCallbackConfig{
+					{Path: "/oauth2/callback"},
+				},
+				Lookup: NewApplicationLookupConfig("epyon", "", "", "", "", "epyon"),
 			},
 		},
 	}
