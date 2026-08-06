@@ -24,6 +24,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/MetroStar/quartzctl/internal/provider"
 	"github.com/MetroStar/quartzctl/internal/log"
 	"github.com/MetroStar/quartzctl/internal/stages"
 	"github.com/MetroStar/quartzctl/internal/tofu"
@@ -561,6 +562,11 @@ func TfApply(ctx context.Context, stage string, p *CommandParams) error {
 		return err
 	}
 
+	err = failOnEc2IamStateDrift(ctx, stage, p, client)
+	if err != nil {
+		return err
+	}
+
 	err = wrapChecks(ctx, stage, "apply", p, func() error {
 		s := p.Settings().Config.Stages[stage]
 		return client.Apply(ctx, s, tofu.TofuApplyOpts{AllowDeferral: p.allowDeferral})
@@ -576,6 +582,92 @@ func TfApply(ctx context.Context, stage string, p *CommandParams) error {
 	}
 	util.Msgf("Stage %s completed in %v", stage, time.Since(stageStart).Round(time.Second))
 	return nil
+}
+
+func failOnEc2IamStateDrift(ctx context.Context, stage string, p *CommandParams, client *tofu.TofuClient) error {
+	if !strings.EqualFold(stage, "ec2") {
+		return nil
+	}
+
+	cp, err := p.Provider().Cloud(ctx)
+	if err != nil {
+		log.Debug("Skipping ec2 IAM drift guard: cloud provider unavailable", "stage", stage, "error", err)
+		return nil
+	}
+
+	awsClient, ok := cp.(provider.AwsClient)
+	if !ok {
+		return nil
+	}
+
+	s := p.Settings().Config.Stages[stage]
+	addresses, err := client.StateList(ctx, s)
+	if err != nil {
+		log.Debug("Skipping ec2 IAM drift guard: failed to read stage state", "stage", stage, "error", err)
+		return nil
+	}
+
+	roleTracked := stateHasAddressSuffix(addresses, "aws_iam_role.server")
+	profileTracked := stateHasAddressSuffix(addresses, "aws_iam_instance_profile.server")
+	if roleTracked && profileTracked {
+		return nil
+	}
+
+	cluster := p.Settings().Config.Name
+	roleExists, profileExists, err := awsClient.Ec2ServerIdentityExists(ctx, cluster)
+	if err != nil {
+		log.Debug("Skipping ec2 IAM drift guard: failed to inspect IAM role/profile", "stage", stage, "cluster", cluster, "error", err)
+		return nil
+	}
+
+	return ec2IamStateDriftError(stage, cluster, roleTracked, profileTracked, roleExists, profileExists)
+}
+
+func stateHasAddressSuffix(addresses []string, suffix string) bool {
+	for _, addr := range addresses {
+		if strings.HasSuffix(addr, suffix) {
+			return true
+		}
+	}
+
+	return false
+}
+
+func ec2IamStateDriftError(stage string, cluster string, roleTracked bool, profileTracked bool, roleExists bool, profileExists bool) error {
+	if (roleTracked || !roleExists) && (profileTracked || !profileExists) {
+		return nil
+	}
+
+	roleName := fmt.Sprintf("%s-server-role", cluster)
+	profileName := fmt.Sprintf("%s-server-profile", cluster)
+
+	var missingState []string
+	if !roleTracked {
+		missingState = append(missingState, "aws_iam_role.server")
+	}
+	if !profileTracked {
+		missingState = append(missingState, "aws_iam_instance_profile.server")
+	}
+
+	var existingAws []string
+	if roleExists {
+		existingAws = append(existingAws, roleName)
+	}
+	if profileExists {
+		existingAws = append(existingAws, profileName)
+	}
+
+	return fmt.Errorf(
+		"stage %s blocked before apply: detected IAM state drift/orphaned resources. Missing in OpenTofu state: %s. Existing in AWS: %s. "+
+			"This usually causes EntityAlreadyExists during apply after a destroy/recreate attempt. Reconcile before continuing: "+
+			"(1) import resources into state (quartz tofu import -s %s aws_iam_role.server %s and quartz tofu import -s %s aws_iam_instance_profile.server %s), "+
+			"or (2) delete orphaned IAM resources if they are safe to recreate.",
+		stage,
+		strings.Join(missingState, ", "),
+		strings.Join(existingAws, ", "),
+		stage, roleName,
+		stage, profileName,
+	)
 }
 
 // TfApplyTargeted runs `tofu apply` for a stage restricted to the given resource

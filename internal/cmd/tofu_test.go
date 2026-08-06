@@ -16,6 +16,7 @@ package cmd
 
 import (
 	"context"
+	"strings"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
@@ -364,4 +365,31 @@ func runTestTfCommandWithStage(t *testing.T, cmd *cli.Command) {
 	assert.Error(t, err) // Missing required flag
 
 	runTestTfCommand(t, cmd, "-s", "first")
+}
+
+func TestEc2IamStateDriftError_NoDrift(t *testing.T) {
+	err := ec2IamStateDriftError("ec2", "sapphire-demo", true, true, true, true)
+	assert.NoError(t, err)
+}
+
+func TestEc2IamStateDriftError_ReportsRoleDrift(t *testing.T) {
+	err := ec2IamStateDriftError("ec2", "sapphire-demo", false, true, true, true)
+	if assert.Error(t, err) {
+		assert.True(t, strings.Contains(err.Error(), "IAM state drift/orphaned resources"))
+		assert.True(t, strings.Contains(err.Error(), "aws_iam_role.server"))
+		assert.True(t, strings.Contains(err.Error(), "sapphire-demo-server-role"))
+	}
+}
+
+func TestEc2IamStateDriftError_ReportsProfileDrift(t *testing.T) {
+	err := ec2IamStateDriftError("ec2", "sapphire-demo", true, false, true, true)
+	if assert.Error(t, err) {
+		assert.True(t, strings.Contains(err.Error(), "aws_iam_instance_profile.server"))
+		assert.True(t, strings.Contains(err.Error(), "sapphire-demo-server-profile"))
+	}
+}
+
+func TestEc2IamStateDriftError_MissingInStateButAbsentInAws(t *testing.T) {
+	err := ec2IamStateDriftError("ec2", "sapphire-demo", false, false, false, false)
+	assert.NoError(t, err)
 }
