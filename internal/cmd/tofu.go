@@ -24,8 +24,8 @@ import (
 	"strings"
 	"time"
 
-	"github.com/MetroStar/quartzctl/internal/provider"
 	"github.com/MetroStar/quartzctl/internal/log"
+	"github.com/MetroStar/quartzctl/internal/provider"
 	"github.com/MetroStar/quartzctl/internal/stages"
 	"github.com/MetroStar/quartzctl/internal/tofu"
 	"github.com/MetroStar/quartzctl/internal/util"
@@ -661,7 +661,7 @@ func ec2IamStateDriftError(stage string, cluster string, roleTracked bool, profi
 		"stage %s blocked before apply: detected IAM state drift/orphaned resources. Missing in OpenTofu state: %s. Existing in AWS: %s. "+
 			"This usually causes EntityAlreadyExists during apply after a destroy/recreate attempt. Reconcile before continuing: "+
 			"(1) import resources into state (quartz tofu import -s %s aws_iam_role.server %s and quartz tofu import -s %s aws_iam_instance_profile.server %s), "+
-			"or (2) delete orphaned IAM resources if they are safe to recreate.",
+			"or (2) delete orphaned IAM resources if they are safe to recreate",
 		stage,
 		strings.Join(missingState, ", "),
 		strings.Join(existingAws, ", "),

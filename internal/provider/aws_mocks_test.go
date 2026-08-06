@@ -56,8 +56,8 @@ type StsClientMock struct {
 type IamClientMock struct {
 	err            error
 	accountAliases []string
-	roleExists      bool
-	profileExists   bool
+	roleExists     bool
+	profileExists  bool
 }
 
 // S3ClientMock provides a mock implementation of the S3 client.
