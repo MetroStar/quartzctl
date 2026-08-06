@@ -121,17 +121,39 @@ func (c HttpStageCheck) RetryOpts() schema.StageChecksRetryConfig {
 // formatUrl constructs the full URL for the HTTP stage check based on the configuration.
 // If no URL is provided, it generates a default URL using the application name and domain.
 func (c HttpStageCheck) formatUrl(cfg schema.QuartzConfig) string {
-	url := c.Url
+	url := expandConfigPlaceholders(c.Url, cfg)
 	if len(url) == 0 {
 		// TODO: move this somewhere reusable
-		baseUrl := fmt.Sprintf("https://%s.%s", c.App, cfg.Dns.Domain)
-		if c.App == "keycloak" {
+		app := expandConfigPlaceholders(c.App, cfg)
+		path := expandConfigPlaceholders(c.Path, cfg)
+		baseUrl := fmt.Sprintf("https://%s.%s", app, cfg.Dns.Domain)
+		if strings.EqualFold(app, "keycloak") {
 			baseUrl = fmt.Sprintf("https://keycloak.auth.%s", cfg.Dns.Domain)
 		}
-		url = baseUrl + c.Path
+		url = baseUrl + path
 	}
 
 	return url
+}
+
+func expandConfigPlaceholders(input string, cfg schema.QuartzConfig) string {
+	if input == "" {
+		return input
+	}
+
+	replacements := map[string]string{
+		"${name}":       cfg.Name,
+		"${aws.region}": cfg.Aws.Region,
+		"${dns.zone}":   cfg.Dns.Zone,
+		"${dns.domain}": cfg.Dns.Domain,
+	}
+
+	output := input
+	for token, value := range replacements {
+		output = strings.ReplaceAll(output, token, value)
+	}
+
+	return output
 }
 
 // checkResponseContent validates the response content against the expected value or JSON key.

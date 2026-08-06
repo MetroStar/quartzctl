@@ -103,7 +103,12 @@ func TestHttpStageCheckRunNoMatch(t *testing.T) {
 
 func TestHttpStageCheckFormatUrl(t *testing.T) {
 	cfg := schema.QuartzConfig{
+		Name: "sapphire-demo",
+		Aws: schema.AwsConfig{
+			Region: "us-west-2",
+		},
 		Dns: schema.DnsConfig{
+			Zone:   "metrostar.cloud",
 			Domain: "example.com",
 		},
 	}
@@ -116,6 +121,16 @@ func TestHttpStageCheckFormatUrl(t *testing.T) {
 	u2 := HttpStageCheck{App: "keycloak"}.formatUrl(cfg)
 	if u2 != "https://keycloak.auth.example.com" {
 		t.Errorf("invalid response, expected %s, found %s", "https://keycloak.auth.example.com", u2)
+	}
+
+	u3 := HttpStageCheck{Url: "https://ec2.${aws.region}.amazonaws.com"}.formatUrl(cfg)
+	if u3 != "https://ec2.us-west-2.amazonaws.com" {
+		t.Errorf("invalid response, expected %s, found %s", "https://ec2.us-west-2.amazonaws.com", u3)
+	}
+
+	u4 := HttpStageCheck{Url: "https://${name}.${dns.zone}"}.formatUrl(cfg)
+	if u4 != "https://sapphire-demo.metrostar.cloud" {
+		t.Errorf("invalid response, expected %s, found %s", "https://sapphire-demo.metrostar.cloud", u4)
 	}
 }
 
