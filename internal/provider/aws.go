@@ -16,6 +16,7 @@ package provider
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"strings"
 
@@ -25,6 +26,7 @@ import (
 	"github.com/aws/aws-sdk-go-v2/config"
 	"github.com/aws/aws-sdk-go-v2/service/iam"
 	"github.com/aws/aws-sdk-go-v2/service/sts"
+	"github.com/aws/smithy-go"
 )
 
 const (
@@ -251,6 +253,45 @@ func (c AwsClient) PrepareAccount(ctx context.Context) error {
 	}
 
 	return nil
+}
+
+// Ec2ServerIdentityExists reports whether the standard ec2 stage IAM role and
+// instance profile already exist for the given cluster name.
+func (c AwsClient) Ec2ServerIdentityExists(ctx context.Context, cluster string) (bool, bool, error) {
+	roleName := cluster + "-server-role"
+	profileName := cluster + "-server-profile"
+
+	roleExists := false
+	_, roleErr := c.sdk.Iam().GetRole(ctx, &iam.GetRoleInput{RoleName: aws.String(roleName)})
+	if roleErr == nil {
+		roleExists = true
+	} else if !isIamNotFoundError(roleErr) {
+		return false, false, roleErr
+	}
+
+	profileExists := false
+	_, profileErr := c.sdk.Iam().GetInstanceProfile(ctx, &iam.GetInstanceProfileInput{InstanceProfileName: aws.String(profileName)})
+	if profileErr == nil {
+		profileExists = true
+	} else if !isIamNotFoundError(profileErr) {
+		return false, false, profileErr
+	}
+
+	return roleExists, profileExists, nil
+}
+
+func isIamNotFoundError(err error) bool {
+	if err == nil {
+		return false
+	}
+
+	var apiErr smithy.APIError
+	if errors.As(err, &apiErr) {
+		return strings.EqualFold(apiErr.ErrorCode(), "NoSuchEntity") || strings.EqualFold(apiErr.ErrorCode(), "NoSuchEntityException")
+	}
+
+	errStr := strings.ToLower(err.Error())
+	return strings.Contains(errStr, "nosuchentity") || strings.Contains(errStr, "cannot be found")
 }
 
 // ------------- end ICloudProviderClient -------------

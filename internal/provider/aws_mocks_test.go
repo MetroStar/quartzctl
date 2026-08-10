@@ -56,6 +56,8 @@ type StsClientMock struct {
 type IamClientMock struct {
 	err            error
 	accountAliases []string
+	roleExists     bool
+	profileExists  bool
 }
 
 // S3ClientMock provides a mock implementation of the S3 client.
@@ -143,6 +145,30 @@ func (c IamClientMock) ListAccountAliases(ctx context.Context, params *iam.ListA
 // CreateServiceLinkedRole returns a mock response for the CreateServiceLinkedRole API call.
 func (c IamClientMock) CreateServiceLinkedRole(ctx context.Context, params *iam.CreateServiceLinkedRoleInput, optFns ...func(*iam.Options)) (*iam.CreateServiceLinkedRoleOutput, error) {
 	return &iam.CreateServiceLinkedRoleOutput{}, c.err
+}
+
+// GetRole returns a mock response for the GetRole API call.
+func (c IamClientMock) GetRole(ctx context.Context, params *iam.GetRoleInput, optFns ...func(*iam.Options)) (*iam.GetRoleOutput, error) {
+	if c.err != nil {
+		return nil, c.err
+	}
+	if !c.roleExists {
+		return nil, fmt.Errorf("NoSuchEntity")
+	}
+
+	return &iam.GetRoleOutput{}, nil
+}
+
+// GetInstanceProfile returns a mock response for the GetInstanceProfile API call.
+func (c IamClientMock) GetInstanceProfile(ctx context.Context, params *iam.GetInstanceProfileInput, optFns ...func(*iam.Options)) (*iam.GetInstanceProfileOutput, error) {
+	if c.err != nil {
+		return nil, c.err
+	}
+	if !c.profileExists {
+		return nil, fmt.Errorf("NoSuchEntity")
+	}
+
+	return &iam.GetInstanceProfileOutput{}, nil
 }
 
 // HeadBucket returns a mock response for the HeadBucket API call.
