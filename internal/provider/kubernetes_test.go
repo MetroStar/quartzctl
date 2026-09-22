@@ -858,12 +858,12 @@ func TestProviderKubernetesClientGetDaemonSetStatusNotFound(t *testing.T) {
 }
 
 func TestProviderKubernetesClientCheckParentUpgradeReadiness(t *testing.T) {
-	readyDaemonSet := func(name string) *unstructured.Unstructured {
+	readyDaemonSet := func(namespace string, name string) *unstructured.Unstructured {
 		return &unstructured.Unstructured{Object: map[string]interface{}{
 			"apiVersion": "apps/v1",
 			"kind":       "DaemonSet",
 			"metadata": map[string]interface{}{
-				"namespace": "kube-system",
+				"namespace": namespace,
 				"name":      name,
 			},
 			"status": map[string]interface{}{
@@ -884,9 +884,9 @@ func TestProviderKubernetesClientCheckParentUpgradeReadiness(t *testing.T) {
 					"name":      "quartz",
 				},
 			}},
-			readyDaemonSet("aws-node"),
-			readyDaemonSet("istio-cni-node"),
-			readyDaemonSet("ztunnel"),
+			readyDaemonSet("kube-system", "aws-node"),
+			readyDaemonSet("kube-system", "istio-cni-node"),
+			readyDaemonSet("istio-system", "ztunnel"),
 		).
 		AddResources(
 			&metav1.APIResourceList{

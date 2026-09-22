@@ -1794,7 +1794,7 @@ func (c KubernetesClient) CheckParentUpgradeReadiness(ctx context.Context) error
 	}{
 		{name: "aws-node", namespace: "kube-system"},
 		{name: "istio-cni-node", namespace: "kube-system"},
-		{name: "ztunnel", namespace: "kube-system"},
+		{name: "ztunnel", namespace: "istio-system"},
 	} {
 		ready, desired, statusErr := c.GetDaemonSetStatus(ctx, daemonSetKind, daemonSet.namespace, daemonSet.name)
 		if statusErr != nil {
