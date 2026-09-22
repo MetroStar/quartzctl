@@ -857,6 +857,66 @@ func TestProviderKubernetesClientGetDaemonSetStatusNotFound(t *testing.T) {
 	}
 }
 
+func TestProviderKubernetesClientCheckParentUpgradeReadiness(t *testing.T) {
+	readyDaemonSet := func(name string) *unstructured.Unstructured {
+		return &unstructured.Unstructured{Object: map[string]interface{}{
+			"apiVersion": "apps/v1",
+			"kind":       "DaemonSet",
+			"metadata": map[string]interface{}{
+				"namespace": "kube-system",
+				"name":      name,
+			},
+			"status": map[string]interface{}{
+				"desiredNumberScheduled": int64(3),
+				"numberReady":            int64(3),
+			},
+		}}
+	}
+
+	api := NewKubernetesApiMock().
+		WithClientObjects(&corev1.Node{ObjectMeta: metav1.ObjectMeta{Name: "node-1"}}).
+		WithDynamicObjects(
+			&unstructured.Unstructured{Object: map[string]interface{}{
+				"apiVersion": "helm.toolkit.fluxcd.io/v2",
+				"kind":       "HelmRelease",
+				"metadata": map[string]interface{}{
+					"namespace": "quartz",
+					"name":      "quartz",
+				},
+			}},
+			readyDaemonSet("aws-node"),
+			readyDaemonSet("istio-cni-node"),
+			readyDaemonSet("ztunnel"),
+		).
+		AddResources(
+			&metav1.APIResourceList{
+				GroupVersion: "apps/v1",
+				APIResources: []metav1.APIResource{{Name: "daemonsets", Namespaced: true, Kind: "DaemonSet"}},
+			},
+			&metav1.APIResourceList{
+				GroupVersion: "helm.toolkit.fluxcd.io/v2",
+				APIResources: []metav1.APIResource{{Name: "helmreleases", Namespaced: true, Kind: "HelmRelease"}},
+			},
+		)
+
+	c, err := NewKubernetesClient(api, KubeconfigInfo{}, schema.QuartzConfig{})
+	if err != nil {
+		t.Fatalf("constructing Kubernetes client: %v", err)
+	}
+	if err := c.CheckParentUpgradeReadiness(context.Background()); err != nil {
+		t.Fatalf("expected ready parent upgrade, got %v", err)
+	}
+
+	for _, object := range api.dynamicObjects {
+		if object.(*unstructured.Unstructured).GetName() == "istio-cni-node" {
+			_ = unstructured.SetNestedField(object.(*unstructured.Unstructured).Object, int64(2), "status", "numberReady")
+		}
+	}
+	if err := c.CheckParentUpgradeReadiness(context.Background()); err == nil || !strings.Contains(err.Error(), "istio-cni-node") {
+		t.Fatalf("expected Istio CNI readiness error, got %v", err)
+	}
+}
+
 func TestProviderKubernetesClientCleanupStuckTerminatingPods(t *testing.T) {
 	api := NewKubernetesApiMock()
 	cfg := schema.QuartzConfig{}

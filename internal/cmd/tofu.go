@@ -1126,8 +1126,46 @@ func preCheck(ctx context.Context, stage string, event string, p *CommandParams)
 	stopProgress := startProgressReporter(ctx, p)
 	defer stopProgress()
 
+	if strings.EqualFold(stage, "core") && strings.EqualFold(event, "apply") {
+		if err := waitForParentUpgradeReadiness(ctx, p); err != nil {
+			return err
+		}
+	}
+
 	_, err := stages.RunPreChecks(ctx, p.Settings().Config, *p.Provider(), stage, event, checkOpts)
 	return err
+}
+
+const parentUpgradeReadinessTimeout = 15 * time.Minute
+
+// waitForParentUpgradeReadiness blocks core upgrades while an existing Quartz
+// release is present but node networking is still converging. A fresh install
+// returns immediately because the provider gate treats a missing parent release
+// as the bootstrap case.
+func waitForParentUpgradeReadiness(ctx context.Context, p *CommandParams) error {
+	kube, err := p.Provider().Kubernetes(ctx)
+	if err != nil {
+		return err
+	}
+
+	readinessCtx, cancel := context.WithTimeout(ctx, parentUpgradeReadinessTimeout)
+	defer cancel()
+	ticker := time.NewTicker(10 * time.Second)
+	defer ticker.Stop()
+
+	for {
+		err := kube.CheckParentUpgradeReadiness(readinessCtx)
+		if err == nil {
+			return nil
+		}
+		util.Msgf("Waiting for core upgrade readiness: %v", err)
+
+		select {
+		case <-readinessCtx.Done():
+			return fmt.Errorf("core upgrade readiness gate timed out after %s: %w", parentUpgradeReadinessTimeout, err)
+		case <-ticker.C:
+		}
+	}
 }
 
 // postCheck runs post-checks for a specific stage and event.
