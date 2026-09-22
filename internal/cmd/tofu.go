@@ -20,6 +20,7 @@ import (
 	"errors"
 	"fmt"
 	"os"
+	"path/filepath"
 	"slices"
 	"strings"
 	"time"
@@ -481,6 +482,11 @@ func NewTfStateCommand(p *CommandParams) TfCommandResult {
 
 // TfInit runs `tofu init` for a specific stage.
 func TfInit(ctx context.Context, stage string, p *CommandParams) error {
+	resolvedStage, err := resolveTofuStage(stage, p)
+	if err != nil {
+		return err
+	}
+	stage = resolvedStage
 	return util.RunOnce("tf:init:"+stage, func() error {
 		log.Debug("Entering", "command", "tf:init", "stage", stage)
 		defer log.Debug("Completed", "command", "tf:init", "stage", stage)
@@ -488,7 +494,7 @@ func TfInit(ctx context.Context, stage string, p *CommandParams) error {
 		util.Hdrf("Init %s", stage)
 
 		client := tofu.Instance(ctx, *p.Settings())
-		err := tfStagePrep(ctx, stage, p)
+		err = tfStagePrep(ctx, stage, p)
 		if err != nil {
 			return err
 		}
@@ -527,13 +533,19 @@ func TfInitAll(ctx context.Context, p *CommandParams) error {
 
 // TfPlan runs `tofu plan` for a specific stage.
 func TfPlan(ctx context.Context, stage string, p *CommandParams) error {
+	resolvedStage, err := resolveTofuStage(stage, p)
+	if err != nil {
+		return err
+	}
+	stage = resolvedStage
+
 	log.Debug("Entering", "command", "tf:plan", "stage", stage)
 	defer log.Debug("Completed", "command", "tf:plan", "stage", stage)
 
 	util.Hdrf("Plan %s", stage)
 
 	client := tofu.Instance(ctx, *p.Settings())
-	err := tfStagePrep(ctx, stage, p)
+	err = tfStagePrep(ctx, stage, p)
 	if err != nil {
 		return err
 	}
@@ -546,6 +558,22 @@ func TfPlan(ctx context.Context, stage string, p *CommandParams) error {
 		}
 		return err
 	})
+}
+
+// resolveTofuStage accepts either the semantic stage ID (for example, "host")
+// or its numbered source directory name (for example, "10-host").
+func resolveTofuStage(stage string, p *CommandParams) (string, error) {
+	if _, ok := p.Settings().Config.Stages[stage]; ok {
+		return stage, nil
+	}
+
+	for id, config := range p.Settings().Config.Stages {
+		if filepath.Base(config.Path) == stage {
+			return id, nil
+		}
+	}
+
+	return "", fmt.Errorf("stage %q not found; available stages: %s", stage, stageIds(p.Settings().Config.StagesOrdered()))
 }
 
 // TfApply runs `tofu apply` for a specific stage.
