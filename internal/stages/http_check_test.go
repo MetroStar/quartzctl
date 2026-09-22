@@ -128,6 +128,23 @@ func TestHttpStageCheckFormatUrl(t *testing.T) {
 		t.Errorf("invalid response, expected %s, found %s", "https://ec2.us-west-2.amazonaws.com", u3)
 	}
 
+	u5 := HttpStageCheck{Url: "https://ec2.${aws.region}.${aws.dns_suffix}"}.formatUrl(cfg)
+	if u5 != "https://ec2.us-west-2.amazonaws.com" {
+		t.Errorf("invalid response, expected %s, found %s", "https://ec2.us-west-2.amazonaws.com", u5)
+	}
+
+	cfg.Aws.Region = "us-gov-west-1"
+	u6 := HttpStageCheck{Url: "https://ec2.${aws.region}.${aws.dns_suffix}"}.formatUrl(cfg)
+	if u6 != "https://ec2.us-gov-west-1.amazonaws.com" {
+		t.Errorf("invalid response, expected %s, found %s", "https://ec2.us-gov-west-1.amazonaws.com", u6)
+	}
+
+	cfg.Aws.Region = "cn-north-1"
+	u7 := HttpStageCheck{Url: "https://ec2.${aws.region}.${aws.dns_suffix}"}.formatUrl(cfg)
+	if u7 != "https://ec2.cn-north-1.amazonaws.com.cn" {
+		t.Errorf("invalid response, expected %s, found %s", "https://ec2.cn-north-1.amazonaws.com.cn", u7)
+	}
+
 	u4 := HttpStageCheck{Url: "https://${name}.${dns.zone}"}.formatUrl(cfg)
 	if u4 != "https://sapphire-demo.metrostar.cloud" {
 		t.Errorf("invalid response, expected %s, found %s", "https://sapphire-demo.metrostar.cloud", u4)

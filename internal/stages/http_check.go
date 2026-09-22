@@ -30,13 +30,6 @@ import (
 	"github.com/MetroStar/quartzctl/internal/log"
 )
 
-// Package-level variable: detected once at startup
-var isAWS bool
-
-func init() {
-	isAWS = detectAWSEnvironment()
-}
-
 // HttpStageCheck represents an HTTP-based stage check.
 type HttpStageCheck schema.StageChecksHttpConfig
 
@@ -51,7 +44,7 @@ func (c HttpStageCheck) Run(ctx context.Context, cfg schema.QuartzConfig) error 
 	// TODO: fix for outside of AWS VPC so local DNS cache won't work when records aren't created before checking.
 	resolver := &net.Resolver{
 		PreferGo: true,
-		Dial:     selectDNSDialer(),
+		Dial:     selectDNSDialer(cfg.Providers.Cloud),
 	}
 
 	tr := &http.Transport{
@@ -142,10 +135,11 @@ func expandConfigPlaceholders(input string, cfg schema.QuartzConfig) string {
 	}
 
 	replacements := map[string]string{
-		"${name}":       cfg.Name,
-		"${aws.region}": cfg.Aws.Region,
-		"${dns.zone}":   cfg.Dns.Zone,
-		"${dns.domain}": cfg.Dns.Domain,
+		"${name}":           cfg.Name,
+		"${aws.region}":     cfg.Aws.Region,
+		"${aws.dns_suffix}": awsDNSSuffix(cfg.Aws.Region),
+		"${dns.zone}":       cfg.Dns.Zone,
+		"${dns.domain}":     cfg.Dns.Domain,
 	}
 
 	output := input
@@ -154,6 +148,14 @@ func expandConfigPlaceholders(input string, cfg schema.QuartzConfig) string {
 	}
 
 	return output
+}
+
+func awsDNSSuffix(region string) string {
+	if strings.HasPrefix(region, "cn-") {
+		return "amazonaws.com.cn"
+	}
+
+	return "amazonaws.com"
 }
 
 // checkResponseContent validates the response content against the expected value or JSON key.
@@ -213,8 +215,8 @@ func (c HttpStageCheck) checkResponseStatus(url string, res *http.Response) (boo
 }
 
 // selectDNSDialer returns the appropriate DNS resolver based on environment
-func selectDNSDialer() func(ctx context.Context, network, address string) (net.Conn, error) {
-	if isAWS {
+func selectDNSDialer(provider string) func(ctx context.Context, network, address string) (net.Conn, error) {
+	if provider == "aws" {
 		return awsDNSDialer
 	}
 	return googleDNSDialer
@@ -228,19 +230,4 @@ func awsDNSDialer(ctx context.Context, network, address string) (net.Conn, error
 func googleDNSDialer(ctx context.Context, network, address string) (net.Conn, error) {
 	d := net.Dialer{Timeout: 5 * time.Second}
 	return d.DialContext(ctx, "udp", "8.8.8.8:53")
-}
-
-// detectAWSEnvironment checks if running on AWS
-func detectAWSEnvironment() bool {
-	ctx, cancel := context.WithTimeout(context.Background(), 500*time.Millisecond)
-	defer cancel()
-
-	req, _ := http.NewRequestWithContext(ctx, "GET", "http://169.254.169.254/latest/meta-data/", nil)
-	client := &http.Client{Timeout: 500 * time.Millisecond}
-	resp, err := client.Do(req)
-	if err != nil {
-		return false
-	}
-	resp.Body.Close()
-	return resp.StatusCode == http.StatusOK
 }
