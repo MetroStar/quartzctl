@@ -17,6 +17,7 @@ package provider
 import (
 	"context"
 	"errors"
+	"strings"
 
 	"github.com/MetroStar/quartzctl/internal/log"
 
@@ -25,6 +26,14 @@ import (
 	"github.com/aws/aws-sdk-go-v2/service/s3/types"
 	"github.com/aws/smithy-go"
 )
+
+func s3CreateRegion(region string) string {
+	if strings.HasPrefix(region, "us-gov-") {
+		return region
+	}
+
+	return "us-east-1"
+}
 
 // CreateBucket creates an S3 bucket with the specified name.
 // If the bucket already exists and `force` is false, the operation is skipped.
@@ -54,11 +63,9 @@ func (c AwsClient) CreateBucket(ctx context.Context, name string, force bool) er
 	}
 
 	// https://docs.aws.amazon.com/AmazonS3/latest/API/API_CreateBucket.html
-	// NOTE: this is deliberately hard coded to us-east-1 per the note indicating
-	// s3 api always authenticates against us-east-1 regardless of the requested
-	// region when creating buckets :/
-	// TODO: assuming this needs work for govcloud
-	s3CreateClient := c.sdk.S3Region("us-east-1")
+	// Commercial S3 bucket creation uses us-east-1, while GovCloud requires
+	// authentication against the requested GovCloud region.
+	s3CreateClient := c.sdk.S3Region(s3CreateRegion(c.region))
 	_, err := s3CreateClient.CreateBucket(ctx, &s3.CreateBucketInput{
 		Bucket:                    aws.String(name),
 		CreateBucketConfiguration: cbCfg,

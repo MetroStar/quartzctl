@@ -20,6 +20,7 @@ import (
 	"errors"
 	"fmt"
 	"os"
+	"path/filepath"
 	"slices"
 	"strings"
 	"time"
@@ -481,6 +482,11 @@ func NewTfStateCommand(p *CommandParams) TfCommandResult {
 
 // TfInit runs `tofu init` for a specific stage.
 func TfInit(ctx context.Context, stage string, p *CommandParams) error {
+	resolvedStage, err := resolveTofuStage(stage, p)
+	if err != nil {
+		return err
+	}
+	stage = resolvedStage
 	return util.RunOnce("tf:init:"+stage, func() error {
 		log.Debug("Entering", "command", "tf:init", "stage", stage)
 		defer log.Debug("Completed", "command", "tf:init", "stage", stage)
@@ -488,7 +494,7 @@ func TfInit(ctx context.Context, stage string, p *CommandParams) error {
 		util.Hdrf("Init %s", stage)
 
 		client := tofu.Instance(ctx, *p.Settings())
-		err := tfStagePrep(ctx, stage, p)
+		err = tfStagePrep(ctx, stage, p)
 		if err != nil {
 			return err
 		}
@@ -527,13 +533,19 @@ func TfInitAll(ctx context.Context, p *CommandParams) error {
 
 // TfPlan runs `tofu plan` for a specific stage.
 func TfPlan(ctx context.Context, stage string, p *CommandParams) error {
+	resolvedStage, err := resolveTofuStage(stage, p)
+	if err != nil {
+		return err
+	}
+	stage = resolvedStage
+
 	log.Debug("Entering", "command", "tf:plan", "stage", stage)
 	defer log.Debug("Completed", "command", "tf:plan", "stage", stage)
 
 	util.Hdrf("Plan %s", stage)
 
 	client := tofu.Instance(ctx, *p.Settings())
-	err := tfStagePrep(ctx, stage, p)
+	err = tfStagePrep(ctx, stage, p)
 	if err != nil {
 		return err
 	}
@@ -546,6 +558,22 @@ func TfPlan(ctx context.Context, stage string, p *CommandParams) error {
 		}
 		return err
 	})
+}
+
+// resolveTofuStage accepts either the semantic stage ID (for example, "host")
+// or its numbered source directory name (for example, "10-host").
+func resolveTofuStage(stage string, p *CommandParams) (string, error) {
+	if _, ok := p.Settings().Config.Stages[stage]; ok {
+		return stage, nil
+	}
+
+	for id, config := range p.Settings().Config.Stages {
+		if filepath.Base(config.Path) == stage {
+			return id, nil
+		}
+	}
+
+	return "", fmt.Errorf("stage %q not found; available stages: %s", stage, stageIds(p.Settings().Config.StagesOrdered()))
 }
 
 // TfApply runs `tofu apply` for a specific stage.
@@ -1098,8 +1126,46 @@ func preCheck(ctx context.Context, stage string, event string, p *CommandParams)
 	stopProgress := startProgressReporter(ctx, p)
 	defer stopProgress()
 
+	if strings.EqualFold(stage, "core") && strings.EqualFold(event, "apply") {
+		if err := waitForParentUpgradeReadiness(ctx, p); err != nil {
+			return err
+		}
+	}
+
 	_, err := stages.RunPreChecks(ctx, p.Settings().Config, *p.Provider(), stage, event, checkOpts)
 	return err
+}
+
+const parentUpgradeReadinessTimeout = 15 * time.Minute
+
+// waitForParentUpgradeReadiness blocks core upgrades while an existing Quartz
+// release is present but node networking is still converging. A fresh install
+// returns immediately because the provider gate treats a missing parent release
+// as the bootstrap case.
+func waitForParentUpgradeReadiness(ctx context.Context, p *CommandParams) error {
+	kube, err := p.Provider().Kubernetes(ctx)
+	if err != nil {
+		return err
+	}
+
+	readinessCtx, cancel := context.WithTimeout(ctx, parentUpgradeReadinessTimeout)
+	defer cancel()
+	ticker := time.NewTicker(10 * time.Second)
+	defer ticker.Stop()
+
+	for {
+		err := kube.CheckParentUpgradeReadiness(readinessCtx)
+		if err == nil {
+			return nil
+		}
+		util.Msgf("Waiting for core upgrade readiness: %v", err)
+
+		select {
+		case <-readinessCtx.Done():
+			return fmt.Errorf("core upgrade readiness gate timed out after %s: %w", parentUpgradeReadinessTimeout, err)
+		case <-ticker.C:
+		}
+	}
 }
 
 // postCheck runs post-checks for a specific stage and event.

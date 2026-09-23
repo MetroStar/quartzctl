@@ -18,6 +18,7 @@ import (
 	"context"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/urfave/cli/v3"
@@ -221,6 +222,50 @@ func TestNewRootTofuCommand(t *testing.T) {
 	assert.Len(t, cmd.Commands, 2)
 	assert.Equal(t, "apply", cmd.Commands[0].Name)
 	assert.Equal(t, "plan", cmd.Commands[1].Name)
+}
+
+func TestResolveTofuStageBySemanticId(t *testing.T) {
+	p := defaultTestConfig(t)
+
+	got, err := resolveTofuStage(testStage, p)
+	if err != nil {
+		t.Fatalf("unexpected error, %v", err)
+	}
+	assert.Equal(t, testStage, got)
+}
+
+func TestResolveTofuStageByDirectoryName(t *testing.T) {
+	p := defaultTestConfig(t)
+
+	got, err := resolveTofuStage("01-first", p)
+	if err != nil {
+		t.Fatalf("unexpected error, %v", err)
+	}
+	assert.Equal(t, testStage, got)
+}
+
+func TestResolveTofuStageNotFound(t *testing.T) {
+	p := defaultTestConfig(t)
+
+	_, err := resolveTofuStage("does-not-exist", p)
+	if err == nil {
+		t.Fatal("expected error for unknown stage, got nil")
+	}
+	assert.True(t, strings.Contains(err.Error(), "not found"))
+}
+
+func TestWaitForParentUpgradeReadinessNoCluster(t *testing.T) {
+	p := defaultTestConfig(t)
+
+	// Bound the wait with a short caller deadline instead of the real 15-minute
+	// readiness timeout, so this test can't hang if a cluster happens to be
+	// reachable in the environment (a Kubernetes() error still returns fast).
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+
+	if err := waitForParentUpgradeReadiness(ctx, p); err == nil {
+		t.Fatal("expected error when readiness cannot be confirmed, got nil")
+	}
 }
 
 func TestCmdTfInit(t *testing.T) {

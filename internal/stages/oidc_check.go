@@ -28,8 +28,7 @@ import (
 
 	"github.com/MetroStar/quartzctl/internal/config/schema"
 	"github.com/MetroStar/quartzctl/internal/log"
-	awsConfig "github.com/aws/aws-sdk-go-v2/config"
-	"github.com/aws/aws-sdk-go-v2/service/ssm"
+	"github.com/MetroStar/quartzctl/internal/provider"
 )
 
 // OidcStageCheck represents an OIDC validation check that performs a client_credentials
@@ -81,7 +80,7 @@ func (c OidcStageCheck) Run(ctx context.Context, cfg schema.QuartzConfig) error 
 	// TODO: fix for outside of AWS VPC so local DNS cache won't work when records aren't created before checking.
 	resolver := &net.Resolver{
 		PreferGo: true,
-		Dial:     selectDNSDialer(),
+		Dial:     selectDNSDialer(cfg.Providers.Cloud),
 	}
 
 	tr := &http.Transport{
@@ -144,35 +143,19 @@ func (c OidcStageCheck) Run(ctx context.Context, cfg schema.QuartzConfig) error 
 	return nil
 }
 
-// resolveCredentials reads OIDC credentials from AWS SSM using the configured SecretPath.
+// resolveCredentials reads OIDC credentials from the configured secret provider.
 func (c OidcStageCheck) resolveCredentials(ctx context.Context, cfg schema.QuartzConfig) (map[string]string, error) {
 	path := c.SecretPath
 	path = strings.ReplaceAll(path, "{cluster}", cfg.Name)
 	path = strings.ReplaceAll(path, "{env}", cfg.Core.Name)
 
-	log.Debug("Resolving OIDC credentials from SSM", "path", path)
-
-	awsCfg, err := awsConfig.LoadDefaultConfig(ctx, awsConfig.WithRegion(cfg.Aws.Region))
+	secretProvider, err := provider.NewSecretProvider(ctx, cfg)
 	if err != nil {
-		return nil, fmt.Errorf("failed to load AWS config: %w", err)
+		return nil, err
 	}
 
-	ssmClient := ssm.NewFromConfig(awsCfg)
-	decrypt := true
-	output, err := ssmClient.GetParameter(ctx, &ssm.GetParameterInput{
-		Name:           &path,
-		WithDecryption: &decrypt,
-	})
-	if err != nil {
-		return nil, fmt.Errorf("failed to get SSM parameter %s: %w", path, err)
-	}
-
-	var creds map[string]string
-	if err := json.Unmarshal([]byte(*output.Parameter.Value), &creds); err != nil {
-		return nil, fmt.Errorf("failed to parse SSM parameter value as JSON: %w", err)
-	}
-
-	return creds, nil
+	log.Debug("Resolving OIDC credentials", "provider", cfg.Providers.Secrets, "path", path)
+	return secretProvider.Resolve(ctx, path)
 }
 
 // Id returns the unique identifier of the OIDC stage check.
