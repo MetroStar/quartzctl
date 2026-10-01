@@ -74,7 +74,7 @@ flowchart TB
 |---------|---------|
 | `quartz check` | Check environment, configuration, and provider access |
 | `quartz install [--resume-from <stage>] [--allow-deferral] [--yes]` | Run full install/update |
-| `quartz clean [--yes]` | Run full teardown |
+| `quartz clean [--yes] [--keep-backend]` | Run full teardown |
 | `quartz info` | Print cluster, HelmRelease, SSO, and application summary where available |
 | `quartz login [--out <path>]` | Generate or refresh kubeconfig |
 | `quartz render [--out <path>]` | Write fully rendered config |

@@ -105,9 +105,11 @@ func NewRootCleanCommand(p *CommandParams) RootCommandResult {
 			Flags: []cli.Flag{
 				&cli.BoolFlag{Name: "refresh", Aliases: []string{"r"}, Usage: "refresh (always enabled)", Value: true},
 				&cli.BoolFlag{Name: "yes", Aliases: []string{"y"}, Usage: "Skip the interactive confirmation prompt (assume yes)"},
+				&cli.BoolFlag{Name: "keep-backend", Usage: "Preserve the OpenTofu state backend (for backends owned outside Quartz)"},
 			},
 			Action: func(ctx context.Context, ccmd *cli.Command) error {
 				p.assumeYes = ccmd.Bool("yes")
+				p.keepBackend = ccmd.Bool("keep-backend")
 				err := Clean(ctx, p)
 				if err != nil {
 					return err
@@ -1467,7 +1469,9 @@ func Clean(ctx context.Context, p *CommandParams) error {
 	// If any stage failed, the backend must remain intact so operators can
 	// re-run clean or use tofu commands to recover. Destroying the backend
 	// with failed stages makes the orphaned resources irrecoverable via tofu.
-	if len(destroyErrors) == 0 {
+	if p.keepBackend {
+		util.Msg("Preserving state backend (--keep-backend)")
+	} else if len(destroyErrors) == 0 {
 		backendStart := time.Now()
 		err = TfDestroyBackend(ctx, p)
 		stageTiming["destroy-backend"] = time.Since(backendStart)

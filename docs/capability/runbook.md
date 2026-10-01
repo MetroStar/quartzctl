@@ -179,9 +179,14 @@ quartz tofu format-all
 ```bash
 quartz clean
 quartz clean --yes
+quartz clean --yes --keep-backend
 ```
 
 `clean` destroys stages in reverse dependency order. If a stage fails, cleanup continues and reports the failures. The remote backend is kept until all stage destroys succeed so operators can re-run cleanup with recoverable state.
+
+Pass `--keep-backend` when the state bucket and lock table are owned outside
+Quartz (for example, by a separate bootstrap configuration). Stages are still
+destroyed, but the backend is never deleted.
 
 Treat the final cleanup report as cumulative: earlier stage failures remain
 visible even when later stages continue to make progress. A remaining backend is
