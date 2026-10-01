@@ -23,6 +23,32 @@ import (
 	"github.com/MetroStar/quartzctl/internal/config/schema"
 )
 
+func TestProbeIMDS(t *testing.T) {
+	for _, tc := range []struct {
+		status int
+		want   bool
+	}{
+		{http.StatusOK, true},
+		{http.StatusUnauthorized, true},
+		{http.StatusNotFound, false},
+	} {
+		svr := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			w.WriteHeader(tc.status)
+		}))
+		if got := probeIMDS(svr.URL); got != tc.want {
+			t.Errorf("probeIMDS status %d = %v, want %v", tc.status, got, tc.want)
+		}
+		svr.Close()
+	}
+
+	svr := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {}))
+	url := svr.URL
+	svr.Close()
+	if probeIMDS(url) {
+		t.Errorf("probeIMDS on unreachable endpoint = true, want false")
+	}
+}
+
 func TestHttpStageCheckRunHappyNoContent(t *testing.T) {
 	svr := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusOK)
