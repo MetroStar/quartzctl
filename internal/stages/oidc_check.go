@@ -80,7 +80,7 @@ func (c OidcStageCheck) Run(ctx context.Context, cfg schema.QuartzConfig) error 
 	// TODO: fix for outside of AWS VPC so local DNS cache won't work when records aren't created before checking.
 	resolver := &net.Resolver{
 		PreferGo: true,
-		Dial:     selectDNSDialer(cfg.Providers.Cloud),
+		Dial:     selectDNSDialer(),
 	}
 
 	tr := &http.Transport{

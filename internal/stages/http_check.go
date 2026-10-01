@@ -24,6 +24,7 @@ import (
 	"net"
 	"net/http"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/MetroStar/quartzctl/internal/config/schema"
@@ -44,7 +45,7 @@ func (c HttpStageCheck) Run(ctx context.Context, cfg schema.QuartzConfig) error 
 	// TODO: fix for outside of AWS VPC so local DNS cache won't work when records aren't created before checking.
 	resolver := &net.Resolver{
 		PreferGo: true,
-		Dial:     selectDNSDialer(cfg.Providers.Cloud),
+		Dial:     selectDNSDialer(),
 	}
 
 	tr := &http.Transport{
@@ -214,12 +215,39 @@ func (c HttpStageCheck) checkResponseStatus(url string, res *http.Response) (boo
 	return false, fmt.Errorf("HTTP status code check failed, %d %s", res.StatusCode, res.Status)
 }
 
+// runningInAWS reports whether this process runs inside AWS, where the VPC
+// resolver is reachable. The configured cloud provider says nothing about
+// where quartz itself runs (e.g. GitHub-hosted runners deploying to AWS).
+var runningInAWS = sync.OnceValue(detectAWSEnvironment)
+
 // selectDNSDialer returns the appropriate DNS resolver based on environment
-func selectDNSDialer(provider string) func(ctx context.Context, network, address string) (net.Conn, error) {
-	if provider == "aws" {
+func selectDNSDialer() func(ctx context.Context, network, address string) (net.Conn, error) {
+	if runningInAWS() {
 		return awsDNSDialer
 	}
 	return googleDNSDialer
+}
+
+// detectAWSEnvironment probes IMDS. Any HTTP response counts, since IMDSv2-only
+// instances answer an unauthenticated GET with 401.
+func detectAWSEnvironment() bool {
+	return probeIMDS("http://169.254.169.254/latest/meta-data/")
+}
+
+func probeIMDS(url string) bool {
+	ctx, cancel := context.WithTimeout(context.Background(), 500*time.Millisecond)
+	defer cancel()
+
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
+	if err != nil {
+		return false
+	}
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		return false
+	}
+	resp.Body.Close()
+	return resp.StatusCode == http.StatusOK || resp.StatusCode == http.StatusUnauthorized
 }
 
 func awsDNSDialer(ctx context.Context, network, address string) (net.Conn, error) {
