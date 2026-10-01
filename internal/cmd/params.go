@@ -39,6 +39,7 @@ type CommandParams struct {
 	startTime     time.Time
 	allowDeferral bool
 	assumeYes     bool
+	keepBackend   bool
 	waitForModels bool
 
 	settings *config.Settings

@@ -56,7 +56,10 @@ func TestNewRootCleanCommand(t *testing.T) {
 
 	assert.Equal(t, "clean", cmd.Name)
 	assert.Equal(t, "Perform a full cleanup/teardown of the system", cmd.Usage)
-	assert.Len(t, cmd.Flags, 2)
+	assert.Len(t, cmd.Flags, 3)
+
+	keepFlag := cmd.Flags[2].(*cli.BoolFlag)
+	assert.Equal(t, "keep-backend", keepFlag.Name)
 
 	flag := cmd.Flags[0].(*cli.BoolFlag)
 	assert.Equal(t, "refresh", flag.Name)
@@ -96,6 +99,49 @@ type backendGoneCloud struct {
 
 func (backendGoneCloud) StateBackendExists(context.Context) (bool, error) {
 	return false, nil
+}
+
+// backendProtectedCloud refuses backend deletion, like an IAM role that does
+// not own the bootstrap-managed state bucket and lock table.
+type backendProtectedCloud struct {
+	provider.LocalClient
+}
+
+func (backendProtectedCloud) DestroyStateBackend(context.Context) error {
+	return errors.New("AccessDeniedException: dynamodb:DeleteTable")
+}
+
+func TestCmdCleanKeepBackend(t *testing.T) {
+	for _, tc := range []struct {
+		name        string
+		keepBackend bool
+		wantErr     bool
+	}{
+		{name: "destroys backend by default", keepBackend: false, wantErr: true},
+		{name: "keep-backend skips backend destroy", keepBackend: true, wantErr: false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			p := defaultTestConfig(t)
+			k8s, err := p.Provider().Kubernetes(context.Background())
+			if err != nil {
+				t.Fatalf("unexpected error getting kubernetes provider, %v", err)
+			}
+			p.provider = provider.NewProviderFactory(
+				p.Settings().Config,
+				p.Settings().Secrets,
+				provider.WithKubernetesProvider(k8s),
+				provider.WithCloudProvider(backendProtectedCloud{provider.LocalClient{Name: "test"}}),
+			)
+			p.keepBackend = tc.keepBackend
+
+			err = Clean(context.Background(), p)
+			if tc.wantErr {
+				assert.Error(t, err)
+			} else {
+				assert.NoError(t, err)
+			}
+		})
+	}
 }
 
 type failingAWSPreflightCloud struct {
