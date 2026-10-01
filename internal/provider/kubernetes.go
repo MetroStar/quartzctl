@@ -102,6 +102,7 @@ type KubernetesProviderClient interface {
 	GetSecretValue(ctx context.Context, ns string, name string) (map[string]string, error)
 	Restart(ctx context.Context, kind schema.GroupVersionResource, ns string, name string) error
 	GetDaemonSetStatus(ctx context.Context, kind schema.GroupVersionResource, ns string, name string) (int64, int64, error)
+	CheckParentUpgradeReadiness(ctx context.Context) error
 	CleanupStuckTerminatingPods(ctx context.Context, timeout time.Duration) ([]string, error)
 	ReapOrphanedAdmissionWebhooks(ctx context.Context) ([]string, error)
 	ScrubStuckHelmReleaseSecrets(ctx context.Context, minAge time.Duration) ([]string, error)
@@ -1766,6 +1767,62 @@ func (c KubernetesClient) GetDaemonSetStatus(ctx context.Context, kind schema.Gr
 	ready, _, _ := unstructured.NestedInt64(obj, "status", "numberReady")
 
 	return ready, desired, nil
+}
+
+// CheckParentUpgradeReadiness prevents an existing Quartz HelmRelease from
+// being upgraded while node networking is still converging. The initial
+// bootstrap is allowed to create the parent release; subsequent upgrades must
+// wait for the CNI and ambient mesh DaemonSets to be fully ready.
+func (c KubernetesClient) CheckParentUpgradeReadiness(ctx context.Context) error {
+	helmReleaseKind, err := c.LookupKind(ctx, "HelmRelease")
+	if err != nil {
+		return err
+	}
+	if _, err = c.GetDynamicResource(ctx, helmReleaseKind, "quartz", "quartz"); apierrors.IsNotFound(err) {
+		return nil
+	} else if err != nil {
+		return fmt.Errorf("checking existing Quartz HelmRelease: %w", err)
+	}
+
+	daemonSetKind, err := c.LookupKind(ctx, "DaemonSet")
+	if err != nil {
+		return err
+	}
+	for _, daemonSet := range []struct {
+		name      string
+		namespace string
+	}{
+		{name: "aws-node", namespace: "kube-system"},
+		{name: "istio-cni-node", namespace: "kube-system"},
+		{name: "ztunnel", namespace: "istio-system"},
+	} {
+		ready, desired, statusErr := c.GetDaemonSetStatus(ctx, daemonSetKind, daemonSet.namespace, daemonSet.name)
+		if statusErr != nil {
+			if apierrors.IsNotFound(statusErr) {
+				return fmt.Errorf("critical DaemonSet %s/%s is not present", daemonSet.namespace, daemonSet.name)
+			}
+			return statusErr
+		}
+		if desired == 0 || ready < desired {
+			return fmt.Errorf("critical DaemonSet %s/%s is not ready: %d/%d pods ready", daemonSet.namespace, daemonSet.name, ready, desired)
+		}
+	}
+
+	clientSet, err := c.api.ClientSet()
+	if err != nil {
+		return err
+	}
+	nodes, err := clientSet.CoreV1().Nodes().List(ctx, metav1.ListOptions{})
+	if err != nil {
+		return fmt.Errorf("checking node churn: %w", err)
+	}
+	for _, node := range nodes.Items {
+		if node.DeletionTimestamp != nil {
+			return fmt.Errorf("node pool is actively churning: node %s is terminating", node.Name)
+		}
+	}
+
+	return nil
 }
 
 // Restart restarts resources of a specific kind in the cluster.

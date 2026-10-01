@@ -103,6 +103,19 @@ type failingAWSPreflightCloud struct {
 	err error
 }
 
+type failingNonAWSPreflightCloud struct {
+	provider.LocalClient
+	err error
+}
+
+func (c failingNonAWSPreflightCloud) ProviderName() string {
+	return "local"
+}
+
+func (c failingNonAWSPreflightCloud) CheckAccess(context.Context) provider.ProviderCheckResult {
+	return provider.EmptyProviderCheckResult{Error: c.err}
+}
+
 func (c failingAWSPreflightCloud) ProviderName() string {
 	return provider.AWS_PROVIDER
 }
@@ -232,6 +245,13 @@ func TestPreflightAwsMissingShellEnvMessage(t *testing.T) {
 	assert.Error(t, err)
 	assert.Contains(t, err.Error(), "AWS access check failed")
 	assert.Contains(t, err.Error(), "source ~/.bashrc")
+}
+
+func TestCloudPreflightErrorIsProviderNeutral(t *testing.T) {
+	err := cloudPreflightError(failingNonAWSPreflightCloud{}, errors.New("provider unavailable"))
+	assert.Error(t, err)
+	assert.Contains(t, err.Error(), "cloud access check failed")
+	assert.NotContains(t, err.Error(), "AWS credentials")
 }
 
 func TestLocalInstallPreflightCompressesOldTofuLogs(t *testing.T) {
