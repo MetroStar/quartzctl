@@ -59,7 +59,7 @@ func TestNewTfApplyCommand(t *testing.T) {
 
 	assert.Equal(t, "apply", cmd.Name)
 	assert.Equal(t, "Run `tofu apply` for a specific stage", cmd.Usage)
-	assert.Len(t, cmd.Flags, 2)
+	assert.Len(t, cmd.Flags, 3)
 
 	stageFlag := cmd.Flags[0].(*cli.StringFlag)
 	assert.Equal(t, "stage", stageFlag.Name)
@@ -67,6 +67,9 @@ func TestNewTfApplyCommand(t *testing.T) {
 
 	initFlag := cmd.Flags[1].(*cli.BoolFlag)
 	assert.Equal(t, "init", initFlag.Name)
+
+	planFileFlag := cmd.Flags[2].(*cli.StringFlag)
+	assert.Equal(t, "plan-file", planFileFlag.Name)
 
 	runTestTfCommandWithStage(t, cmd)
 }
@@ -77,7 +80,7 @@ func TestNewTfPlanCommand(t *testing.T) {
 
 	assert.Equal(t, "plan", cmd.Name)
 	assert.Equal(t, "Run `tofu plan` for a specific stage", cmd.Usage)
-	assert.Len(t, cmd.Flags, 2)
+	assert.Len(t, cmd.Flags, 3)
 
 	stageFlag := cmd.Flags[0].(*cli.StringFlag)
 	assert.Equal(t, "stage", stageFlag.Name)
@@ -85,6 +88,9 @@ func TestNewTfPlanCommand(t *testing.T) {
 
 	initFlag := cmd.Flags[1].(*cli.BoolFlag)
 	assert.Equal(t, "init", initFlag.Name)
+
+	outFlag := cmd.Flags[2].(*cli.StringFlag)
+	assert.Equal(t, "out", outFlag.Name)
 
 	runTestTfCommandWithStage(t, cmd)
 }
@@ -304,6 +310,12 @@ func TestCmdTfApply(t *testing.T) {
 	if err != nil {
 		t.Errorf("unexpected error in cmd TfApply, %v", err)
 	}
+}
+
+func TestTfApplyPlanRequiresPath(t *testing.T) {
+	p := defaultTestConfig(t)
+	err := TfApplyPlan(context.Background(), testStage, "", p)
+	assert.EqualError(t, err, "saved plan file path must not be empty")
 }
 
 func TestCmdTfDestroy(t *testing.T) {
