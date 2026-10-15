@@ -101,7 +101,7 @@ quartz [command] [flags]
 - `render`: Write fully rendered configuration to yaml (`--out`/`-o`, default `./out/quartz.generated.yaml`).
 - `restart`: Restart target Kubernetes resources. Defaults to deployments, daemonsets, and statefulsets; narrow with `--kind`/`-k`, `--namespace`/`-n`, and `--name`.
 - `tofu` / `tf`: OpenTofu subcommands for configured stages.
-  - `apply`: Run `tofu apply` for a stage (`--stage <name>` required).
+  - `apply`: Apply a new stage plan, or apply an existing saved plan with `--plan-file <path>` (`--stage <name>` required).
   - `destroy`: Run `tofu destroy` for a stage (`--stage <name>` required).
   - `force-unlock`: Run `tofu force-unlock` for a stage (`--stage <name>` plus lock id).
   - `format` / `fmt`: Run `tofu fmt` for a stage (`--stage <name>` required).
@@ -110,7 +110,7 @@ quartz [command] [flags]
   - `init`: Run `tofu init` for a stage (`--stage <name>` required).
   - `init-all`: Run `tofu init` for all stages.
   - `output`: Run `tofu output` for a stage (`--stage <name>` required).
-  - `plan`: Run `tofu plan` for a stage (`--stage <name>` required).
+  - `plan`: Run `tofu plan` for a stage (`--stage <name>` required); use `--out <path>` to save the plan for later review and apply.
   - `refresh`: Run `tofu refresh` for a stage (`--stage <name>` required).
   - `refresh-all`: Run `tofu refresh` for all stages.
   - `state`: Inspect or modify stage state: `list`, `show` (sensitive values redacted), and `rm`/`remove`.

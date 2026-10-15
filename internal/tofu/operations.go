@@ -114,7 +114,11 @@ func (c *TofuClient) Format(ctx context.Context, stage schema.StageConfig) error
 
 // Plan creates an execution plan for the specified stage.
 // It runs `tofu plan` with the configured input variables and returns whether changes are required.
-func (c *TofuClient) Plan(ctx context.Context, stage schema.StageConfig) (bool, error) {
+type TofuPlanOpts struct {
+	OutFile string
+}
+
+func (c *TofuClient) Plan(ctx context.Context, stage schema.StageConfig, opts ...TofuPlanOpts) (bool, error) {
 	log.Debug("tofu plan", "stage", stage)
 	stdout := newNoiseFilterWriter(os.Stdout)
 	stderr := newNoiseFilterWriter(os.Stderr)
@@ -140,6 +144,9 @@ func (c *TofuClient) Plan(ctx context.Context, stage schema.StageConfig) (bool, 
 	if stageVarFile != "" {
 		vars = append(vars, tfexec.VarFile(stageVarFile))
 	}
+	if len(opts) > 0 && opts[0].OutFile != "" {
+		vars = append(vars, tfexec.Out(opts[0].OutFile))
+	}
 	c.setStageEnv(tf, stage)
 	return tf.Plan(ctx, vars...)
 }
@@ -148,6 +155,7 @@ func (c *TofuClient) Plan(ctx context.Context, stage schema.StageConfig) (bool, 
 type TofuApplyOpts struct {
 	AllowDeferral bool     // Enable OpenTofu deferred actions (-allow-deferral)
 	Targets       []string // Restrict the apply to these resource addresses (-target)
+	PlanFile      string   // Apply this saved plan instead of creating a new plan
 }
 
 // Apply applies the OpenTofu configuration for the specified stage.
@@ -169,6 +177,14 @@ func (c *TofuClient) Apply(ctx context.Context, stage schema.StageConfig, opts .
 		_ = stdout.Flush()
 		_ = stderr.Flush()
 	}()
+
+	if len(opts) > 0 && opts[0].PlanFile != "" {
+		if opts[0].AllowDeferral || len(opts[0].Targets) > 0 {
+			return fmt.Errorf("saved plan apply cannot be combined with deferral or target options")
+		}
+		c.setStageEnv(tf, stage)
+		return tf.Apply(ctx, tfexec.DirOrPlan(opts[0].PlanFile))
+	}
 
 	stageVarFile, cleanup, err := c.stageVarFile(ctx, stage)
 	if err != nil {

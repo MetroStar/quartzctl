@@ -171,6 +171,34 @@ func TestTofuPlan(t *testing.T) {
 	}
 }
 
+func TestTofuApplySavedPlan(t *testing.T) {
+	tf, err := newTestTfClient(t)
+	require.NoError(t, err)
+	defer tf.Cleanup(context.Background())
+
+	stage := newSimpleStageConfig()
+	require.NoError(t, tf.Init(context.Background(), stage, TofuInitOpts{}))
+
+	planPath := filepath.Join(t.TempDir(), "stage.tfplan")
+	_, err = tf.Plan(context.Background(), stage, TofuPlanOpts{OutFile: planPath})
+	require.NoError(t, err)
+
+	err = tf.Apply(context.Background(), stage, TofuApplyOpts{PlanFile: planPath})
+	require.NoError(t, err)
+}
+
+func TestTofuApplySavedPlanRejectsTargets(t *testing.T) {
+	tf, err := newTestTfClient(t)
+	require.NoError(t, err)
+	defer tf.Cleanup(context.Background())
+
+	err = tf.Apply(context.Background(), newSimpleStageConfig(), TofuApplyOpts{
+		PlanFile: "stage.tfplan",
+		Targets:  []string{"random_integer.value"},
+	})
+	require.EqualError(t, err, "saved plan apply cannot be combined with deferral or target options")
+}
+
 func TestTofuApply(t *testing.T) {
 	tf, err := newTestTfClient(t)
 	if err != nil {

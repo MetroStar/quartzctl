@@ -111,15 +111,20 @@ func NewTfApplyCommand(p *CommandParams) TfCommandResult {
 			Flags: []cli.Flag{
 				&cli.StringFlag{Name: "stage", Aliases: []string{"s"}, Usage: "Stage name", Required: true},
 				&cli.BoolFlag{Name: "init", Aliases: []string{"i"}, Usage: "Run `tofu init` before applying", Required: false},
+				&cli.StringFlag{Name: "plan-file", Usage: "Apply an existing saved OpenTofu plan without replanning", Required: false},
 			},
 			Action: func(ctx context.Context, ccmd *cli.Command) error {
 				stage := ccmd.String("stage")
 				init := ccmd.Bool("init")
+				planFile := ccmd.String("plan-file")
 				if init {
 					err := TfInit(ctx, stage, p)
 					if err != nil {
 						return err
 					}
+				}
+				if planFile != "" {
+					return TfApplyPlan(ctx, stage, planFile, p)
 				}
 				return TfApply(ctx, stage, p)
 			},
@@ -142,17 +147,19 @@ func NewTfPlanCommand(p *CommandParams) TfCommandResult {
 			Flags: []cli.Flag{
 				&cli.StringFlag{Name: "stage", Aliases: []string{"s"}, Usage: "Stage name", Required: true},
 				&cli.BoolFlag{Name: "init", Aliases: []string{"i"}, Usage: "Run `tofu init` before planning", Required: false},
+				&cli.StringFlag{Name: "out", Usage: "Write the generated plan to this file for later review and apply", Required: false},
 			},
 			Action: func(ctx context.Context, ccmd *cli.Command) error {
 				stage := ccmd.String("stage")
 				init := ccmd.Bool("init")
+				outFile := ccmd.String("out")
 				if init {
 					err := TfInit(ctx, stage, p)
 					if err != nil {
 						return err
 					}
 				}
-				return TfPlan(ctx, stage, p)
+				return TfPlanWithOutput(ctx, stage, outFile, p)
 			},
 		},
 	}
@@ -533,6 +540,10 @@ func TfInitAll(ctx context.Context, p *CommandParams) error {
 
 // TfPlan runs `tofu plan` for a specific stage.
 func TfPlan(ctx context.Context, stage string, p *CommandParams) error {
+	return TfPlanWithOutput(ctx, stage, "", p)
+}
+
+func TfPlanWithOutput(ctx context.Context, stage string, outFile string, p *CommandParams) error {
 	resolvedStage, err := resolveTofuStage(stage, p)
 	if err != nil {
 		return err
@@ -552,7 +563,7 @@ func TfPlan(ctx context.Context, stage string, p *CommandParams) error {
 
 	return wrapChecks(ctx, stage, "plan", p, func() error {
 		s := p.Settings().Config.Stages[stage]
-		empty, err := client.Plan(ctx, s)
+		empty, err := client.Plan(ctx, s, tofu.TofuPlanOpts{OutFile: outFile})
 		if !empty {
 			log.Info("plan contains changes", "path", p.Settings().Config.Stages[stage].Path)
 		}
@@ -578,6 +589,23 @@ func resolveTofuStage(stage string, p *CommandParams) (string, error) {
 
 // TfApply runs `tofu apply` for a specific stage.
 func TfApply(ctx context.Context, stage string, p *CommandParams) error {
+	return tfApply(ctx, stage, p, tofu.TofuApplyOpts{})
+}
+
+func TfApplyPlan(ctx context.Context, stage string, planFile string, p *CommandParams) error {
+	if planFile == "" {
+		return fmt.Errorf("saved plan file path must not be empty")
+	}
+	return tfApply(ctx, stage, p, tofu.TofuApplyOpts{PlanFile: planFile})
+}
+
+func tfApply(ctx context.Context, stage string, p *CommandParams, applyOpts tofu.TofuApplyOpts) error {
+	resolvedStage, err := resolveTofuStage(stage, p)
+	if err != nil {
+		return err
+	}
+	stage = resolvedStage
+
 	log.Debug("Entering", "command", "tf:apply", "stage", stage)
 	defer log.Debug("Completed", "command", "tf:apply", "stage", stage)
 
@@ -585,7 +613,7 @@ func TfApply(ctx context.Context, stage string, p *CommandParams) error {
 	util.Hdrf("Apply %s", stage)
 
 	client := tofu.Instance(ctx, *p.Settings())
-	err := tfStagePrep(ctx, stage, p)
+	err = tfStagePrep(ctx, stage, p)
 	if err != nil {
 		return err
 	}
@@ -597,7 +625,8 @@ func TfApply(ctx context.Context, stage string, p *CommandParams) error {
 
 	err = wrapChecks(ctx, stage, "apply", p, func() error {
 		s := p.Settings().Config.Stages[stage]
-		return client.Apply(ctx, s, tofu.TofuApplyOpts{AllowDeferral: p.allowDeferral})
+		applyOpts.AllowDeferral = applyOpts.AllowDeferral || p.allowDeferral
+		return client.Apply(ctx, s, applyOpts)
 	})
 
 	if err != nil {
