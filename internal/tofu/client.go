@@ -17,6 +17,7 @@ package tofu
 import (
 	"compress/gzip"
 	"context"
+	"errors"
 	"fmt"
 	"io"
 	"os"
@@ -178,6 +179,35 @@ func (c *TofuClient) newTfOpts(opts *TfOpts) (*tfexec.Terraform, error) {
 // install downloads and installs the specified version of the OpenTofu CLI.
 // It returns the executable path and any error encountered.
 func install(ctx context.Context, v string, dir string) (string, error) {
+	return installWithDownload(ctx, v, dir, downloadTofu)
+}
+
+func downloadTofu(ctx context.Context, v string) ([]byte, error) {
+	dl, err := tofudl.New()
+	if err != nil {
+		return nil, fmt.Errorf("failed to initialize OpenTofu downloader: %w", err)
+	}
+
+	return dl.Download(ctx, tofudl.DownloadOptVersion(tofudl.Version(v)))
+}
+
+func executableVersion(ctx context.Context, path string) (string, error) {
+	path, err := filepath.Abs(path)
+	if err != nil {
+		return "", err
+	}
+	tf, err := tfexec.NewTerraform(filepath.Dir(path), path)
+	if err != nil {
+		return "", err
+	}
+	version, _, err := tf.Version(ctx, true)
+	if err != nil {
+		return "", err
+	}
+	return version.String(), nil
+}
+
+func installWithDownload(ctx context.Context, v string, dir string, download func(context.Context, string) ([]byte, error)) (_ string, err error) {
 	binaryName := "tofu"
 	if runtime.GOOS == "windows" {
 		binaryName += ".exe"
@@ -189,27 +219,54 @@ func install(ctx context.Context, v string, dir string) (string, error) {
 
 	execPath := filepath.Join(dir, binaryName)
 
-	// If the binary already exists, reuse it
 	if _, err := os.Stat(execPath); err == nil {
-		log.Debug("OpenTofu binary found", "path", execPath)
-		return execPath, nil
+		actual, err := executableVersion(ctx, execPath)
+		if err != nil {
+			return "", fmt.Errorf("failed to inspect cached OpenTofu at %s (requested %s): %w", execPath, v, err)
+		}
+		if actual == strings.TrimPrefix(v, "v") {
+			log.Debug("OpenTofu binary matches configured version", "path", execPath, "version", actual)
+			return execPath, nil
+		}
+		log.Info("Replacing cached OpenTofu with configured version", "path", execPath, "cached_version", actual, "requested_version", v)
+	} else if !errors.Is(err, os.ErrNotExist) {
+		return "", fmt.Errorf("failed to inspect OpenTofu cache at %s: %w", execPath, err)
 	}
 
-	dl, err := tofudl.New()
+	binary, err := download(ctx, v)
 	if err != nil {
-		return "", fmt.Errorf("failed to initialize OpenTofu downloader: %w", err)
+		return "", fmt.Errorf("failed to download OpenTofu %s for %s: %w", v, execPath, err)
 	}
 
-	binary, err := dl.Download(ctx, tofudl.DownloadOptVersion(tofudl.Version(v)))
+	staged, err := os.CreateTemp(dir, ".tofu-*"+filepath.Ext(binaryName))
 	if err != nil {
-		return "", fmt.Errorf("failed to download OpenTofu %s: %w", v, err)
+		return "", fmt.Errorf("failed to stage OpenTofu %s for %s: %w", v, execPath, err)
+	}
+	defer func() {
+		if cleanupErr := os.Remove(staged.Name()); cleanupErr != nil && !errors.Is(cleanupErr, os.ErrNotExist) {
+			err = errors.Join(err, fmt.Errorf("failed to remove staged OpenTofu %s: %w", staged.Name(), cleanupErr))
+		}
+	}()
+
+	_, writeErr := staged.Write(binary)
+	chmodErr := staged.Chmod(0o700)
+	closeErr := staged.Close()
+	if err := errors.Join(writeErr, chmodErr, closeErr); err != nil {
+		return "", fmt.Errorf("failed to write staged OpenTofu for %s: %w", execPath, err)
 	}
 
-	if err := os.WriteFile(execPath, binary, 0o700); err != nil { //nolint:gosec
-		return "", fmt.Errorf("failed to write OpenTofu binary: %w", err)
+	actual, err := executableVersion(ctx, staged.Name())
+	if err != nil {
+		return "", fmt.Errorf("failed to verify downloaded OpenTofu %s for %s: %w", v, execPath, err)
+	}
+	if actual != strings.TrimPrefix(v, "v") {
+		return "", fmt.Errorf("downloaded OpenTofu for %s reports version %s, requested %s", execPath, actual, v)
+	}
+	if err := os.Rename(staged.Name(), execPath); err != nil {
+		return "", fmt.Errorf("failed to replace OpenTofu at %s with version %s: %w", execPath, v, err)
 	}
 
-	log.Debug("OpenTofu installed", "path", execPath)
+	log.Debug("OpenTofu installed", "path", execPath, "version", actual)
 
 	return execPath, nil
 }

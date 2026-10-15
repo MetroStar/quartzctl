@@ -192,6 +192,41 @@ aws:
 
 The `stage.yaml` file allows for stage directories to override configuration from the cluster `quartz.yaml` or convention defaults.
 
+### OpenTofu Runtime and Cache
+
+Set `tofu.version` in `quartz.yaml` to select the OpenTofu runtime for the project:
+
+```yaml
+tofu:
+  version: "1.13.1"
+tmp: ./out
+```
+
+Quartz manages its own executable at `<tmp>/tofu` (`tofu.exe` on Windows).
+Changing `PATH` or the version selected by mise does not change that executable.
+Before reusing it, Quartz checks its actual version against `tofu.version`.
+A mismatch triggers a download of the configured version, including when an older
+version is explicitly requested. The downloaded executable is verified before
+atomically replacing the cache. Failed downloads, verification, or replacement
+leave the previous executable in place and return an error; Quartz does not
+silently continue with the wrong runtime. An existing executable that cannot be
+inspected also produces an error with its path and the requested version.
+
+To diagnose a version mismatch, compare `tofu.version` with the executable itself,
+using the configured `tmp` directory (the example above uses `./out`):
+
+```bash
+./out/tofu version
+```
+
+If an older Quartz CLI still reuses a stale executable, install a release that
+includes version-aware cache handling, or build the corrected CLI from this
+repository and use that binary. Changing the YAML alone is not sufficient with
+older CLIs. The corrected CLI repairs a version mismatch when it next initializes
+its OpenTofu client. If it cannot inspect the executable, resolve the reported
+permission or executable error before retrying. No state removal or cluster
+teardown is needed.
+
 ### Sample Stage Configuration
 
 ```yaml

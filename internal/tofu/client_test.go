@@ -17,8 +17,11 @@ package tofu
 import (
 	"context"
 	"encoding/json"
+	"errors"
+	"fmt"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 
@@ -27,6 +30,7 @@ import (
 	"github.com/MetroStar/quartzctl/internal/log"
 	"github.com/knadh/koanf/v2"
 	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 )
 
 const (
@@ -437,6 +441,172 @@ func TestInstall(t *testing.T) {
 	// Verify the installed OpenTofu binary exists
 	_, err = os.Stat(filepath.Join(tmpDir, "tofu"))
 	assert.NoError(t, err, "OpenTofu binary should exist in the specified directory")
+}
+
+func fakeTofuBinary(t *testing.T, version string) []byte {
+	t.Helper()
+	if runtime.GOOS == "windows" {
+		t.Skip("shell executable fixtures require a Unix host")
+	}
+	return []byte(fmt.Sprintf("#!/bin/sh\nprintf '%%s\\n' '{\"terraform_version\":%q}'\n", version))
+}
+
+func TestInstallCache(t *testing.T) {
+	for _, tc := range []struct {
+		name      string
+		cached    string
+		requested string
+	}{
+		{name: "matching", cached: "1.13.1", requested: "1.13.1"},
+		{name: "upgrade", cached: "1.12.0", requested: "1.13.1"},
+		{name: "downgrade", cached: "1.13.1", requested: "1.12.0"},
+		{name: "missing", requested: "1.13.1"},
+		{name: "relative directory", cached: "1.12.0", requested: "1.13.1"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			tmp := t.TempDir()
+			path := filepath.Join(tmp, "tofu")
+			var previous os.FileInfo
+			if tc.cached != "" {
+				require.NoError(t, os.WriteFile(path, fakeTofuBinary(t, tc.cached), 0o700))
+				var err error
+				previous, err = os.Stat(path)
+				require.NoError(t, err)
+			}
+			dir := tmp
+			if tc.name == "relative directory" {
+				wd, err := os.Getwd()
+				require.NoError(t, err)
+				dir, err = filepath.Rel(wd, tmp)
+				require.NoError(t, err)
+			}
+			calls := 0
+			ctx := context.Background()
+			got, err := installWithDownload(ctx, tc.requested, dir, func(actualCtx context.Context, version string) ([]byte, error) {
+				calls++
+				require.Equal(t, ctx, actualCtx)
+				require.Equal(t, tc.requested, version)
+				return fakeTofuBinary(t, version), nil
+			})
+			require.NoError(t, err)
+			require.Equal(t, filepath.Join(dir, "tofu"), got)
+			actual, err := executableVersion(ctx, got)
+			require.NoError(t, err)
+			require.Equal(t, tc.requested, actual)
+			info, err := os.Stat(got)
+			require.NoError(t, err)
+			require.Equal(t, os.FileMode(0o700), info.Mode().Perm())
+			if tc.cached == tc.requested {
+				require.Zero(t, calls)
+				require.True(t, os.SameFile(previous, info), "matching cache must not be replaced")
+			} else {
+				require.Equal(t, 1, calls)
+				if previous != nil {
+					require.False(t, os.SameFile(previous, info))
+				}
+			}
+			entries, err := os.ReadDir(tmp)
+			require.NoError(t, err)
+			require.Len(t, entries, 1, "staged executables must be cleaned up")
+			require.Equal(t, "tofu", entries[0].Name())
+		})
+	}
+}
+
+func TestInstallCacheFailures(t *testing.T) {
+	for _, tc := range []struct {
+		name          string
+		cached        []byte
+		downloaded    []byte
+		downloadError error
+		want          string
+		wantCalls     int
+	}{
+		{
+			name: "download failure", cached: fakeTofuBinary(t, "1.12.0"),
+			downloadError: errors.New("download unavailable"), want: "download unavailable", wantCalls: 1,
+		},
+		{
+			name: "downloaded version mismatch", cached: fakeTofuBinary(t, "1.12.0"),
+			downloaded: fakeTofuBinary(t, "1.11.6"), want: "reports version 1.11.6, requested 1.13.1", wantCalls: 1,
+		},
+		{
+			name: "invalid downloaded executable", cached: fakeTofuBinary(t, "1.12.0"),
+			downloaded: []byte("invalid executable"), want: "failed to verify downloaded OpenTofu", wantCalls: 1,
+		},
+		{
+			name: "invalid cached executable", cached: []byte("invalid executable"),
+			want: "failed to inspect cached OpenTofu",
+		},
+		{
+			name: "unparseable cached version", cached: fakeTofuBinary(t, "invalid"),
+			want: "failed to inspect cached OpenTofu",
+		},
+		{
+			name: "unparseable downloaded version", cached: fakeTofuBinary(t, "1.12.0"),
+			downloaded: fakeTofuBinary(t, "invalid"), want: "failed to verify downloaded OpenTofu", wantCalls: 1,
+		},
+		{
+			name:       "invalid fresh download",
+			downloaded: fakeTofuBinary(t, "1.12.0"), want: "reports version 1.12.0, requested 1.13.1", wantCalls: 1,
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			tmp := t.TempDir()
+			path := filepath.Join(tmp, "tofu")
+			if tc.cached != nil {
+				require.NoError(t, os.WriteFile(path, tc.cached, 0o700))
+			}
+			calls := 0
+			got, err := installWithDownload(context.Background(), "1.13.1", tmp, func(context.Context, string) ([]byte, error) {
+				calls++
+				return tc.downloaded, tc.downloadError
+			})
+			require.ErrorContains(t, err, tc.want)
+			require.ErrorContains(t, err, path)
+			require.Empty(t, got)
+			require.Equal(t, tc.wantCalls, calls)
+			entries, err := os.ReadDir(tmp)
+			require.NoError(t, err)
+			if tc.cached == nil {
+				require.Empty(t, entries)
+			} else {
+				require.Len(t, entries, 1)
+				current, err := os.ReadFile(path)
+				require.NoError(t, err)
+				require.Equal(t, tc.cached, current, "failed installation must preserve the cached executable")
+			}
+		})
+	}
+}
+
+func TestInstallReplacementFailure(t *testing.T) {
+	tmp := t.TempDir()
+	path := filepath.Join(tmp, "tofu")
+	got, err := installWithDownload(context.Background(), "1.13.1", tmp, func(context.Context, string) ([]byte, error) {
+		// Simulate another process creating a directory at the destination.
+		require.NoError(t, os.Mkdir(path, 0o700))
+		return fakeTofuBinary(t, "1.13.1"), nil
+	})
+	require.Empty(t, got)
+	require.ErrorContains(t, err, "failed to replace OpenTofu at "+path)
+	info, statErr := os.Stat(path)
+	require.NoError(t, statErr)
+	require.True(t, info.IsDir(), "failed replacement must preserve the destination")
+	entries, readErr := os.ReadDir(tmp)
+	require.NoError(t, readErr)
+	require.Len(t, entries, 1, "failed replacement must clean up the staged executable")
+}
+
+func TestInstallCacheInspectionFailure(t *testing.T) {
+	tmp := t.TempDir()
+	path := filepath.Join(tmp, "tofu")
+	require.NoError(t, os.WriteFile(path, fakeTofuBinary(t, "1.13.1"), 0o600))
+	_, err := installWithDownload(context.Background(), "1.13.1", tmp, func(context.Context, string) ([]byte, error) {
+		t.Fatal("must not download after cache inspection fails")
+		return nil, nil
+	})
+	require.ErrorContains(t, err, "failed to inspect cached OpenTofu at "+path)
 }
 
 func TestInitLog(t *testing.T) {
