@@ -809,7 +809,7 @@ func aiTelemetryStatus(key string, value float64) (string, string) {
 		if value > 0 {
 			return "OK", "Recent AI traffic reached Agent Gateway"
 		}
-		return "No traffic", "Generate Open-WebUI, Kagent, K8sGPT, Epyon, or Jenkins traffic and rerun"
+		return "No traffic", "Generate Open-WebUI, Kagent, K8sGPT, Quartz Evaluator, or Jenkins traffic and rerun"
 	case "recent_2xx":
 		if value > 0 {
 			return "OK", "Recent successful responses were observed"

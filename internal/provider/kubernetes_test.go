@@ -1564,7 +1564,7 @@ func TestClusterProgressSummary(t *testing.T) {
 	p := ClusterProgress{
 		HelmReleasesReady:     10,
 		HelmReleasesTotal:     34,
-		UnhealthyPods:         []string{"quartz/epyon-0"},
+		UnhealthyPods:         []string{"quartz/quartz-evaluator-0"},
 		TerminatingNamespaces: []string{"cert-manager"},
 		Releases: []HelmReleaseStatus{
 			{Namespace: "quartz", Name: "post-install", ReadyMsg: "running install"},
