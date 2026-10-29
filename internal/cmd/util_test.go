@@ -384,12 +384,12 @@ func TestSummarizeResourceNamespaces(t *testing.T) {
 	resources := []provider.KubernetesResource{
 		{Namespace: "argocd"},
 		{Namespace: "argocd"},
-		{Namespace: "epyon"},
+		{Namespace: "quartz-evaluator"},
 		{Namespace: "jenkins"},
 	}
 
 	assert.Equal(t, 3, countResourceNamespaces(resources))
-	assert.Equal(t, "argocd(2), epyon(1), jenkins(1)", summarizeResourceNamespaces(resources, 6))
+	assert.Equal(t, "argocd(2), jenkins(1), quartz-evaluator(1)", summarizeResourceNamespaces(resources, 6))
 	assert.Equal(t, "argocd(2), +2 more", summarizeResourceNamespaces(resources, 1))
 }
 
@@ -473,7 +473,7 @@ func TestClassifySSO(t *testing.T) {
 		},
 		{
 			name:           "oauth2-proxy callback path",
-			app:            "epyon",
+			app:            "quartz-evaluator",
 			callbackPaths:  []string{"/oauth2/callback"},
 			wantSSO:        "OIDC (oauth2-proxy)",
 			wantClientType: "confidential",
@@ -546,8 +546,8 @@ func TestBuildSSOSummaryRows(t *testing.T) {
 					Description:  "ArgoCD",
 					CallbackUrls: []schema.ApplicationCallbackConfig{{Path: "/auth/callback"}},
 				},
-				"epyon": {
-					Description:  "Epyon",
+				"quartz-evaluator": {
+					Description:  "Quartz Evaluator",
 					CallbackUrls: []schema.ApplicationCallbackConfig{{Path: "/oauth2/callback"}},
 				},
 				"keycloak": {
@@ -572,7 +572,7 @@ func TestBuildSSOSummaryRows(t *testing.T) {
 
 	// Configured apps with their derived posture.
 	assert.Equal(t, []string{"ArgoCD", "OIDC (native)", "confidential", "infra"}, byPkg["ArgoCD"])
-	assert.Equal(t, []string{"Epyon", "OIDC (oauth2-proxy)", "confidential", "infra"}, byPkg["Epyon"])
+	assert.Equal(t, []string{"Quartz Evaluator", "OIDC (oauth2-proxy)", "confidential", "infra"}, byPkg["Quartz Evaluator"])
 	assert.Equal(t, []string{"Keycloak", "IdP (admin)", "—", "master"}, byPkg["Keycloak"])
 
 	// Backends without SSO are appended for a complete package picture.

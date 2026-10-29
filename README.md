@@ -28,6 +28,16 @@ Quartz is an open-source CLI tool designed to automate the full lifecycle of Kub
 
 Delivery teams and capture teams should start with the [quartzctl Capability Package](docs/capability/README.md). It includes the nine-document delivery set: capability summary, reference architecture, operating model, onboarding guide, runbook, troubleshooting guide, template package, value brief, and product page.
 
+### Quartz Evaluator identity
+
+Fresh-install infrastructure defaults provision **Quartz Evaluator** as
+`quartz-evaluator`, including the namespace/ingress lookup and confidential
+Keycloak client with `/oauth2/callback`. Use the coordinated Quartz Evaluator
+charts and image; this rename does not migrate an existing Epyon installation
+or persisted configuration. Application Jenkinsfiles must use the renamed
+`quartz-evaluator` pod template/container before rollout. Upstream
+`/app/epyon.sh` and required `EPYON_*` scanner APIs remain unchanged.
+
 ---
 
 ## 📖 Table of Contents

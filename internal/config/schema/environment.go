@@ -396,16 +396,16 @@ func NewInfrastructureEnvironmentConfig(name string, desc string) Infrastructure
 				},
 				Lookup: NewApplicationLookupConfig("open-webui", "", "", "", "", "open-webui"),
 			},
-			// epyon has no native OIDC support, so a confidential client is
+			// quartz-evaluator has no native OIDC support, so a confidential client is
 			// provisioned for an oauth2-proxy front door (callback /oauth2/callback)
 			// that performs the Keycloak login and forwards authenticated traffic to
-			// the epyon web UI. See chart/templates/epyon/oauth2-proxy.yaml.
-			"epyon": {
-				Description: "Epyon",
+			// the quartz-evaluator web UI. See chart/templates/quartz-evaluator/oauth2-proxy.yaml.
+			"quartz-evaluator": {
+				Description: "Quartz Evaluator",
 				CallbackUrls: []ApplicationCallbackConfig{
 					{Path: "/oauth2/callback"},
 				},
-				Lookup: NewApplicationLookupConfig("epyon", "", "", "", "", "epyon"),
+				Lookup: NewApplicationLookupConfig("quartz-evaluator", "", "", "", "", "quartz-evaluator"),
 			},
 		},
 	}
