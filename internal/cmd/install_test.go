@@ -27,6 +27,7 @@ import (
 	"testing"
 	"time"
 
+	configschema "github.com/MetroStar/quartzctl/internal/config/schema"
 	"github.com/MetroStar/quartzctl/internal/provider"
 	"github.com/MetroStar/quartzctl/internal/util"
 	"github.com/stretchr/testify/assert"
@@ -34,6 +35,42 @@ import (
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/runtime/schema"
 )
+
+func TestValidateInstallCredentials(t *testing.T) {
+	for _, tc := range []struct {
+		name    string
+		mirror  bool
+		ibUser  string
+		ibPass  string
+		ghUser  string
+		ghToken string
+		want    string
+	}{
+		{name: "authenticated", ibUser: "user", ibPass: "password", ghUser: "user", ghToken: "token"},
+		{name: "missing Iron Bank", ghUser: "user", ghToken: "token", want: "Iron Bank credentials"},
+		{name: "partial Iron Bank", ibUser: "user", ghUser: "user", ghToken: "token", want: "Iron Bank credentials"},
+		{name: "whitespace password", ibUser: "user", ibPass: " ", ghUser: "user", ghToken: "token", want: "Iron Bank credentials"},
+		{name: "mirrored without Iron Bank", mirror: true, ghUser: "user", ghToken: "token"},
+		{name: "missing GitHub", mirror: true, want: "GitHub username and token"},
+		{name: "partial GitHub", mirror: true, ghUser: "user", want: "GitHub username and token"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			cfg := configschema.QuartzConfig{}
+			cfg.Mirror.ImageRepository.Enabled = tc.mirror
+			secrets := configschema.QuartzSecrets{}
+			secrets.Ironbank.Username, secrets.Ironbank.Password = tc.ibUser, tc.ibPass
+			secrets.Github.Username, secrets.Github.Token = tc.ghUser, tc.ghToken
+			err := validateInstallCredentials(cfg, secrets)
+			if tc.want == "" {
+				assert.NoError(t, err)
+			} else {
+				assert.ErrorContains(t, err, tc.want)
+				assert.NotContains(t, err.Error(), "password=")
+				assert.NotContains(t, err.Error(), "token=")
+			}
+		})
+	}
+}
 
 func TestNewRootInstallCommand(t *testing.T) {
 	p := defaultTestConfig(t)

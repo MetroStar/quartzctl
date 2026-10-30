@@ -32,6 +32,20 @@ If OpenTofu needs deferred actions for a specific install:
 quartz install --allow-deferral --yes
 ```
 
+Before provisioning, `install` requires GitHub registry credentials
+(`GITHUB_USERNAME` and `GITHUB_TOKEN`) and, unless mirroring is enabled, Iron Bank
+credentials (`IRONBANK_USERNAME` and `IRONBANK_PASSWORD`). These may also be
+provided through the secrets file. Missing or whitespace-only credentials fail
+preflight rather than leaving the cluster blocked on private image pulls.
+
+Stages declaring `flux.release_name`, `flux.release_namespace`, and
+`flux.converge_targets` hand their bootstrap release to Flux. Once that
+HelmRelease exists, resumed installs converge only the declared co-resources
+before running normal post-apply checks, even when the stage is checkpointed.
+This allows registry overlays to recover without an unhealthy mesh blocking
+the bootstrap pre-upgrade gate. Saved bootstrap plans are rejected after handoff;
+use a normal apply instead.
+
 ## Procedure 2A - Confirm Application Delivery Inputs
 
 Before a full install, render and confirm any app-owned delivery settings:
