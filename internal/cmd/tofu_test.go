@@ -16,17 +16,148 @@ package cmd
 
 import (
 	"context"
+	"errors"
+	"net/http"
+	"net/http/httptest"
+	"os"
+	"path/filepath"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 
+	configschema "github.com/MetroStar/quartzctl/internal/config/schema"
+	"github.com/MetroStar/quartzctl/internal/provider"
 	"github.com/stretchr/testify/assert"
 	"github.com/urfave/cli/v3"
+	apierrors "k8s.io/apimachinery/pkg/api/errors"
+	"k8s.io/apimachinery/pkg/api/meta"
+	"k8s.io/apimachinery/pkg/runtime/schema"
 )
+
+type fluxReleaseProbe struct {
+	provider.KubernetesProviderClient
+	err       error
+	lookupErr error
+}
+
+func (f fluxReleaseProbe) LookupKind(context.Context, string) (schema.GroupVersionResource, error) {
+	return schema.GroupVersionResource{Group: "helm.toolkit.fluxcd.io", Version: "v2", Resource: "helmreleases"}, f.lookupErr
+}
+
+func (f fluxReleaseProbe) GetDynamicResource(context.Context, schema.GroupVersionResource, string, string) (map[string]interface{}, error) {
+	return map[string]interface{}{}, f.err
+}
+
+func TestStageHasFluxRelease(t *testing.T) {
+	for _, tc := range []struct {
+		name      string
+		err       error
+		lookupErr error
+		want      bool
+		wantErr   bool
+	}{
+		{name: "fresh install", err: apierrors.NewNotFound(schema.GroupResource{Resource: "helmreleases"}, "quartz")},
+		{name: "Flux CRD not installed", lookupErr: &meta.NoKindMatchError{GroupKind: schema.GroupKind{Kind: "HelmRelease"}}},
+		{name: "discovery failure", lookupErr: errors.New("API unavailable"), wantErr: true},
+		{name: "existing bootstrap", want: true},
+		{name: "API failure", err: errors.New("API unavailable"), wantErr: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			p := defaultTestConfig(t)
+			p.provider = provider.NewProviderFactory(p.Settings().Config, p.Settings().Secrets,
+				provider.WithKubernetesProvider(fluxReleaseProbe{err: tc.err, lookupErr: tc.lookupErr}))
+			stage := configschema.StageConfig{Id: "core", Flux: configschema.StageFluxConfig{
+				ReleaseName: "quartz", ReleaseNamespace: "quartz",
+				ConvergeTargets: []string{"kubernetes_secret_v1.values"},
+			}}
+			owned, err := stageHasFluxRelease(context.Background(), p, stage)
+			assert.Equal(t, tc.want, owned)
+			if tc.wantErr {
+				assert.ErrorContains(t, err, "API unavailable")
+			} else {
+				assert.NoError(t, err)
+			}
+
+			owned, err = stageHasFluxRelease(context.Background(), p, configschema.StageConfig{})
+			assert.False(t, owned)
+			assert.NoError(t, err)
+		})
+	}
+}
 
 const (
 	testStage = "first"
 )
+
+func TestTfApplyPlanRejectsFluxOwnedBootstrap(t *testing.T) {
+	p := defaultTestConfig(t)
+	p.provider = provider.NewProviderFactory(p.Settings().Config, p.Settings().Secrets,
+		provider.WithKubernetesProvider(fluxReleaseProbe{}))
+	stage := p.Settings().Config.Stages[testStage]
+	stage.Flux = configschema.StageFluxConfig{
+		ReleaseName: "quartz", ReleaseNamespace: "quartz",
+		ConvergeTargets: []string{"kubernetes_secret_v1.values"},
+	}
+	p.Settings().Config.Stages[testStage] = stage
+	err := TfApplyPlan(context.Background(), testStage, "bootstrap.tfplan", p)
+	assert.ErrorContains(t, err, "saved bootstrap plans cannot be applied after handoff")
+}
+
+func TestTfApplyFluxConvergesTargetsBeforePostChecks(t *testing.T) {
+	p := defaultTestConfig(t)
+	kube, err := p.Provider().Kubernetes(context.Background())
+	assert.NoError(t, err)
+	p.provider = provider.NewProviderFactory(p.Settings().Config, p.Settings().Secrets,
+		provider.WithKubernetesProvider(fluxReleaseProbe{KubernetesProviderClient: kube}))
+
+	var preCalls, postCalls atomic.Int32
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/pre" {
+			preCalls.Add(1)
+		} else {
+			postCalls.Add(1)
+		}
+		w.WriteHeader(http.StatusServiceUnavailable)
+	}))
+	defer server.Close()
+	stage := p.Settings().Config.Stages[testStage]
+	stage.Path = t.TempDir()
+	stage.Flux = configschema.StageFluxConfig{
+		ReleaseName: "quartz", ReleaseNamespace: "quartz",
+		ConvergeTargets: []string{"terraform_data.values"},
+	}
+	stage.Checks = map[string]configschema.StageChecksConfig{
+		"pre": {Before: []string{"apply"}, Http: []configschema.StageChecksHttpConfig{
+			{Url: server.URL + "/pre", StatusCodes: []int{200}, Retry: configschema.StageChecksRetryConfig{Limit: 1}},
+		}},
+		"post": {After: []string{"apply"}, Http: []configschema.StageChecksHttpConfig{
+			{Url: server.URL + "/post", StatusCodes: []int{200}, Retry: configschema.StageChecksRetryConfig{Limit: 1}},
+		}},
+	}
+	p.Settings().Config.Stages[testStage] = stage
+	assert.NoError(t, os.WriteFile(filepath.Join(stage.Path, "main.tf"), []byte(`
+variable "bootstrap_allowed" { default = false }
+resource "terraform_data" "bootstrap" {
+  lifecycle {
+    precondition {
+      condition = var.bootstrap_allowed
+      error_message = "Bootstrap release must not be reapplied."
+    }
+  }
+}
+resource "terraform_data" "values" { input = "converged" }
+`), 0600))
+	assert.NoError(t, TfInit(context.Background(), testStage, p))
+	err = TfApply(context.Background(), testStage, p)
+	assert.ErrorContains(t, err, "/post")
+	assert.Zero(t, preCalls.Load())
+	assert.EqualValues(t, 1, postCalls.Load())
+	state, readErr := os.ReadFile(filepath.Join(stage.Path, "terraform.tfstate"))
+	assert.NoError(t, readErr)
+	assert.Contains(t, string(state), `"name": "values"`)
+	assert.NotContains(t, string(state), `"name": "bootstrap"`)
+}
 
 func TestNewTfInitCommand(t *testing.T) {
 	p := defaultTestConfig(t)
