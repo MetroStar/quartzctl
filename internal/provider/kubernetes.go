@@ -91,6 +91,7 @@ func logSnapshotFailure(action string, err error) {
 type KubernetesProviderClient interface {
 	Provider
 	LookupKind(ctx context.Context, kind string) (schema.GroupVersionResource, error)
+	GetDynamicResource(ctx context.Context, kind schema.GroupVersionResource, ns string, name string) (map[string]interface{}, error)
 	WaitConditionState(ctx context.Context, kind schema.GroupVersionResource, ns string, name string, state string, timeoutSeconds int) error
 	PrintClusterInfo(ctx context.Context)
 	WriteKubeconfigFile(path string) error

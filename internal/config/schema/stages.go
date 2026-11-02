@@ -40,10 +40,13 @@ type StageConfig struct {
 // untargeted apply aborts at plan time with "Planned version is different from
 // configured version" before the stage's other resources can converge.
 // ConvergeTargets lists the resource addresses (e.g. the values overlay Secret)
-// to re-apply with -target on that drift so day-2 configuration changes still take
-// effect without disturbing the Flux-owned release.
+// to re-apply with -target so day-2 configuration changes still take effect
+// without disturbing the Flux-owned release. ReleaseName and ReleaseNamespace
+// enable proactive handoff detection before bootstrap apply/readiness checks.
 type StageFluxConfig struct {
-	ConvergeTargets []string `koanf:"converge_targets"`
+	ReleaseName      string   `koanf:"release_name"`
+	ReleaseNamespace string   `koanf:"release_namespace"`
+	ConvergeTargets  []string `koanf:"converge_targets"`
 }
 
 // StageChecksConfig represents the configuration for checks associated with a stage.

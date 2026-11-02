@@ -25,12 +25,15 @@ import (
 	"strings"
 	"time"
 
+	"github.com/MetroStar/quartzctl/internal/config/schema"
 	"github.com/MetroStar/quartzctl/internal/log"
 	"github.com/MetroStar/quartzctl/internal/provider"
 	"github.com/MetroStar/quartzctl/internal/stages"
 	"github.com/MetroStar/quartzctl/internal/tofu"
 	"github.com/MetroStar/quartzctl/internal/util"
 	"github.com/urfave/cli/v3"
+	apierrors "k8s.io/apimachinery/pkg/api/errors"
+	"k8s.io/apimachinery/pkg/api/meta"
 )
 
 // NewRootTofuCommand creates the "tofu" (aliased as "tf") root command for the CLI.
@@ -612,6 +615,22 @@ func tfApply(ctx context.Context, stage string, p *CommandParams, applyOpts tofu
 	stageStart := time.Now()
 	util.Hdrf("Apply %s", stage)
 
+	owned, err := stageHasFluxRelease(ctx, p, p.Settings().Config.Stages[stage])
+	if err != nil {
+		return err
+	}
+	if owned {
+		if applyOpts.PlanFile != "" {
+			return fmt.Errorf("stage %s is owned by Flux; saved bootstrap plans cannot be applied after handoff", stage)
+		}
+		s := p.Settings().Config.Stages[stage]
+		util.Msgf("Stage %s release is owned by Flux; converging co-resources without upgrading its bootstrap release", stage)
+		if err := TfApplyTargeted(ctx, stage, p, s.Flux.ConvergeTargets); err != nil {
+			return err
+		}
+		return postCheck(ctx, stage, "apply", p)
+	}
+
 	client := tofu.Instance(ctx, *p.Settings())
 	err = tfStagePrep(ctx, stage, p)
 	if err != nil {
@@ -639,6 +658,31 @@ func tfApply(ctx context.Context, stage string, p *CommandParams, applyOpts tofu
 	}
 	util.Msgf("Stage %s completed in %v", stage, time.Since(stageStart).Round(time.Second))
 	return nil
+}
+
+func stageHasFluxRelease(ctx context.Context, p *CommandParams, stage schema.StageConfig) (bool, error) {
+	if stage.Flux.ReleaseName == "" || stage.Flux.ReleaseNamespace == "" || len(stage.Flux.ConvergeTargets) == 0 {
+		return false, nil
+	}
+	kube, err := p.Provider().Kubernetes(ctx)
+	if err != nil {
+		return false, err
+	}
+	kind, err := kube.LookupKind(ctx, "HelmRelease")
+	if meta.IsNoMatchError(err) {
+		return false, nil
+	}
+	if err != nil {
+		return false, err
+	}
+	_, err = kube.GetDynamicResource(ctx, kind, stage.Flux.ReleaseNamespace, stage.Flux.ReleaseName)
+	if apierrors.IsNotFound(err) {
+		return false, nil
+	}
+	if err != nil {
+		return false, fmt.Errorf("checking Flux ownership for stage %s: %w", stage.Id, err)
+	}
+	return true, nil
 }
 
 func failOnEc2IamStateDrift(ctx context.Context, stage string, p *CommandParams, client *tofu.TofuClient) error {

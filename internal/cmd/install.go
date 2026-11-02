@@ -149,6 +149,9 @@ func Install(ctx context.Context, p *CommandParams, resumeFrom string) (err erro
 	}
 
 	stepStart := time.Now()
+	if err = validateInstallCredentials(p.Settings().Config, p.Settings().Secrets); err != nil {
+		return err
+	}
 	if err = LocalInstallPreflight(p); err != nil {
 		installTiming["local-preflight"] = time.Since(stepStart)
 		return err
@@ -207,7 +210,12 @@ func Install(ctx context.Context, p *CommandParams, resumeFrom string) (err erro
 			}
 		}
 
-		if cp.isCompleted(s.Id) {
+		owned, ownershipErr := stageHasFluxRelease(ctx, p, s)
+		if ownershipErr != nil {
+			finishStageTiming()
+			return ownershipErr
+		}
+		if cp.isCompleted(s.Id) && !owned {
 			// A checkpointed stage is not blindly skipped. It may have drifted
 			// since it last completed (manual console edits, template/var
 			// changes, or a partial prior apply). Run a plan and only skip when
@@ -335,6 +343,17 @@ func Install(ctx context.Context, p *CommandParams, resumeFrom string) (err erro
 		installTiming["model-warmer-status"] = time.Since(stepStart)
 	}
 
+	return nil
+}
+
+func validateInstallCredentials(cfg schema.QuartzConfig, secrets schema.QuartzSecrets) error {
+	if !cfg.Mirror.ImageRepository.Enabled &&
+		(strings.TrimSpace(secrets.Ironbank.Username) == "" || strings.TrimSpace(secrets.Ironbank.Password) == "") {
+		return fmt.Errorf("install preflight: Iron Bank credentials are required when image mirroring is disabled; supply --secrets or IRONBANK_USERNAME/IRONBANK_PASSWORD before provisioning")
+	}
+	if strings.TrimSpace(secrets.Github.Username) == "" || strings.TrimSpace(secrets.Github.Token) == "" {
+		return fmt.Errorf("install preflight: GitHub username and token are required for GitOps and registry delivery; supply --secrets or GITHUB_USERNAME/GITHUB_TOKEN before provisioning")
+	}
 	return nil
 }
 
