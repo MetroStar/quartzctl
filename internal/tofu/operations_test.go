@@ -21,6 +21,7 @@ import (
 	"path/filepath"
 	"reflect"
 	"strings"
+	"sync"
 	"testing"
 
 	"github.com/MetroStar/quartzctl/internal/config"
@@ -76,6 +77,43 @@ func TestStageEnvRejectsOtherManagedVariablesExplicitly(t *testing.T) {
 	err = client.setStageEnv(tf, schema.StageConfig{Id: "prereqs"})
 	if err == nil || !strings.Contains(err.Error(), "prereqs") || !strings.Contains(err.Error(), "TF_WORKSPACE") {
 		t.Fatalf("expected actionable stage environment error, got %v", err)
+	}
+}
+
+func TestStageOperationsStopOnEnvironmentConfigurationError(t *testing.T) {
+	t.Setenv("TF_WORKSPACE", "unexpected")
+	ctx := context.Background()
+	dir := t.TempDir()
+	stage := schema.StageConfig{Id: "prereqs", Path: dir}
+	client := TofuClient{
+		cfg:      config.Settings{Config: schema.QuartzConfig{Tmp: dir}},
+		execPath: "/bin/false", cacheMu: &sync.Mutex{},
+		clientCache: make(map[string]*tfexec.Terraform),
+	}
+	operations := map[string]func() error{
+		"init":       func() error { return client.Init(ctx, stage, TofuInitOpts{}) },
+		"plan":       func() error { _, err := client.Plan(ctx, stage); return err },
+		"apply":      func() error { return client.Apply(ctx, stage) },
+		"saved plan": func() error { return client.Apply(ctx, stage, TofuApplyOpts{PlanFile: "saved.plan"}) },
+		"destroy":    func() error { return client.Destroy(ctx, stage) },
+		"refresh":    func() error { return client.Refresh(ctx, stage) },
+		"unlock":     func() error { return client.ForceUnlock(ctx, stage, "lock-id") },
+		"import":     func() error { return client.Import(ctx, stage, "resource.example", "id") },
+		"remove":     func() error { return client.StateRemove(ctx, stage, "resource.example") },
+		"output":     func() error { _, err := client.Output(ctx, stage); return err },
+		"state list": func() error { _, err := client.StateList(ctx, stage); return err },
+		"orphan cleanup": func() error {
+			_, err := client.StateRemoveOrphanedClusterResources(ctx, stage)
+			return err
+		},
+	}
+	for name, operation := range operations {
+		t.Run(name, func(t *testing.T) {
+			err := operation()
+			if err == nil || !strings.Contains(err.Error(), "TF_WORKSPACE") {
+				t.Fatalf("expected environment configuration failure before subprocess execution, got %v", err)
+			}
+		})
 	}
 }
 
