@@ -15,12 +15,69 @@
 package tofu
 
 import (
+	"context"
 	"encoding/json"
+	"os"
+	"path/filepath"
 	"reflect"
+	"strings"
 	"testing"
 
+	"github.com/MetroStar/quartzctl/internal/config"
+	"github.com/MetroStar/quartzctl/internal/config/schema"
+	"github.com/hashicorp/terraform-exec/tfexec"
 	tfjson "github.com/hashicorp/terraform-json"
 )
+
+func TestStageEnvPreservesKubeconfigWithManagedAutomationVariables(t *testing.T) {
+	dir := t.TempDir()
+	capture := filepath.Join(dir, "environment")
+	binary := filepath.Join(dir, "tofu")
+	script := `#!/bin/sh
+printf '%s\n' "$KUBE_CONFIG_PATH" "$TF_PLUGIN_CACHE_DIR" "$STAGE_PROBE" > "$ENV_CAPTURE"
+printf '{"terraform_version":"1.13.1","platform":"linux_amd64","provider_selections":{}}'
+`
+	if err := os.WriteFile(binary, []byte(script), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("TF_INPUT", "0")
+	t.Setenv("TF_IN_AUTOMATION", "1")
+	t.Setenv("STAGE_PROBE", "preserved")
+	t.Setenv("ENV_CAPTURE", capture)
+	client := TofuClient{cfg: config.Settings{Config: schema.QuartzConfig{Tmp: dir}}}
+	tf, err := tfexec.NewTerraform(dir, binary)
+	if err != nil {
+		t.Fatal(err)
+	}
+	stage := schema.StageConfig{Id: "prereqs", Providers: schema.StageProvidersConfig{Kubernetes: true}}
+	if err := client.setStageEnv(tf, stage); err != nil {
+		t.Fatal(err)
+	}
+	if _, _, err := tf.Version(context.Background(), true); err != nil {
+		t.Fatal(err)
+	}
+	got, err := os.ReadFile(capture)
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := strings.Join([]string{filepath.Join(dir, "kubeconfig"), filepath.Join(dir, "plugin-cache"), "preserved", ""}, "\n")
+	if string(got) != want {
+		t.Fatalf("provider environment = %q, want %q", got, want)
+	}
+}
+
+func TestStageEnvRejectsOtherManagedVariablesExplicitly(t *testing.T) {
+	t.Setenv("TF_WORKSPACE", "unexpected")
+	client := TofuClient{cfg: config.Settings{Config: schema.QuartzConfig{Tmp: t.TempDir()}}}
+	tf, err := tfexec.NewTerraform(t.TempDir(), "/bin/true")
+	if err != nil {
+		t.Fatal(err)
+	}
+	err = client.setStageEnv(tf, schema.StageConfig{Id: "prereqs"})
+	if err == nil || !strings.Contains(err.Error(), "prereqs") || !strings.Contains(err.Error(), "TF_WORKSPACE") {
+		t.Fatalf("expected actionable stage environment error, got %v", err)
+	}
+}
 
 func TestExtractLockID(t *testing.T) {
 	tests := []struct {
