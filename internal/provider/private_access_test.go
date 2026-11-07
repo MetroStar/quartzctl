@@ -9,12 +9,36 @@ import (
 	"net/url"
 	"os"
 	"os/exec"
+	"strings"
 	"testing"
 
 	quartzSchema "github.com/MetroStar/quartzctl/internal/config/schema"
 	"github.com/MetroStar/quartzctl/internal/privateaccess"
 	"k8s.io/client-go/kubernetes"
 )
+
+func TestFactoryCopiesSharePrivateSessionCleanup(t *testing.T) {
+	factory := NewProviderFactory(quartzSchema.QuartzConfig{}, quartzSchema.QuartzSecrets{})
+	tunnel, err := privateaccess.NewTunnel("example.com:443", "127.0.0.1:1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer tunnel.Close()
+	factory.privateAccess.session = tunnel
+	copied := *factory
+	if copied.privateAccess != factory.privateAccess {
+		t.Fatal("factory copy must share command-scoped session ownership")
+	}
+	if err := copied.ClosePrivateAccess(); err != nil {
+		t.Fatal(err)
+	}
+	if factory.privateAccess.session != nil {
+		t.Fatal("cleanup through a copied factory must clear the original session")
+	}
+	if err := tunnel.WriteKubeconfig(t.TempDir(), nil); err == nil || !strings.Contains(err.Error(), "closed") {
+		t.Fatal("shared session tunnel was not closed", err)
+	}
+}
 
 func TestPrivateRESTProxyIsExplicitAndTLSVerified(t *testing.T) {
 	if os.Getenv("QUARTZ_TEST_REST_PROXY_HELPER") != "1" {
@@ -61,7 +85,7 @@ func TestPrivateRESTProxyIsExplicitAndTLSVerified(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if config.Proxy == nil || config.TLSClientConfig.Insecure {
+	if config.Proxy == nil || config.Insecure {
 		t.Fatal("explicit proxy or verified TLS missing")
 	}
 	client, err := kubernetes.NewForConfig(config)

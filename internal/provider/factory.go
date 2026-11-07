@@ -17,6 +17,7 @@ package provider
 import (
 	"context"
 	"encoding/base64"
+	"fmt"
 	"os"
 	"sync"
 
@@ -37,8 +38,12 @@ type ProviderFactory struct {
 	scProviderClient    Provider                 // The source control provider client.
 	imgProviderClient   Provider                 // The image registry provider client.
 	k8sClient           KubernetesProviderClient // The Kubernetes provider client.
-	privateSession      *privateaccess.Session
-	privateMu           sync.Mutex
+	privateAccess       *factoryPrivateAccess
+}
+
+type factoryPrivateAccess struct {
+	mu      sync.Mutex
+	session *privateaccess.Session
 }
 
 // Provider defines the interface for all providers.
@@ -54,8 +59,9 @@ type ProviderFactoryOption func(*ProviderFactory)
 // NewProviderFactory creates a new ProviderFactory with the given configuration and secrets.
 func NewProviderFactory(cfg schema.QuartzConfig, secrets schema.QuartzSecrets, opts ...ProviderFactoryOption) *ProviderFactory {
 	factory := &ProviderFactory{
-		cfg:     cfg,
-		secrets: secrets,
+		cfg:           cfg,
+		secrets:       secrets,
+		privateAccess: &factoryPrivateAccess{},
 	}
 
 	for _, opt := range opts {
@@ -92,30 +98,33 @@ func (f *ProviderFactory) Kubernetes(ctx context.Context) (KubernetesProviderCli
 	}
 
 	if f.cfg.Providers.Cloud == "aws" && f.cfg.Aws.PrivateAccess.Enabled {
-		f.privateMu.Lock()
-		if f.privateSession == nil {
+		if f.privateAccess == nil {
+			return nil, fmt.Errorf("private access requires NewProviderFactory initialization")
+		}
+		f.privateAccess.mu.Lock()
+		if f.privateAccess.session == nil {
 			session, err := privateaccess.Start(ctx, privateaccess.Options{
 				Cluster: f.cfg.Name, Region: f.cfg.Aws.Region, Endpoint: i.Endpoint,
 				Directory: f.cfg.Tmp, Kubeconfig: i.ToKubeconfigYamlBytes(f.cfg),
 			})
 			if err != nil {
-				f.privateMu.Unlock()
+				f.privateAccess.mu.Unlock()
 				return nil, err
 			}
-			f.privateSession = session
+			f.privateAccess.session = session
 		}
-		f.privateMu.Unlock()
+		f.privateAccess.mu.Unlock()
 	}
 	api, err := NewKubernetesApi(ctx, f.cfg, &i)
 	if err != nil {
 		return KubernetesClient{}, err
 	}
 	if f.cfg.Aws.PrivateAccess.Enabled && f.cfg.Auth.ServiceAccount.Enabled {
-		f.privateMu.Lock()
-		if f.privateSession != nil {
-			err = f.privateSession.WriteKubeconfig(f.cfg.Tmp, i.ToKubeconfigYamlBytes(f.cfg))
+		f.privateAccess.mu.Lock()
+		if f.privateAccess.session != nil {
+			err = f.privateAccess.session.WriteKubeconfig(f.cfg.Tmp, i.ToKubeconfigYamlBytes(f.cfg))
 		}
-		f.privateMu.Unlock()
+		f.privateAccess.mu.Unlock()
 		if err != nil {
 			return nil, err
 		}
@@ -131,11 +140,14 @@ func (f *ProviderFactory) Kubernetes(ctx context.Context) (KubernetesProviderCli
 }
 
 func (f *ProviderFactory) ClosePrivateAccess() error {
-	f.privateMu.Lock()
-	defer f.privateMu.Unlock()
-	if f.privateSession != nil {
-		err := f.privateSession.Close()
-		f.privateSession = nil
+	if f.privateAccess == nil {
+		return nil
+	}
+	f.privateAccess.mu.Lock()
+	defer f.privateAccess.mu.Unlock()
+	if f.privateAccess.session != nil {
+		err := f.privateAccess.session.Close()
+		f.privateAccess.session = nil
 		f.k8sClient = nil
 		return err
 	}

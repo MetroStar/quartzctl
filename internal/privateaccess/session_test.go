@@ -1,6 +1,7 @@
 package privateaccess
 
 import (
+	"context"
 	"crypto/x509"
 	"encoding/base64"
 	"encoding/pem"
@@ -15,6 +16,19 @@ import (
 
 	"k8s.io/client-go/tools/clientcmd"
 )
+
+func TestStartRejectsUnsafeAWSIdentifiersBeforeExecution(t *testing.T) {
+	for _, options := range []Options{
+		{Cluster: "--help", Region: "us-east-1"},
+		{Cluster: "cluster,Values=other", Region: "us-east-1"},
+		{Cluster: "cluster", Region: "--endpoint-url"},
+		{Cluster: "cluster", Region: "us-east-1\nother"},
+	} {
+		if session, err := Start(context.Background(), options); session != nil || err == nil {
+			t.Fatal("unsafe AWS identifiers must fail before executing AWS CLI", options)
+		}
+	}
+}
 
 func TestTunnelPreservesTLSAndRejectsOtherDestinations(t *testing.T) {
 	upstream := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, request *http.Request) {

@@ -7,13 +7,13 @@ import (
 
 func configureProcess(command *exec.Cmd) {}
 
-func terminateProcess(command *exec.Cmd) {
+func terminateProcess(command *exec.Cmd) error {
 	if command.Process != nil {
-		exec.Command("taskkill", "/PID", strconv.Itoa(command.Process.Pid), "/T", "/F").Run()
+		return exec.Command("taskkill", "/PID", strconv.Itoa(command.Process.Pid), "/T", "/F").Run()
 	}
-
+	return nil
 }
 
-func forceProcess(command *exec.Cmd) {
-	terminateProcess(command)
+func forceProcess(command *exec.Cmd) error {
+	return terminateProcess(command)
 }

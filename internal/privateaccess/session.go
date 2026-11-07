@@ -17,6 +17,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/MetroStar/quartzctl/internal/log"
 	"k8s.io/client-go/tools/clientcmd"
 )
 
@@ -49,7 +50,10 @@ type sessionMetadata struct {
 	id     string
 }
 
-var sessionMarker = regexp.MustCompile(`Starting session with SessionId:[ \t]+([a-zA-Z0-9_+=,.@:-]+)\r?\n`)
+var sessionMarker = regexp.MustCompile(`Starting session with SessionId:[ \t]+([a-zA-Z0-9][a-zA-Z0-9_+=,.@:-]*)\r?\n`)
+var clusterIdentifier = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9_-]{0,99}$`)
+var regionIdentifier = regexp.MustCompile(`^[a-z]{2}(-[a-z0-9]+)+-[0-9]+$`)
+var instanceIdentifier = regexp.MustCompile(`^i-([a-f0-9]{8}|[a-f0-9]{17})$`)
 
 func (m *sessionMetadata) Write(data []byte) (int, error) {
 	m.mu.Lock()
@@ -74,6 +78,9 @@ func (m *sessionMetadata) ready() bool {
 }
 
 func Start(ctx context.Context, options Options) (*Session, error) {
+	if !clusterIdentifier.MatchString(options.Cluster) || !regionIdentifier.MatchString(options.Region) {
+		return nil, errors.New("private access requires valid AWS cluster and region identifiers")
+	}
 	if _, err := exec.LookPath("session-manager-plugin"); err != nil {
 		return nil, fmt.Errorf("private EKS access requires session-manager-plugin: %w", err)
 	}
@@ -85,6 +92,7 @@ func Start(ctx context.Context, options Options) (*Session, error) {
 		return nil, errors.New("private access requires the unmodified HTTPS EKS endpoint")
 	}
 	var ids []string
+	// #nosec G204 -- fixed AWS command, validated identifiers, separate argv; no shell.
 	output, err := exec.CommandContext(ctx, "aws", "ec2", "describe-instances", "--region", options.Region,
 		"--filters", "Name=tag:quartz:access-relay,Values="+options.Cluster, "Name=instance-state-name,Values=running",
 		"--query", "Reservations[].Instances[].InstanceId", "--output", "json").Output()
@@ -93,6 +101,9 @@ func Start(ctx context.Context, options Options) (*Session, error) {
 	}
 	if err := json.Unmarshal(output, &ids); err != nil || len(ids) != 1 {
 		return nil, errors.New("exactly one running cluster-owned private SSM relay is required")
+	}
+	if !instanceIdentifier.MatchString(ids[0]) {
+		return nil, errors.New("AWS discovery returned an invalid private relay instance identifier")
 	}
 	if err := waitManagedRelay(ctx, options.Region, ids[0]); err != nil {
 		return nil, err
@@ -104,6 +115,7 @@ func Start(ctx context.Context, options Options) (*Session, error) {
 	_, port, _ := net.SplitHostPort(reservation.Addr().String())
 	reservation.Close()
 	parameters, _ := json.Marshal(map[string][]string{"host": {endpoint.Hostname()}, "portNumber": {"443"}, "localPortNumber": {port}})
+	// #nosec G204 -- fixed AWS SSM command and separate argv from verified AWS discovery.
 	command := exec.Command("aws", "ssm", "start-session", "--region", options.Region, "--target", ids[0],
 		"--document-name", "AWS-StartPortForwardingSessionToRemoteHost", "--parameters", string(parameters))
 	configureProcess(command)
@@ -232,12 +244,24 @@ func NewTunnel(authority, local string) (*Session, error) {
 			return
 		}
 		done := make(chan struct{})
-		go func() { io.Copy(client, upstream); client.Close(); close(done) }()
-		io.Copy(upstream, buffered)
+		go func() {
+			if _, err := io.Copy(client, upstream); err != nil && !errors.Is(err, net.ErrClosed) {
+				log.Debug("Private forwarding downstream interrupted", "error", err)
+			}
+			client.Close()
+			close(done)
+		}()
+		if _, err := io.Copy(upstream, buffered); err != nil && !errors.Is(err, net.ErrClosed) {
+			log.Debug("Private forwarding upstream interrupted", "error", err)
+		}
 		upstream.Close()
 		<-done
 	})}
-	go session.server.Serve(listener)
+	go func() {
+		if err := session.server.Serve(listener); err != nil && !errors.Is(err, http.ErrServerClosed) {
+			log.Error("Private forwarding server failed", "error", err)
+		}
+	}()
 	return session, nil
 }
 
@@ -337,14 +361,19 @@ func (s *Session) Close() error {
 			select {
 			case <-s.wait:
 			default:
-				terminateProcess(s.forward)
+				if err := terminateProcess(s.forward); err != nil {
+					s.closeError = errors.Join(s.closeError, fmt.Errorf("stop private forwarding process: %w", err))
+				}
 				select {
 				case <-s.wait:
 				case <-time.After(2 * time.Second):
-					forceProcess(s.forward)
+					if err := forceProcess(s.forward); err != nil {
+						s.closeError = errors.Join(s.closeError, fmt.Errorf("kill private forwarding process: %w", err))
+					}
 					select {
 					case <-s.wait:
 					case <-time.After(2 * time.Second):
+						s.closeError = errors.Join(s.closeError, errors.New("private forwarding process did not exit"))
 					}
 				}
 			}
@@ -356,10 +385,11 @@ func (s *Session) Close() error {
 				if id != "" {
 					// Explicitly terminate even if the plugin was forcibly stopped.
 					ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+					// #nosec G204 -- fixed AWS cleanup command, separate argv, plugin-reported session ID.
 					command := exec.CommandContext(ctx, "aws", "ssm", "terminate-session", "--region", s.region, "--session-id", id)
 					command.Stdout, command.Stderr = io.Discard, io.Discard
 					if err := command.Run(); err != nil {
-						s.closeError = fmt.Errorf("terminate private SSM session: %w", err)
+						s.closeError = errors.Join(s.closeError, fmt.Errorf("terminate private SSM session: %w", err))
 					}
 					cancel()
 				}

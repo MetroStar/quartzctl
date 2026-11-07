@@ -133,6 +133,10 @@ cancellation or session failure. `login` writes only the normal proxy-free
 persistent kubeconfig; run subsequent kubectl commands with `private-access`,
 not a persisted dead local proxy.
 
+Provider factory copies share session ownership and cleanup. Invalid AWS
+identifiers fail before invoking the CLI, and failed process termination is
+reported rather than treating incomplete cleanup as success.
+
 Examples (after reviewed infrastructure/operator provisioning):
 
 ```sh
