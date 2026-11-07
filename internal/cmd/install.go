@@ -166,6 +166,10 @@ func Install(ctx context.Context, p *CommandParams, resumeFrom string) (err erro
 		return err
 	}
 
+	if err = pinInstallAvailabilityZones(ctx, p); err != nil {
+		return err
+	}
+
 	stepStart = time.Now()
 	err = PrepareAccount(ctx, p)
 	installTiming["prepare-account"] = time.Since(stepStart)

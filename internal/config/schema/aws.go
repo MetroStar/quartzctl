@@ -16,5 +16,7 @@ package schema
 
 // AwsConfig represents the configuration for AWS in Quartz.
 type AwsConfig struct {
-	Region string `koanf:"region"` // The AWS region to use.
+	Region                string   `koanf:"region"` // The AWS region to use.
+	AvailabilityZones     []string `koanf:"availability_zones"`
+	AvailabilityZoneNames []string `koanf:"availability_zone_names"`
 }

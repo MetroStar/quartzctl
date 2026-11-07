@@ -106,6 +106,13 @@ quartz [command] [flags]
 - `export`: Export configured Kubernetes resources to yaml.
 - `info`: Output configuration info for the current cluster.
 - `install`: Perform a full install/update of the system. Pass `--resume-from`/`-r` to resume from a stage, `--allow-deferral` to enable OpenTofu deferred actions, and `--yes`/`-y` to skip confirmation prompts.
+  On AWS, an omitted `aws.availability_zones` list triggers read-only regional
+  discovery before account/backend changes. The returned order is persisted as
+  `aws.availability_zone_names` in the existing writable config and exported to
+  OpenTofu; the first-two fallback uses that snapshot, never a newly expanded
+  AWS result. Explicit ordered lists remain authoritative. Keep the config for
+  reinstall and unattended clean; for an existing installation, preserve its
+  recorded subnet/AZ order rather than rediscovering or sorting identities.
 - `login`: Generate a kubeconfig for the current cluster (`kubeconfig` and `refresh-kubeconfig` aliases).
 - `refresh-secrets`: Trigger all external secrets to be refreshed immediately (`rs` alias).
 - `render`: Write fully rendered configuration to yaml (`--out`/`-o`, default `./out/quartz.generated.yaml`).

@@ -34,6 +34,14 @@ type Settings struct {
 	rawSecrets *koanf.Koanf // The raw secrets data.
 }
 
+func (r *Settings) SetAvailabilityZoneNames(names []string) error {
+	if err := r.rawConfig.Set("aws.availability_zone_names", names); err != nil {
+		return err
+	}
+	r.Config.Aws.AvailabilityZoneNames = append([]string(nil), names...)
+	return nil
+}
+
 // NewSettings creates a new Settings instance by parsing the provided configuration and secrets maps.
 // Returns an error if unmarshalling fails.
 func NewSettings(c *koanf.Koanf, s *koanf.Koanf) (Settings, error) {
