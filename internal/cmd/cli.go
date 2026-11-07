@@ -50,6 +50,7 @@ func NewCliCommand(deps CliDependencies, p AppServiceParams) *cli.Command {
 		Version(p.Version, p.BuildDate)
 	}
 
+	deps.Root.Commands = append(deps.Root.Commands, PrivateAccessCommand(deps.Params))
 	slices.SortFunc(deps.Root.Commands, ByCommandName)
 
 	return &cli.Command{
@@ -69,6 +70,9 @@ func NewCliCommand(deps CliDependencies, p AppServiceParams) *cli.Command {
 			deps.Params.SetConfig(ccmd.String("config"))
 			deps.Params.SetSecrets(ccmd.String("secrets"))
 			return ctx, nil
+		},
+		After: func(ctx context.Context, ccmd *cli.Command) error {
+			return deps.Params.closePrivateAccess()
 		},
 	}
 }

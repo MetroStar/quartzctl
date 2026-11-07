@@ -27,6 +27,7 @@ import (
 
 	"github.com/MetroStar/quartzctl/internal/config/schema"
 	"github.com/MetroStar/quartzctl/internal/log"
+	"github.com/MetroStar/quartzctl/internal/privateaccess"
 	"github.com/MetroStar/quartzctl/internal/util"
 
 	"github.com/hashicorp/terraform-exec/tfexec"
@@ -350,12 +351,26 @@ func (c *TofuClient) Output(ctx context.Context, stage schema.StageConfig) (map[
 
 // setStageEnv sets the environment variables for the OpenTofu process based on the stage configuration.
 func (c *TofuClient) setStageEnv(tf *tfexec.Terraform, stage schema.StageConfig) {
+	if err := tf.SetEnv(c.stageEnvironment(stage)); err != nil {
+		log.Warn("Failed to set tofu environment", "stage", stage, "err", err)
+	}
+}
+
+func (c *TofuClient) stageEnvironment(stage schema.StageConfig) map[string]string {
 	env := util.OsEnvMap()
 
 	if stage.Providers.Kubernetes {
+		path := c.cfg.Config.KubeconfigPath()
+		if privatePath := os.Getenv(privateaccess.ConfigEnv); privatePath != "" {
+			path = privatePath
+		}
 		env = util.MergeMaps(env, map[string]string{
-			"KUBE_CONFIG_PATH": c.cfg.Config.KubeconfigPath(),
+			"KUBE_CONFIG_PATH": path,
+			"KUBECONFIG":       path,
 		})
+		if proxy := os.Getenv(privateaccess.ProxyEnv); proxy != "" {
+			env["KUBE_PROXY_URL"] = proxy
+		}
 	}
 
 	// Enable provider/module plugin caching to avoid re-downloading for every stage
@@ -366,9 +381,7 @@ func (c *TofuClient) setStageEnv(tf *tfexec.Terraform, stage schema.StageConfig)
 		})
 	}
 
-	if err := tf.SetEnv(env); err != nil {
-		log.Warn("Failed to set tofu environment", "stage", stage, "err", err)
-	}
+	return env
 }
 
 // pluginCacheDir returns the path to the provider plugin cache directory,

@@ -18,6 +18,7 @@ import (
 	"compress/gzip"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"os"
@@ -131,6 +132,7 @@ func NewRootCleanCommand(p *CommandParams) RootCommandResult {
 // Returns:
 //   - error: An error if the installation fails, otherwise nil.
 func Install(ctx context.Context, p *CommandParams, resumeFrom string) (err error) {
+	defer func() { err = errors.Join(err, p.closePrivateAccess()) }()
 	log.Debug("Entering", "command", "install")
 	defer log.Debug("Completed", "command", "install")
 
@@ -1368,6 +1370,11 @@ func cloudPreflightError(cp provider.CloudProviderClient, err error) error {
 // Returns:
 //   - error: An error if the cleanup fails, otherwise nil.
 func Clean(ctx context.Context, p *CommandParams) error {
+	err := clean(ctx, p)
+	return errors.Join(err, p.closePrivateAccess())
+}
+
+func clean(ctx context.Context, p *CommandParams) error {
 	log.Debug("Entering", "command", "clean")
 	defer log.Debug("Completed", "command", "clean")
 

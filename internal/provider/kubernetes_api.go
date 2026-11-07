@@ -16,8 +16,10 @@ package provider
 
 import (
 	"context"
+	"net/http"
 
 	quartzSchema "github.com/MetroStar/quartzctl/internal/config/schema"
+	"github.com/MetroStar/quartzctl/internal/privateaccess"
 	"k8s.io/client-go/discovery"
 	"k8s.io/client-go/dynamic"
 	"k8s.io/client-go/kubernetes"
@@ -85,6 +87,13 @@ func newRestConfig(ctx context.Context, cfg quartzSchema.QuartzConfig, i *Kubeco
 	if err != nil {
 		return nil, err
 	}
+	proxy, err := privateaccess.ProxyURL()
+	if err != nil {
+		return nil, err
+	}
+	if proxy != nil {
+		kc1.Proxy = http.ProxyURL(proxy)
+	}
 
 	if !cfg.Auth.ServiceAccount.Enabled {
 		return kc1, nil
@@ -102,6 +111,9 @@ func newRestConfig(ctx context.Context, cfg quartzSchema.QuartzConfig, i *Kubeco
 	kc2, err := clientcmd.RESTConfigFromKubeConfig(kubeconfig)
 	if err != nil {
 		return nil, err
+	}
+	if proxy != nil {
+		kc2.Proxy = http.ProxyURL(proxy)
 	}
 
 	return kc2, nil

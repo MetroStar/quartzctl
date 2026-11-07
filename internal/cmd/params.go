@@ -104,6 +104,13 @@ func (p *CommandParams) Provider() *provider.ProviderFactory {
 	return p.provider
 }
 
+func (p *CommandParams) closePrivateAccess() error {
+	if p.provider != nil {
+		return p.provider.ClosePrivateAccess()
+	}
+	return nil
+}
+
 // ByCommandName compares two CLI commands by their names.
 //
 // Parameters:

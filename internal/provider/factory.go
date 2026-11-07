@@ -18,9 +18,11 @@ import (
 	"context"
 	"encoding/base64"
 	"os"
+	"sync"
 
 	"github.com/MetroStar/quartzctl/internal/config/schema"
 	"github.com/MetroStar/quartzctl/internal/log"
+	"github.com/MetroStar/quartzctl/internal/privateaccess"
 	"github.com/MetroStar/quartzctl/internal/util"
 	"k8s.io/client-go/tools/clientcmd"
 )
@@ -35,6 +37,8 @@ type ProviderFactory struct {
 	scProviderClient    Provider                 // The source control provider client.
 	imgProviderClient   Provider                 // The image registry provider client.
 	k8sClient           KubernetesProviderClient // The Kubernetes provider client.
+	privateSession      *privateaccess.Session
+	privateMu           sync.Mutex
 }
 
 // Provider defines the interface for all providers.
@@ -87,9 +91,34 @@ func (f *ProviderFactory) Kubernetes(ctx context.Context) (KubernetesProviderCli
 		i = kubeconfig
 	}
 
+	if f.cfg.Providers.Cloud == "aws" && f.cfg.Aws.PrivateAccess.Enabled {
+		f.privateMu.Lock()
+		if f.privateSession == nil {
+			session, err := privateaccess.Start(ctx, privateaccess.Options{
+				Cluster: f.cfg.Name, Region: f.cfg.Aws.Region, Endpoint: i.Endpoint,
+				Directory: f.cfg.Tmp, Kubeconfig: i.ToKubeconfigYamlBytes(f.cfg),
+			})
+			if err != nil {
+				f.privateMu.Unlock()
+				return nil, err
+			}
+			f.privateSession = session
+		}
+		f.privateMu.Unlock()
+	}
 	api, err := NewKubernetesApi(ctx, f.cfg, &i)
 	if err != nil {
 		return KubernetesClient{}, err
+	}
+	if f.cfg.Aws.PrivateAccess.Enabled && f.cfg.Auth.ServiceAccount.Enabled {
+		f.privateMu.Lock()
+		if f.privateSession != nil {
+			err = f.privateSession.WriteKubeconfig(f.cfg.Tmp, i.ToKubeconfigYamlBytes(f.cfg))
+		}
+		f.privateMu.Unlock()
+		if err != nil {
+			return nil, err
+		}
 	}
 
 	c, err := NewKubernetesClient(api, i, f.cfg)
@@ -99,6 +128,18 @@ func (f *ProviderFactory) Kubernetes(ctx context.Context) (KubernetesProviderCli
 
 	f.k8sClient = c
 	return f.k8sClient, nil
+}
+
+func (f *ProviderFactory) ClosePrivateAccess() error {
+	f.privateMu.Lock()
+	defer f.privateMu.Unlock()
+	if f.privateSession != nil {
+		err := f.privateSession.Close()
+		f.privateSession = nil
+		f.k8sClient = nil
+		return err
+	}
+	return nil
 }
 
 // kubeconfigInfoFromExistingFile reuses the already-written kubeconfig metadata

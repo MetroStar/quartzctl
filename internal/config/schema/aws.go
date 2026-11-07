@@ -19,4 +19,7 @@ type AwsConfig struct {
 	Region                string   `koanf:"region"` // The AWS region to use.
 	AvailabilityZones     []string `koanf:"availability_zones"`
 	AvailabilityZoneNames []string `koanf:"availability_zone_names"`
+	PrivateAccess         struct {
+		Enabled bool `koanf:"enabled"`
+	} `koanf:"private_access"`
 }

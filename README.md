@@ -113,6 +113,40 @@ quartz [command] [flags]
   AWS result. Explicit ordered lists remain authoritative. Keep the config for
   reinstall and unattended clean; for an existing installation, preserve its
   recorded subnet/AZ order rather than rediscovering or sorting identities.
+- `private-access -- <command> [args...]`: With `aws.private_access.enabled: true`,
+  run kubectl, Helm or acceptance helpers through the dedicated cluster-tagged
+  SSM relay. AWS CLI and `session-manager-plugin` must already be installed and
+  the operator must have reviewed session permissions plus its existing EKS
+  identity. No relay-side Kubernetes/admin/credential grants are used.
+  `install`, stage operations, `login` and `clean` use the same command-scoped
+  route automatically when a Kubernetes client is needed.
+
+The relay path uses `AWS-StartPortForwardingSessionToRemoteHost` for the original
+EKS hostname and port 443, then a loopback HTTP CONNECT proxy that accepts only
+that authority. Go REST uses an explicit proxy function, OpenTofu
+Kubernetes/Helm receive the temporary proxy-bearing kubeconfig and
+`KUBE_PROXY_URL`, and child commands receive the same `KUBECONFIG`. The original
+server hostname, SNI and CA verification remain unchanged; global `HTTP_PROXY`
+and `HTTPS_PROXY` are never rewritten. The local listener, SSM/plugin process
+tree and 0600 temporary kubeconfig are closed/removed on command completion,
+cancellation or session failure. `login` writes only the normal proxy-free
+persistent kubeconfig; run subsequent kubectl commands with `private-access`,
+not a persisted dead local proxy.
+
+Examples (after reviewed infrastructure/operator provisioning):
+
+```sh
+quartz --config quartz.yaml private-access -- kubectl get nodes
+quartz --config quartz.yaml private-access -- helm list -A
+quartz --config quartz.yaml private-access -- kubectl auth can-i get pods --all-namespaces
+quartz --config quartz.yaml login
+quartz --config quartz.yaml install --yes
+quartz --config quartz.yaml clean --yes
+```
+
+Private access tests use a fake SSM process and local TLS API; they also run
+installed kubectl/Helm against that API. They are not proof of live SSM,
+operator authorization, AWS endpoint availability or approved installation.
 - `login`: Generate a kubeconfig for the current cluster (`kubeconfig` and `refresh-kubeconfig` aliases).
 - `refresh-secrets`: Trigger all external secrets to be refreshed immediately (`rs` alias).
 - `render`: Write fully rendered configuration to yaml (`--out`/`-o`, default `./out/quartz.generated.yaml`).
