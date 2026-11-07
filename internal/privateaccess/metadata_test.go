@@ -2,6 +2,16 @@ package privateaccess
 
 import "testing"
 
+func TestSessionMetadataRetainsValidIdentifierPrefixes(t *testing.T) {
+	for _, id := range []string{"_operator-session", "-operator-session", "operator-session"} {
+		metadata := &sessionMetadata{}
+		metadata.Write([]byte("Starting session with SessionId: " + id + "\n"))
+		if !metadata.ready() || metadata.id != id {
+			t.Fatal("valid session identifier prefix was lost", id)
+		}
+	}
+}
+
 func TestSessionMetadataRequiresCompleteIdentityLine(t *testing.T) {
 	metadata := &sessionMetadata{}
 	metadata.Write([]byte("Starting session with SessionId: fixture-pa"))

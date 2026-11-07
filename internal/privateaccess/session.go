@@ -50,7 +50,7 @@ type sessionMetadata struct {
 	id     string
 }
 
-var sessionMarker = regexp.MustCompile(`Starting session with SessionId:[ \t]+([a-zA-Z0-9][a-zA-Z0-9_+=,.@:-]*)\r?\n`)
+var sessionMarker = regexp.MustCompile(`Starting session with SessionId:[ \t]+([a-zA-Z0-9_+=,.@:-]+)\r?\n`)
 var clusterIdentifier = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9_-]{0,99}$`)
 var regionIdentifier = regexp.MustCompile(`^[a-z]{2}(-[a-z0-9]+)+-[0-9]+$`)
 var instanceIdentifier = regexp.MustCompile(`^i-([a-f0-9]{8}|[a-f0-9]{17})$`)
@@ -386,7 +386,7 @@ func (s *Session) Close() error {
 					// Explicitly terminate even if the plugin was forcibly stopped.
 					ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 					// #nosec G204 -- fixed AWS cleanup command, separate argv, plugin-reported session ID.
-					command := exec.CommandContext(ctx, "aws", "ssm", "terminate-session", "--region", s.region, "--session-id", id)
+					command := exec.CommandContext(ctx, "aws", "ssm", "terminate-session", "--region", s.region, "--session-id="+id)
 					command.Stdout, command.Stderr = io.Discard, io.Discard
 					if err := command.Run(); err != nil {
 						s.closeError = errors.Join(s.closeError, fmt.Errorf("terminate private SSM session: %w", err))

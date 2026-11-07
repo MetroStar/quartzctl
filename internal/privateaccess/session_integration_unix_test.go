@@ -48,6 +48,15 @@ func TestSessionManagerHelper(t *testing.T) {
 		fmt.Print(`["Online"]`)
 		os.Exit(0)
 	case "ssm terminate-session":
+		foundID := false
+		for _, argument := range arguments {
+			if argument == "--session-id=fixture-session" {
+				foundID = true
+			}
+		}
+		if !foundID {
+			os.Exit(8)
+		}
 		if os.Getenv("QUARTZ_TEST_SSM_TERMINATE_FAIL") == "1" {
 			os.Exit(7)
 		}
