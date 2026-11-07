@@ -30,6 +30,7 @@ func PrivateAccessCommand(p *CommandParams) *cli.Command {
 				return err
 			}
 			defer func() { result = errors.Join(result, p.closePrivateAccess()) }()
+			// #nosec G204 -- explicitly requested local CLI command, separate argv; no shell or remote input.
 			child := exec.CommandContext(ctx, arguments[0], arguments[1:]...)
 			child.Stdin, child.Stdout, child.Stderr = os.Stdin, command.Root().Writer, command.Root().ErrWriter
 			child.Env = append(os.Environ(), "KUBECONFIG="+os.Getenv(privateaccess.ConfigEnv), "KUBE_CONFIG_PATH="+os.Getenv(privateaccess.ConfigEnv),
