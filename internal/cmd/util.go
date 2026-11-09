@@ -112,6 +112,28 @@ func NewRootRenderCommand(p *CommandParams) RootCommandResult {
 	}
 }
 
+func NewRootSchemaCommand() RootCommandResult {
+	return RootCommandResult{
+		Command: &cli.Command{
+			Name:  "schema",
+			Usage: "Write editor JSON Schema for quartz.yaml without resolving providers",
+			Flags: []cli.Flag{
+				&cli.StringFlag{Name: "out", Aliases: []string{"o"}, Usage: "output file in an existing directory", Value: "./quartz.schema.json"},
+			},
+			Action: func(_ context.Context, ccmd *cli.Command) error {
+				data, err := schema.EditorSchema()
+				if err != nil {
+					return fmt.Errorf("generate configuration schema: %w", err)
+				}
+				if err := os.WriteFile(ccmd.String("out"), append(data, '\n'), 0600); err != nil {
+					return fmt.Errorf("write configuration schema: %w", err)
+				}
+				return nil
+			},
+		},
+	}
+}
+
 func NewRootRefreshSecretsCommand(p *CommandParams) RootCommandResult {
 	return RootCommandResult{
 		Command: &cli.Command{

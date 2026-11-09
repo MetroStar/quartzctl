@@ -83,6 +83,26 @@ output "result" {
 	}
 	run(true, "--version")
 	run(true, "--help")
+	schemaPath := filepath.Join(workspace, "quartz.schema.json")
+	run(true, "--config", filepath.Join(workspace, "missing.yaml"), "schema", "--out", schemaPath)
+	content, err := os.ReadFile(schemaPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var editorSchema struct {
+		Version    string                     `json:"$schema"`
+		Properties map[string]json.RawMessage `json:"properties"`
+	}
+	if err := json.Unmarshal(content, &editorSchema); err != nil {
+		t.Fatal(err)
+	}
+	if editorSchema.Version != "https://json-schema.org/draft/2020-12/schema" ||
+		editorSchema.Properties["name"] == nil || editorSchema.Properties["__internal__"] != nil {
+		t.Fatal("native schema command did not produce the configuration editor contract")
+	}
+	if output := run(false, "--config", filepath.Join(workspace, "missing.yaml"), "schema", "--out", workspace); !strings.Contains(output, "write configuration schema") {
+		t.Fatalf("schema write error was not reported explicitly:\n%s", output)
+	}
 	output := run(false, "--config", filepath.Join(workspace, "missing.yaml"), "render")
 	if !strings.Contains(output, "load configuration") {
 		t.Fatalf("missing configuration was not reported explicitly:\n%s", output)

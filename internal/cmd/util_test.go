@@ -34,6 +34,7 @@ import (
 	"github.com/MetroStar/quartzctl/internal/util"
 	"github.com/knadh/koanf/v2"
 	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 	"github.com/urfave/cli/v3"
 	appsv1 "k8s.io/api/apps/v1"
 	corev1 "k8s.io/api/core/v1"
@@ -98,6 +99,23 @@ func TestNewRootRenderCommand(t *testing.T) {
 
 	err := cmd.Run(context.Background(), []string{cmd.Name, "--out", filepath.Join(t.TempDir(), "render_test.yaml")})
 	assert.NoError(t, err)
+}
+
+func TestNewRootSchemaCommandDoesNotLoadConfiguration(t *testing.T) {
+	cmd := NewRootSchemaCommand().Command
+	output := filepath.Join(t.TempDir(), "quartz.schema.json")
+	require.NoError(t, cmd.Run(context.Background(), []string{cmd.Name, "--out", output}))
+	actual, err := os.ReadFile(output)
+	require.NoError(t, err)
+	expected, err := schema.EditorSchema()
+	require.NoError(t, err)
+	require.Equal(t, append(expected, '\n'), actual)
+}
+
+func TestNewRootSchemaCommandReportsWriteErrors(t *testing.T) {
+	cmd := NewRootSchemaCommand().Command
+	err := cmd.Run(context.Background(), []string{cmd.Name, "--out", t.TempDir()})
+	require.ErrorContains(t, err, "write configuration schema")
 }
 
 func TestNewRootRefreshSecretsCommand(t *testing.T) {

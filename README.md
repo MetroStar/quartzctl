@@ -60,6 +60,24 @@ when `dns.zone` is also supplied. A domain without a zone must include a host
 and zone. Missing/malformed configuration and unusable output directories
 fail explicitly rather than continuing with defaults.
 
+Generate editor assistance from the configuration types in your CLI version:
+
+```sh
+quartz schema --out ./quartz.schema.json
+```
+
+Then put `# yaml-language-server: $schema=./quartz.schema.json` at the top of
+`quartz.yaml` when using a YAML-language-server-compatible editor. The schema
+provides field/type completion and unknown-field diagnostics within typed
+objects, including nested applications and stages. Top-level framework/OpenTofu
+extensions, application settings, and Keycloak maps remain open; the
+known `settings.post_deploy` policy accepts a boolean or typed mapping.
+Omitted values remain optional so centralized defaults and
+environment overrides still apply. The schema contains no resolved values or
+credentials and requires no provider connection. It does not replace runtime
+configuration/provider validation or prove install/clean readiness. Regenerate
+after upgrading the CLI; the output directory must already exist.
+
 ### Quartz Evaluator identity
 
 Fresh-install infrastructure defaults provision **Quartz Evaluator** as
@@ -141,6 +159,7 @@ quartz [command] [flags]
 - `login`: Generate a kubeconfig for the current cluster (`kubeconfig` and `refresh-kubeconfig` aliases).
 - `refresh-secrets`: Trigger all external secrets to be refreshed immediately (`rs` alias).
 - `render`: Write fully rendered configuration to yaml (`--out`/`-o`, default `./out/quartz.generated.yaml`).
+- `schema`: Generate editor JSON Schema from this CLI's configuration types (`--out`/`-o`, default `./quartz.schema.json`), without resolving providers.
 - `restart`: Restart target Kubernetes resources. Defaults to deployments, daemonsets, and statefulsets; narrow with `--kind`/`-k`, `--namespace`/`-n`, and `--name`.
 - `tofu` / `tf`: OpenTofu subcommands for configured stages.
   - `apply`: Apply a new stage plan, or apply an existing saved plan with `--plan-file <path>` (`--stage <name>` required).
