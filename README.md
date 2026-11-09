@@ -28,6 +28,22 @@ Quartz is an open-source CLI tool designed to automate the full lifecycle of Kub
 
 Delivery teams and capture teams should start with the [quartzctl Capability Package](docs/capability/README.md). It includes the nine-document delivery set: capability summary, reference architecture, operating model, onboarding guide, runbook, troubleshooting guide, template package, value brief, and product page.
 
+### Compact configuration and precedence
+
+Application keys default to repository names. GitHub organization/provider,
+repository URL, branch (`main`), deploy path (`deploy`), and the post-deploy
+policy are derived centrally; omit them unless overriding those defaults.
+Keep application types, endpoints, authentication relationships, permissions
+and data-retention choices explicit. Credentials belong in the existing secret
+sources, not in configuration examples.
+
+Precedence is built-in defaults, then the configuration file, then `QUARTZ_*`
+environment overrides. Dependent defaults (such as repository URLs and DNS)
+use the overridden values. An explicit `dns.domain` is preserved, including
+when `dns.zone` is also supplied. A domain without a zone must include a host
+and zone. Missing/malformed configuration and unusable output directories
+fail explicitly rather than continuing with defaults.
+
 ### Quartz Evaluator identity
 
 Fresh-install infrastructure defaults provision **Quartz Evaluator** as

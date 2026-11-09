@@ -60,14 +60,13 @@ func LoadRawConfig(ctx context.Context, configFile string) (*koanf.Koanf, error)
 	// set initial defaults
 	setDefaults(k)
 
-	// First pass of environment variables in case needed as inputs elsewhere
-	loadDefaultEnvironment(k)
-
 	// load quartz.yaml
 	if err := k.Load(file.Provider(configFile), yaml.Parser()); err != nil {
-		// could technically configure everything from other sources but unlikely?
-		log.Warn("No config file found", "path", configFile, "err", err)
+		return nil, fmt.Errorf("load configuration %q: %w", configFile, err)
 	}
+
+	// Apply overrides before computing dependent defaults.
+	loadDefaultEnvironment(k)
 
 	if err := checkCloudConfig(ctx, k); err != nil {
 		return nil, err
@@ -81,7 +80,9 @@ func LoadRawConfig(ctx context.Context, configFile string) (*koanf.Koanf, error)
 
 	setGitopsDefaults(k)
 	setCoreDefaults(k)
-	setAppDefaults(k)
+	if err := setAppDefaults(k); err != nil {
+		return nil, err
+	}
 	setAuthDefaults(k)
 
 	// parse stages
@@ -92,7 +93,7 @@ func LoadRawConfig(ctx context.Context, configFile string) (*koanf.Koanf, error)
 
 	tmp, err := initTmpDir(k)
 	if err != nil {
-		log.Warn("Failed to create tmp directory", "dir", tmp, "err", err)
+		return nil, fmt.Errorf("initialize configuration temporary directory %q: %w", tmp, err)
 	}
 
 	return k, nil
@@ -134,10 +135,16 @@ func setDnsDefaults(k *koanf.Koanf) error {
 		return fmt.Errorf("at least one of dns.zone or dns.domain must be specified")
 	}
 
-	// assume zone is the remainder of the domain
-	if zone == "" {
-		s := strings.SplitN(domain, ".", 2)
-		return k.Set("dns.zone", s[1])
+	// An explicit domain overrides the name-derived default.
+	if domain != "" {
+		if zone != "" {
+			return nil
+		}
+		parts := strings.SplitN(domain, ".", 2)
+		if len(parts) != 2 || parts[0] == "" || parts[1] == "" {
+			return fmt.Errorf("dns.domain must contain a host and zone when dns.zone is omitted")
+		}
+		return k.Set("dns.zone", parts[1])
 	}
 
 	// otherwise prepend the cluster name to the zone for the full domain
@@ -303,13 +310,17 @@ func setCoreDefaults(k *koanf.Koanf) {
 
 // setAppDefaults sets default values for application configurations.
 // It populates missing fields such as name, provider, organization, branch, and repository URL.
-func setAppDefaults(k *koanf.Koanf) {
+func setAppDefaults(k *koanf.Koanf) error {
 	p := k.String("providers.source_control")
 
 	var sc schema.GithubConfig
 	apps := make(map[string]schema.ApplicationRepositoryConfig)
-	k.Unmarshal(p, &sc)
-	k.Unmarshal("applications", &apps)
+	if err := k.Unmarshal(p, &sc); err != nil {
+		return fmt.Errorf("decode source-control configuration %q: %w", p, err)
+	}
+	if err := k.Unmarshal("applications", &apps); err != nil {
+		return fmt.Errorf("decode applications: %w", err)
+	}
 
 	org := sc.Organization
 
@@ -353,16 +364,21 @@ func setAppDefaults(k *koanf.Koanf) {
 			a.Settings = make(map[string]interface{})
 		}
 
-		a.Settings["post_deploy"] = defaultApplicationPostDeploySettings(a.Settings["post_deploy"])
+		postDeploy, err := defaultApplicationPostDeploySettings(a.Settings["post_deploy"])
+		if err != nil {
+			return fmt.Errorf("applications.%s.settings.post_deploy: %w", key, err)
+		}
+		a.Settings["post_deploy"] = postDeploy
 
 		k2 := koanf.New(".")
 		k2.Load(structs.Provider(a, "koanf"), nil)
 
 		k.MergeAt(k2, "applications."+key)
 	}
+	return nil
 }
 
-func defaultApplicationPostDeploySettings(raw interface{}) map[string]interface{} {
+func defaultApplicationPostDeploySettings(raw interface{}) (map[string]interface{}, error) {
 	defaults := schema.DefaultApplicationPostDeployConfig()
 	result := map[string]interface{}{
 		"enabled":              defaults.Enabled,
@@ -372,41 +388,57 @@ func defaultApplicationPostDeploySettings(raw interface{}) map[string]interface{
 
 	switch v := raw.(type) {
 	case nil:
-		return result
+		return result, nil
 	case bool:
 		result["enabled"] = v
-		return result
+		return result, nil
 	case map[string]interface{}:
-		if enabled, ok := v["enabled"].(bool); ok {
-			result["enabled"] = enabled
+		for key, value := range v {
+			result[key] = value
 		}
-		if envs := toStringSlice(v["gate_environments"]); len(envs) > 0 {
-			result["gate_environments"] = envs
+		if value, supplied := v["enabled"]; supplied {
+			if _, ok := value.(bool); !ok {
+				return nil, fmt.Errorf("enabled must be a boolean")
+			}
 		}
-		if envs := toStringSlice(v["trigger_environments"]); len(envs) > 0 {
-			result["trigger_environments"] = envs
+		for _, field := range []string{"gate_environments", "trigger_environments"} {
+			if value, supplied := v[field]; supplied {
+				envs, err := toStringSlice(value)
+				if err != nil {
+					return nil, fmt.Errorf("%s: %w", field, err)
+				}
+				result[field] = envs
+			}
 		}
-		return result
+		return result, nil
 	default:
-		return result
+		return nil, fmt.Errorf("must be a boolean or mapping")
 	}
 }
 
-func toStringSlice(raw interface{}) []string {
+func toStringSlice(raw interface{}) ([]string, error) {
+	var result []string
 	switch v := raw.(type) {
 	case []string:
-		return append([]string{}, v...)
+		result = append([]string{}, v...)
 	case []interface{}:
-		res := make([]string, 0, len(v))
+		result = make([]string, 0, len(v))
 		for _, item := range v {
-			if s, ok := item.(string); ok && s != "" {
-				res = append(res, s)
+			s, ok := item.(string)
+			if !ok {
+				return nil, fmt.Errorf("must contain only non-empty environment names")
 			}
+			result = append(result, s)
 		}
-		return res
 	default:
-		return nil
+		return nil, fmt.Errorf("must be a list of environment names")
 	}
+	for _, name := range result {
+		if strings.TrimSpace(name) == "" {
+			return nil, fmt.Errorf("must contain only non-empty environment names")
+		}
+	}
+	return result, nil
 }
 
 // setAuthDefaults sets default values for authentication configuration.
