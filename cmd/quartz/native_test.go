@@ -42,10 +42,19 @@ tofu:
   version: "1.13.1"
 stage_paths: [stages]
 log:
+  console:
+    level: debug
   file:
     enabled: false
   tofu:
     enabled: false
+auth:
+  users:
+    fixture:
+      password:
+        value: fixture-private-password
+opaque_extension:
+  custom: fixture-private-extension
 `)
 	write(filepath.Join(stage, "main.tf"), `resource "terraform_data" "fixture" {
   input = "native-runtime-verified"
@@ -108,6 +117,21 @@ output "result" {
 		t.Fatalf("missing configuration was not reported explicitly:\n%s", output)
 	}
 	run(true, "--config", config, "render", "--out", filepath.Join(workspace, "rendered.yaml"))
+	redactedPath := filepath.Join(workspace, "redacted output", "quartz.yaml")
+	secretsPath := filepath.Join(workspace, "malformed-secrets.yaml")
+	write(secretsPath, "[unterminated")
+	output = run(true, "--config", config, "--secrets", secretsPath, "render", "--redacted", "--out", redactedPath)
+	if strings.Contains(output, "fixture-private") || strings.Contains(output, "ChangeMe1234!") {
+		t.Fatal("native redacted rendering exposed credentials in debug diagnostics")
+	}
+	content, err = os.ReadFile(redactedPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(string(content), "fixture-private") || strings.Contains(string(content), "ChangeMe1234!") ||
+		!strings.Contains(string(content), "native-lifecycle.example.invalid") || !strings.Contains(string(content), "[REDACTED]") {
+		t.Fatal("native redacted rendering did not preserve defaults and mask credentials/extensions")
+	}
 	run(true, "--config", config, "tofu", "init", "--stage", "local")
 	run(true, "--config", config, "tofu", "apply", "--stage", "local")
 	statePath := filepath.Join(stage, "terraform.tfstate")

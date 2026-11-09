@@ -461,7 +461,7 @@ func setAuthDefaults(k *koanf.Koanf) {
 			continue
 		}
 
-		log.Debug("Checking auth user settings", "key", username, "value", user)
+		log.Debug("Checking auth user settings", "key", username)
 		if len(user.Environments) == 0 {
 			log.Debug("Setting user env defaults", "user", username, "envs", appEnvs)
 			user.Environments = appEnvs
@@ -500,7 +500,7 @@ func setAuthDefaults(k *koanf.Koanf) {
 	}
 
 	for groupname, group := range auth.Groups {
-		log.Debug("Checking auth group settings", "key", groupname, "value", group)
+		log.Debug("Checking auth group settings", "key", groupname)
 		if len(group.Roles) == 0 {
 			log.Debug("Setting group role defaults", "user", groupname, "roles", []string{groupname})
 			group.Roles = []string{groupname}
@@ -514,7 +514,7 @@ func setAuthDefaults(k *koanf.Koanf) {
 		auth.Groups[groupname] = group
 	}
 
-	log.Debug("Updating auth defaults", "value", auth)
+	log.Debug("Updating auth defaults", "users", len(auth.Users), "groups", len(auth.Groups))
 
 	k2 := koanf.New(".")
 	k2.Load(structs.Provider(auth, "koanf"), nil)

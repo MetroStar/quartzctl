@@ -78,6 +78,26 @@ credentials and requires no provider connection. It does not replace runtime
 configuration/provider validation or prove install/clean readiness. Regenerate
 after upgrading the CLI; the output directory must already exist.
 
+Inspect normalized defaults and `QUARTZ_` overrides without loading the separate
+secrets file or credential environment variables:
+
+```sh
+quartz render --redacted --out ./out/quartz.redacted.yaml
+```
+
+This uses the same configuration loader as deployment. Known fields remain
+visible, while credential-bearing fields, literal stage values, unknown fields,
+opaque extension values, and headers are replaced with `[REDACTED]`. Repository/
+endpoint URL user information, query strings, and fragments are removed.
+Application settings are opaque except for the typed `post_deploy` policy.
+The output is diagnostic, not deployable input or a complete configuration
+equivalence check. It is not anonymized: names, domains, paths, email addresses,
+and mapping keys can still identify your environment. Review before sharing,
+and never put credentials in ordinary names/descriptions/URL paths.
+Normal `quartz render` remains unchanged and may contain sensitive inline values.
+Both modes initialize the configured local temporary directory; neither command
+proves provider access, deployment readiness, or live cluster equivalence.
+
 `applications.<app>.settings.post_deploy.require_report` is an optional boolean
 for the platform's archived-report gate. Enable it only after deploying a
 compatible app runner; it defaults off in the platform for legacy applications.
@@ -163,7 +183,7 @@ quartz [command] [flags]
 - `install`: Perform a full install/update of the system. Pass `--resume-from`/`-r` to resume from a stage, `--allow-deferral` to enable OpenTofu deferred actions, and `--yes`/`-y` to skip confirmation prompts.
 - `login`: Generate a kubeconfig for the current cluster (`kubeconfig` and `refresh-kubeconfig` aliases).
 - `refresh-secrets`: Trigger all external secrets to be refreshed immediately (`rs` alias).
-- `render`: Write fully rendered configuration to yaml (`--out`/`-o`, default `./out/quartz.generated.yaml`).
+- `render`: Write fully rendered configuration to yaml (`--out`/`-o`, default `./out/quartz.generated.yaml`). Use `--redacted` for a credential-masked diagnostic view without loading secrets.
 - `schema`: Generate editor JSON Schema from this CLI's configuration types (`--out`/`-o`, default `./quartz.schema.json`), without resolving providers.
 - `restart`: Restart target Kubernetes resources. Defaults to deployments, daemonsets, and statefulsets; narrow with `--kind`/`-k`, `--namespace`/`-n`, and `--name`.
 - `tofu` / `tf`: OpenTofu subcommands for configured stages.
