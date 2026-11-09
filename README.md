@@ -28,6 +28,22 @@ Quartz is an open-source CLI tool designed to automate the full lifecycle of Kub
 
 Delivery teams and capture teams should start with the [quartzctl Capability Package](docs/capability/README.md). It includes the nine-document delivery set: capability summary, reference architecture, operating model, onboarding guide, runbook, troubleshooting guide, template package, value brief, and product page.
 
+### Native runtime checks
+
+The PR workflow builds and executes the CLI on native Linux, macOS, and Windows
+runners. Its isolated local-state test covers help/version, explicit missing-file
+errors, configuration rendering, actual OpenTofu download/execution, apply,
+idempotent reapply, destroy and repeated destroy with closed stdin and paths
+containing spaces. It uses only OpenTofu's built-in `terraform_data` resource;
+no cloud credentials, AWS resources, WSL, or container daemon are required.
+
+Run it locally after building the CLI by setting `QUARTZ_NATIVE_BINARY` to the
+absolute executable path and running
+`go test -v -count=1 ./cmd/quartz -run TestNativeExecutableLifecycle`.
+The test needs outbound access to download the configured OpenTofu runtime.
+This is native executable/local-state coverage, not proof of a complete AWS
+`quartz install`/`quartz clean` cycle or platform shell-script portability.
+
 ### Compact configuration and precedence
 
 Application keys default to repository names. GitHub organization/provider,
