@@ -396,9 +396,11 @@ func defaultApplicationPostDeploySettings(raw interface{}) (map[string]interface
 		for key, value := range v {
 			result[key] = value
 		}
-		if value, supplied := v["enabled"]; supplied {
-			if _, ok := value.(bool); !ok {
-				return nil, fmt.Errorf("enabled must be a boolean")
+		for _, field := range []string{"enabled", "require_report"} {
+			if value, supplied := v[field]; supplied {
+				if _, ok := value.(bool); !ok {
+					return nil, fmt.Errorf("%s must be a boolean", field)
+				}
 			}
 		}
 		for _, field := range []string{"gate_environments", "trigger_environments"} {

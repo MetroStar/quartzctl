@@ -112,6 +112,7 @@ func TestConfigPostDeployExplicitEmptyAndInvalidSettings(t *testing.T) {
 	}{
 		{"empty overrides", "post_deploy:\n        enabled: false\n        gate_environments: []\n        trigger_environments: []", ""},
 		{"invalid enabled", "post_deploy:\n        enabled: invalid", "enabled must be a boolean"},
+		{"invalid report flag", "post_deploy:\n        require_report: invalid", "require_report must be a boolean"},
 		{"invalid environment list", "post_deploy:\n        gate_environments: stage", "gate_environments"},
 		{"invalid list entry", "post_deploy:\n        trigger_environments: [dev, false]", "trigger_environments"},
 		{"empty list entry", "post_deploy:\n        trigger_environments: ['']", "trigger_environments"},
@@ -159,6 +160,7 @@ applications:
 	if err != nil {
 		t.Fatal(err)
 	}
+
 	explicit, err := LoadRawConfig(context.Background(), writeInputConfig(t, base+`
     repo: service-api
     repo_url: https://github.com/example/service-api
@@ -185,5 +187,27 @@ applications:
 	}
 	if string(compactJSON) != string(explicitJSON) {
 		t.Fatal("omitting redundant application defaults changed the effective configuration")
+	}
+}
+
+func TestConfigPreservesRequiredPostDeployReports(t *testing.T) {
+	t.Setenv("QUARTZ_TMP", t.TempDir())
+	input := writeInputConfig(t, `
+providers:
+  cloud: local
+dns:
+  zone: example.com
+applications:
+  service-api:
+    settings:
+      post_deploy:
+        require_report: true
+`)
+	config, err := LoadRawConfig(context.Background(), input)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !config.Bool("applications.service-api.settings.post_deploy.require_report") {
+		t.Fatal("explicit report requirement was not preserved")
 	}
 }

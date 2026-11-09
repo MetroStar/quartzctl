@@ -78,6 +78,11 @@ credentials and requires no provider connection. It does not replace runtime
 configuration/provider validation or prove install/clean readiness. Regenerate
 after upgrading the CLI; the output directory must already exist.
 
+`applications.<app>.settings.post_deploy.require_report` is an optional boolean
+for the platform's archived-report gate. Enable it only after deploying a
+compatible app runner; it defaults off in the platform for legacy applications.
+The CLI validates its type without changing omitted defaults.
+
 ### Quartz Evaluator identity
 
 Fresh-install infrastructure defaults provision **Quartz Evaluator** as

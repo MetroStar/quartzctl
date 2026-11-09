@@ -46,9 +46,15 @@ type ApplicationRepositoryConfig struct {
 // ApplicationPostDeployConfig represents Quartz-managed post-deploy behavior
 // for an application.
 type ApplicationPostDeployConfig struct {
-	Enabled             bool     `koanf:"enabled"`
-	GateEnvironments    []string `koanf:"gate_environments"`
-	TriggerEnvironments []string `koanf:"trigger_environments"`
+	Enabled             bool              `koanf:"enabled"`
+	RequireReport       bool              `koanf:"require_report"`
+	GateEnvironments    []string          `koanf:"gate_environments"`
+	TriggerEnvironments []string          `koanf:"trigger_environments"`
+	HealthURL           string            `koanf:"health_url"`
+	HealthPath          string            `koanf:"health_path"`
+	HealthPaths         []string          `koanf:"health_paths"`
+	ExpectedStatus      int               `koanf:"expected_status"`
+	Headers             map[string]string `koanf:"headers"`
 }
 
 // DefaultApplicationPostDeployConfig returns the default post-deploy policy.
