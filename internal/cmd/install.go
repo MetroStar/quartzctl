@@ -1354,8 +1354,7 @@ func cloudPreflightError(cp provider.CloudProviderClient, err error) error {
 
 // Clean tears down the Quartz environment, including all managed resources and data.
 // This includes refreshing OpenTofu states, destroying resources, and cleaning up.
-// Errors during individual stage destroys are collected and reported but do not
-// abort remaining stages, ensuring maximum cleanup even with partial failures.
+// Errors are collected within a dependency wave and stop lower dependency waves.
 //
 // Parameters:
 //   - ctx: The context for the operation.
@@ -2697,49 +2696,62 @@ func buildDestroyWaves(stages []schema.StageConfig) [][]schema.StageConfig {
 	return waves
 }
 
-// parallelInitRefresh initializes and refreshes every stage concurrently in
+// runCleanupStages bounds simultaneous provider processes on operator hosts.
+func runCleanupStages(stages []schema.StageConfig, run func(schema.StageConfig)) {
+	jobs := make(chan schema.StageConfig)
+	var wg sync.WaitGroup
+	for range min(2, len(stages)) {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			for stage := range jobs {
+				run(stage)
+			}
+		}()
+	}
+	for _, stage := range stages {
+		jobs <- stage
+	}
+	close(jobs)
+	wg.Wait()
+}
+
+// parallelInitRefresh initializes and refreshes stages with bounded concurrency in
 // preparation for destroy. Each stage operates on its own working directory and
 // remote state, so there is no inter-stage ordering requirement here (unlike
 // destroy, which must respect reverse dependencies). Failures are logged but
 // not returned: a stage that cannot init or refresh is still attempted during
 // the destroy phase, matching the prior serial behavior.
 func parallelInitRefresh(ctx context.Context, stages []schema.StageConfig, p *CommandParams) {
-	var wg sync.WaitGroup
-	for _, s := range stages {
-		wg.Add(1)
-		go func(stage schema.StageConfig) {
-			defer wg.Done()
+	runCleanupStages(stages, func(stage schema.StageConfig) {
+		if err := TfInit(ctx, stage.Id, p); err != nil {
+			log.Warn("Init failed for stage, will attempt destroy anyway", "stage", stage.Id, "error", err)
+		}
 
-			if err := TfInit(ctx, stage.Id, p); err != nil {
-				log.Warn("Init failed for stage, will attempt destroy anyway", "stage", stage.Id, "error", err)
-			}
+		// Skip the pre-destroy refresh for stages with empty state: there
+		// is nothing to reconcile, and refreshing a service-dependent stage
+		// whose cluster is already gone only produces noisy provider-config
+		// errors.
+		if stageStateEmpty(ctx, stage.Id, p) {
+			log.Debug("Stage state empty, skipping pre-destroy refresh", "stage", stage.Id)
+			return
+		}
 
-			// Skip the pre-destroy refresh for stages with empty state: there
-			// is nothing to reconcile, and refreshing a service-dependent stage
-			// whose cluster is already gone only produces noisy provider-config
-			// errors.
-			if stageStateEmpty(ctx, stage.Id, p) {
-				log.Debug("Stage state empty, skipping pre-destroy refresh", "stage", stage.Id)
-				return
+		if err := TfRefreshWithUnlock(ctx, stage.Id, p); err != nil {
+			// The umbrella Helm release is version-stamped by Flux
+			// ("1.0.0+<sha>") once it adopts the bootstrap release, so a
+			// pre-destroy refresh of the core stage surfaces the benign Helm
+			// provider "Planned version is different from configured
+			// version" mismatch. The subsequent destroy runs with
+			// Refresh(false) and is unaffected, so this is cosmetic — demote
+			// it to debug to avoid alarming clean output.
+			if isFluxOwnedReleaseDrift(err) {
+				log.Debug("Refresh reported benign Flux-owned release version drift, continuing", "stage", stage.Id, "error", err)
+			} else {
+				log.Warn("Refresh failed for stage", "stage", stage.Id, "error", err)
 			}
-
-			if err := TfRefreshWithUnlock(ctx, stage.Id, p); err != nil {
-				// The umbrella Helm release is version-stamped by Flux
-				// ("1.0.0+<sha>") once it adopts the bootstrap release, so a
-				// pre-destroy refresh of the core stage surfaces the benign Helm
-				// provider "Planned version is different from configured
-				// version" mismatch. The subsequent destroy runs with
-				// Refresh(false) and is unaffected, so this is cosmetic — demote
-				// it to debug to avoid alarming clean output.
-				if isFluxOwnedReleaseDrift(err) {
-					log.Debug("Refresh reported benign Flux-owned release version drift, continuing", "stage", stage.Id, "error", err)
-				} else {
-					log.Warn("Refresh failed for stage", "stage", stage.Id, "error", err)
-				}
-			}
-		}(s)
-	}
-	wg.Wait()
+		}
+	})
 }
 
 // parallelDestroy destroys multiple independent stages concurrently.
@@ -2752,12 +2764,10 @@ func parallelDestroy(ctx context.Context, stages []schema.StageConfig, p *Comman
 
 	results := make(chan result, len(stages))
 
-	for _, s := range stages {
-		go func(stage schema.StageConfig) {
-			err := TfDestroyWithRetry(ctx, stage.Id, p, 2, 30*time.Second)
-			results <- result{stageId: stage.Id, err: err}
-		}(s)
-	}
+	runCleanupStages(stages, func(stage schema.StageConfig) {
+		err := TfDestroyWithRetry(ctx, stage.Id, p, 2, 30*time.Second)
+		results <- result{stageId: stage.Id, err: err}
+	})
 
 	var errs []error
 	for range stages {

@@ -24,6 +24,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -124,6 +125,68 @@ func TestCmdClean(t *testing.T) {
 	if err != nil {
 		t.Errorf("unexpected error in cmd Clean, %v", err)
 	}
+}
+
+func TestRunCleanupStagesBoundsConcurrencyWithoutDroppingStages(t *testing.T) {
+	stages := make([]configschema.StageConfig, 8)
+	for i := range stages {
+		stages[i].Id = fmt.Sprint(i)
+	}
+	started := make(chan struct{}, len(stages))
+	release := make(chan struct{})
+	done := make(chan struct{})
+	var mu sync.Mutex
+	active, peak := 0, 0
+	seen := map[string]int{}
+	go func() {
+		runCleanupStages(stages, func(stage configschema.StageConfig) {
+			mu.Lock()
+			active++
+			peak = max(peak, active)
+			seen[stage.Id]++
+			mu.Unlock()
+			started <- struct{}{}
+			<-release
+			mu.Lock()
+			active--
+			mu.Unlock()
+		})
+		close(done)
+	}()
+	defer close(release)
+	for range 2 {
+		select {
+		case <-started:
+		case <-time.After(5 * time.Second):
+			t.Fatal("two independent cleanup stages did not start concurrently")
+		}
+	}
+	for range len(stages) {
+		select {
+		case release <- struct{}{}:
+		case <-time.After(5 * time.Second):
+			t.Fatal("cleanup failed to process every stage")
+		}
+	}
+	select {
+	case <-done:
+	case <-time.After(5 * time.Second):
+		t.Fatal("cleanup stages did not finish")
+	}
+	assert.Equal(t, 2, peak)
+	assert.Equal(t, 0, active)
+	for _, stage := range stages {
+		assert.Equal(t, 1, seen[stage.Id])
+	}
+}
+
+func TestRunCleanupStagesHandlesEmptyAndSingleStage(t *testing.T) {
+	calls := 0
+	run := func(configschema.StageConfig) { calls++ }
+	runCleanupStages(nil, run)
+	assert.Zero(t, calls)
+	runCleanupStages([]configschema.StageConfig{{Id: "only"}}, run)
+	assert.Equal(t, 1, calls)
 }
 
 func TestCmdCleanPreservesDependenciesAfterStageFailure(t *testing.T) {

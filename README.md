@@ -49,6 +49,8 @@ fails. Independent stages already running in that wave finish, but lower-order
 infrastructure is preserved for recovery. A failed cleanup retains both its state
 backend and local working directory; fix the reported stage failure before
 rerunning `quartz clean`. `--keep-backend` also retains the backend on success.
+Initialization/refresh and independent stage destruction run at most two stages
+simultaneously to bound provider-process memory on operator hosts.
 Configured destroy exclusions are expanded against managed state addresses and
 passed as native OpenTofu exclusions. Merely leaving a protected resource out of
 the target list is insufficient: targeting another resource can otherwise pull
@@ -187,7 +189,7 @@ quartz [command] [flags]
 ### Available Commands
 
 - `check`: Check environment, configuration and access for installer prerequisites. Use `quartz check --ai-telemetry` on a live Quartz cluster to verify Agent Gateway Prometheus scrape health, recent request volume, recent 2xx/5xx responses, and recent model-not-found/404 responses. Use `quartz check --install-readiness` after install when you want a lightweight read on Flux convergence, app-delivery bootstrap readiness, and Ollama warmer status without re-reading the full cluster report.
-- `clean`: Perform a full cleanup/teardown of the system. Pass `--yes`/`-y` to skip the confirmation prompt (useful for CI). Cleanup destroys stages in reverse dependency order, continues across stage failures, reports cumulative status, and preserves the state backend until all stages complete successfully.
+- `clean`: Perform a full cleanup/teardown of the system. Pass `--yes`/`-y` to skip the confirmation prompt (useful for CI). Cleanup destroys stages in reverse dependency order with at most two stages running simultaneously. A failed dependency wave stops lower waves and preserves the state backend and working directory for recovery.
 - `export`: Export configured Kubernetes resources to yaml.
 - `info`: Output configuration info for the current cluster.
 - `install`: Perform a full install/update of the system. Pass `--resume-from`/`-r` to resume from a stage, `--allow-deferral` to enable OpenTofu deferred actions, and `--yes`/`-y` to skip confirmation prompts.
