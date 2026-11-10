@@ -126,6 +126,46 @@ func TestCmdClean(t *testing.T) {
 	}
 }
 
+func TestCmdCleanPreservesDependenciesAfterStageFailure(t *testing.T) {
+	for _, parallel := range []bool{false, true} {
+		t.Run(fmt.Sprintf("parallel=%t", parallel), func(t *testing.T) {
+			p := defaultTestConfig(t)
+			p.assumeYes = true
+			p.keepBackend = true
+			p.Settings().Config.Stages = map[string]configschema.StageConfig{
+				"application": {
+					Id: "application", Order: 20,
+					Debug: configschema.StageDebugConfig{Break: true},
+				},
+				"host": {
+					Id: "host", Order: 10,
+					Debug: configschema.StageDebugConfig{Break: true},
+				},
+			}
+			failures := 1
+			if parallel {
+				p.Settings().Config.Stages["other-application"] = configschema.StageConfig{
+					Id: "other-application", Order: 20,
+					Debug: configschema.StageDebugConfig{Break: true},
+				}
+				failures++
+			}
+			var output bytes.Buffer
+			util.SetWriter(&output)
+			t.Cleanup(func() { util.SetWriter(os.Stdout) })
+
+			err := Clean(context.Background(), p)
+
+			assert.ErrorContains(t, err, fmt.Sprintf("%d stage(s) failed", failures))
+			assert.Contains(t, output.String(), "Stopping destruction before the next dependency wave")
+			assert.NotContains(t, output.String(), "Break point at stage host")
+			assert.Contains(t, output.String(), "Break point at stage application")
+			assert.DirExists(t, p.Settings().Config.Tmp)
+			assert.Contains(t, output.String(), "Preserving local working directory")
+		})
+	}
+}
+
 // backendGoneCloud is a cloud provider that reports its state backend as already
 // destroyed, exercising the no-op clean fast path. It embeds LocalClient so it
 // satisfies the full CloudProviderClient interface with only the existence probe

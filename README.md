@@ -44,6 +44,16 @@ The test needs outbound access to download the configured OpenTofu runtime.
 This is native executable/local-state coverage, not proof of a complete AWS
 `quartz install`/`quartz clean` cycle or platform shell-script portability.
 
+Cleanup stops before the next dependency wave if any stage in the current wave
+fails. Independent stages already running in that wave finish, but lower-order
+infrastructure is preserved for recovery. A failed cleanup retains both its state
+backend and local working directory; fix the reported stage failure before
+rerunning `quartz clean`. `--keep-backend` also retains the backend on success.
+Configured destroy exclusions are expanded against managed state addresses and
+passed as native OpenTofu exclusions. Merely leaving a protected resource out of
+the target list is insufficient: targeting another resource can otherwise pull
+its dependents into destruction.
+
 ### Compact configuration and precedence
 
 Application keys default to repository names. GitHub organization/provider,

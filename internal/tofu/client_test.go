@@ -276,6 +276,15 @@ func TestTofuDestroy(t *testing.T) {
 		t.Errorf("unexpected error from tofu destroy, %v", err)
 		return
 	}
+	state, err := tf.showState(context.Background(), stage)
+	require.NoError(t, err)
+	var remaining []string
+	for _, resource := range state.Values.RootModule.Resources {
+		remaining = append(remaining, resource.Address)
+	}
+	assert.Contains(t, remaining, "random_integer.exclude")
+	assert.Contains(t, remaining, "random_integer.this")
+	assert.NotContains(t, remaining, "random_integer.include")
 
 	stage.Destroy.Skip = true
 	err = tf.Destroy(context.Background(), stage)
@@ -289,6 +298,41 @@ func TestTofuDestroy(t *testing.T) {
 	if err == nil {
 		t.Errorf("expected break in tofu destroy")
 	}
+}
+
+func TestDestroyExclusionProtectsDependentWithPreventDestroy(t *testing.T) {
+	tf, err := newTestTfClient(t)
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = tf.Cleanup(context.Background()) })
+	stage := schema.StageConfig{
+		Path: t.TempDir(), OverrideVars: true,
+		Destroy: schema.StageDestroyConfig{Exclude: []string{"terraform_data.retained"}},
+	}
+	require.NoError(t, os.WriteFile(filepath.Join(stage.Path, "main.tf"), []byte(`
+resource "terraform_data" "parent" { input = "disposable" }
+resource "terraform_data" "retained" {
+  count = 1
+  input = terraform_data.parent.id
+  lifecycle { prevent_destroy = true }
+}
+resource "terraform_data" "independent" { input = "disposable" }
+`), 0600))
+	require.NoError(t, tf.Init(context.Background(), stage, TofuInitOpts{}))
+	require.NoError(t, tf.Apply(context.Background(), stage))
+	targets, excludes, found, err := targetsToDestroy(context.Background(), &tf, stage)
+	require.NoError(t, err)
+	require.True(t, found)
+	assert.ElementsMatch(t, []string{"terraform_data.parent", "terraform_data.independent"}, targets)
+	assert.Equal(t, []string{"terraform_data.retained[0]"}, excludes)
+	require.NoError(t, tf.Destroy(context.Background(), stage))
+	state, err := tf.showState(context.Background(), stage)
+	require.NoError(t, err)
+	var addresses []string
+	for _, resource := range state.Values.RootModule.Resources {
+		addresses = append(addresses, resource.Address)
+	}
+	assert.Contains(t, addresses, "terraform_data.retained[0]")
+	assert.NotContains(t, addresses, "terraform_data.independent")
 }
 
 func TestTofuRefresh(t *testing.T) {

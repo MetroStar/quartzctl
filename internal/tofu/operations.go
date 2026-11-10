@@ -20,6 +20,7 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"regexp"
 	"slices"
@@ -256,7 +257,7 @@ func (c *TofuClient) Destroy(ctx context.Context, stage schema.StageConfig) erro
 		vars = append(vars, tfexec.VarFile(stageVarFile))
 	}
 
-	targets, found, err := targetsToDestroy(ctx, c, stage)
+	targets, excludes, found, err := targetsToDestroy(ctx, c, stage)
 	if err != nil {
 		return err
 	}
@@ -269,6 +270,33 @@ func (c *TofuClient) Destroy(ctx context.Context, stage schema.StageConfig) erro
 	for _, t := range targets {
 		log.Warn("Explicitly destroying", "resource", t, "stage", stage.Id)
 		vars = append(vars, tfexec.Target(t))
+	}
+
+	if len(excludes) > 0 {
+		args := []string{"destroy", "-auto-approve", "-input=false", "-no-color", "-refresh=false", "-lock-timeout=10s"}
+		if !stage.OverrideVars {
+			args = append(args, "-var-file="+c.cfg.Config.TfVarFilePath())
+		}
+		if stageVarFile != "" {
+			args = append(args, "-var-file="+stageVarFile)
+		}
+		for _, exclude := range excludes {
+			args = append(args, "-exclude="+exclude)
+		}
+		// terraform-exec has no option for OpenTofu's native -exclude flag.
+		// Omitting an address from -target alone does not protect dependents.
+		command := exec.CommandContext(ctx, c.execPath, args...) //nolint:gosec // Pinned installed OpenTofu; separate argv, never a shell.
+		command.Dir = stage.Path
+		for key, value := range c.stageEnv(stage) {
+			command.Env = append(command.Env, key+"="+value)
+		}
+		command.Stdout = os.Stdout
+		var stderr strings.Builder
+		command.Stderr = io.MultiWriter(os.Stderr, &stderr)
+		if err := command.Run(); err != nil {
+			return fmt.Errorf("OpenTofu destroy stage %s: %w: %s", stage.Id, err, stderr.String())
+		}
+		return nil
 	}
 
 	c.setStageEnv(tf, stage)
@@ -350,6 +378,12 @@ func (c *TofuClient) Output(ctx context.Context, stage schema.StageConfig) (map[
 
 // setStageEnv sets the environment variables for the OpenTofu process based on the stage configuration.
 func (c *TofuClient) setStageEnv(tf *tfexec.Terraform, stage schema.StageConfig) {
+	if err := tf.SetEnv(c.stageEnv(stage)); err != nil {
+		log.Warn("Failed to set tofu environment", "stage", stage, "err", err)
+	}
+}
+
+func (c *TofuClient) stageEnv(stage schema.StageConfig) map[string]string {
 	env := util.OsEnvMap()
 
 	if stage.Providers.Kubernetes {
@@ -366,9 +400,7 @@ func (c *TofuClient) setStageEnv(tf *tfexec.Terraform, stage schema.StageConfig)
 		})
 	}
 
-	if err := tf.SetEnv(env); err != nil {
-		log.Warn("Failed to set tofu environment", "stage", stage, "err", err)
-	}
+	return env
 }
 
 // pluginCacheDir returns the path to the provider plugin cache directory,
@@ -935,18 +967,18 @@ func parseStageOutputValue(o map[string][]byte, key string) (string, error) {
 // The state inspection runs on a quiet (stdout-discarded) OpenTofu instance via
 // showState so the full `tofu show -json` output — which embeds plaintext
 // secrets — is never streamed to the terminal/logs during destroy/clean.
-func targetsToDestroy(ctx context.Context, c *TofuClient, stage schema.StageConfig) ([]string, bool, error) {
+func targetsToDestroy(ctx context.Context, c *TofuClient, stage schema.StageConfig) ([]string, []string, bool, error) {
 	hasIncludes := len(stage.Destroy.Include) > 0
 	hasExcludes := len(stage.Destroy.Exclude) > 0
 
 	if !hasIncludes && !hasExcludes {
 		// nothing specified, default to a normal tofu destroy
-		return nil, true, nil
+		return nil, nil, true, nil
 	}
 
 	state, err := c.showState(ctx, stage)
 	if err != nil {
-		return nil, false, err
+		return nil, nil, false, err
 	}
 
 	if state == nil ||
@@ -954,11 +986,15 @@ func targetsToDestroy(ctx context.Context, c *TofuClient, stage schema.StageConf
 		state.Values.RootModule == nil ||
 		(len(state.Values.RootModule.Resources) == 0 && len(state.Values.RootModule.ChildModules) == 0) {
 		log.Debug("Empty state response from module", "stage", stage.Id, "state", state)
-		return nil, false, nil
+		return nil, nil, false, nil
 	}
 
 	var targets []string
+	var excludes []string
 	checkResource := func(res *tfjson.StateResource) {
+		if res.Mode != tfjson.ManagedResourceMode {
+			return
+		}
 		log.Debug("Checking tofu state resource for explicit inclusion/exclusion in destroy operation", "address", res.Address)
 		compFunc := func(e string) bool {
 			return util.EqualsOrRegexMatchString(e, res.Address, true)
@@ -967,12 +1003,14 @@ func targetsToDestroy(ctx context.Context, c *TofuClient, stage schema.StageConf
 		if hasExcludes && slices.ContainsFunc(stage.Destroy.Exclude, compFunc) {
 			// exclude has priority, if it's in this list, skip it
 			log.Debug("Matched entry in exclusion list, removing resource from destroy set", "address", res.Address)
+			excludes = append(excludes, res.Address)
 			return
 		}
 
 		if hasIncludes && !slices.ContainsFunc(stage.Destroy.Include, compFunc) {
 			// include has anything at all and doesn't contain this resource, skip it
 			log.Debug("Did not match anything in inclusion list, removing resource from destroy set", "address", res.Address)
+			excludes = append(excludes, res.Address)
 			return
 		}
 
@@ -998,10 +1036,10 @@ func targetsToDestroy(ctx context.Context, c *TofuClient, stage schema.StageConf
 
 	// filters were applied but the result set was empty, skip the destroy
 	if len(targets) == 0 {
-		return nil, false, nil
+		return nil, excludes, false, nil
 	}
 
 	targets = util.DistinctSlice(targets)
 
-	return targets, true, nil
+	return targets, util.DistinctSlice(excludes), true, nil
 }

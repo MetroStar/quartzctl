@@ -1456,7 +1456,7 @@ func Clean(ctx context.Context, p *CommandParams) error {
 			err = TfDestroyWithRetry(ctx, s.Id, p, 2, 30*time.Second)
 			stageTiming["destroy-"+s.Id] = time.Since(stageStart)
 			if err != nil {
-				log.Warn("Stage destroy failed, continuing with remaining stages", "stage", s.Id, "error", err)
+				log.Warn("Stage destroy failed; preserving dependency stages", "stage", s.Id, "error", err)
 				destroyErrors = append(destroyErrors, fmt.Errorf("stage %s: %w", s.Id, err))
 			}
 		} else {
@@ -1471,6 +1471,11 @@ func Clean(ctx context.Context, p *CommandParams) error {
 		}
 
 		captureCleanupStatus()
+
+		if len(destroyErrors) > 0 {
+			util.Msg("Stopping destruction before the next dependency wave; fix the failed stages and re-run clean.")
+			break
+		}
 
 		// Inter-wave K8s cleanup
 		if kube != nil && waveIdx < len(destroyWaves)-1 {
@@ -1502,11 +1507,15 @@ func Clean(ctx context.Context, p *CommandParams) error {
 		util.Msg("   The state backend is preserved so tofu can still manage remaining resources.")
 	}
 
-	cleanupFinalStart := time.Now()
-	err = Cleanup(ctx, p)
-	stageTiming["cleanup-final"] = time.Since(cleanupFinalStart)
-	if err != nil {
-		destroyErrors = append(destroyErrors, fmt.Errorf("cleanup: %w", err))
+	if len(destroyErrors) == 0 {
+		cleanupFinalStart := time.Now()
+		err = Cleanup(ctx, p)
+		stageTiming["cleanup-final"] = time.Since(cleanupFinalStart)
+		if err != nil {
+			destroyErrors = append(destroyErrors, fmt.Errorf("cleanup: %w", err))
+		}
+	} else {
+		util.Msgf("Preserving local working directory %s for cleanup recovery", p.Settings().Config.Tmp)
 	}
 
 	totalDuration := time.Since(cleanupStart)
