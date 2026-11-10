@@ -6,6 +6,9 @@ providers:
 dns:
   zone: example.com
 
+aws:
+  region: us-east-1
+
 test:
   enabled: true
 

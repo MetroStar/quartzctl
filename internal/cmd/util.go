@@ -702,7 +702,8 @@ func CheckInstallReadiness(ctx context.Context, p *CommandParams) error {
 		rows = append(rows, []string{"App delivery bootstrap", value, status, truncateDetail(detail, 80)})
 	}
 
-	if aiProvider == "ollama" {
+	switch aiProvider {
+	case "ollama":
 		switch {
 		case modelWarmerErr != nil:
 			rows = append(rows, []string{"Ollama model warming", "-", "Unavailable", truncateDetail(modelWarmerErr.Error(), 80)})
@@ -722,14 +723,14 @@ func CheckInstallReadiness(ctx context.Context, p *CommandParams) error {
 				truncateDetail(modelWarmerProgress(modelWarmer), 80),
 			})
 		}
-	} else if aiProvider == "bedrock" {
+	case "bedrock":
 		rows = append(rows, []string{
 			"AI model warming",
 			"not required",
 			"Not required",
 			"Bedrock profile; runtime inference is validated separately",
 		})
-	} else {
+	default:
 		return fmt.Errorf("unsupported ai.provider %q", p.Settings().Config.AI.Provider)
 	}
 
