@@ -763,6 +763,43 @@ func TestValidateInstallAIProfile(t *testing.T) {
 	assert.NoError(t, validateInstallAIProfile(cfg, false))
 	assert.ErrorContains(t, validateInstallAIProfile(cfg, true), "--wait-for-models")
 
+	invalidProfiles := []struct {
+		name   string
+		mutate func(*configschema.QuartzConfig)
+	}{
+		{
+			name: "missing inference profile",
+			mutate: func(cfg *configschema.QuartzConfig) {
+				cfg.AI.Bedrock.InferenceProfile = ""
+			},
+		},
+		{
+			name: "missing foundation model",
+			mutate: func(cfg *configschema.QuartzConfig) {
+				cfg.AI.Bedrock.FoundationModel = ""
+			},
+		},
+		{
+			name: "missing source region",
+			mutate: func(cfg *configschema.QuartzConfig) {
+				cfg.Aws.Region = ""
+			},
+		},
+		{
+			name: "missing destination regions",
+			mutate: func(cfg *configschema.QuartzConfig) {
+				cfg.AI.Bedrock.DestinationRegions = nil
+			},
+		},
+	}
+	for _, tc := range invalidProfiles {
+		t.Run(tc.name, func(t *testing.T) {
+			invalid := cfg
+			tc.mutate(&invalid)
+			assert.ErrorContains(t, validateInstallAIProfile(invalid, false), "requires an inference profile")
+		})
+	}
+
 	cfg.AI.Provider = "ollama"
 	assert.ErrorContains(t, validateInstallAIProfile(cfg, false), "requires quartz install --wait-for-models")
 	assert.NoError(t, validateInstallAIProfile(cfg, true))
