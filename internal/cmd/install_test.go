@@ -24,6 +24,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -123,6 +124,108 @@ func TestCmdClean(t *testing.T) {
 	err := Clean(context.Background(), p)
 	if err != nil {
 		t.Errorf("unexpected error in cmd Clean, %v", err)
+	}
+}
+
+func TestRunCleanupStagesBoundsConcurrencyWithoutDroppingStages(t *testing.T) {
+	stages := make([]configschema.StageConfig, 8)
+	for i := range stages {
+		stages[i].Id = fmt.Sprint(i)
+	}
+	started := make(chan struct{}, len(stages))
+	release := make(chan struct{})
+	done := make(chan struct{})
+	var mu sync.Mutex
+	active, peak := 0, 0
+	seen := map[string]int{}
+	go func() {
+		runCleanupStages(stages, func(stage configschema.StageConfig) {
+			mu.Lock()
+			active++
+			peak = max(peak, active)
+			seen[stage.Id]++
+			mu.Unlock()
+			started <- struct{}{}
+			<-release
+			mu.Lock()
+			active--
+			mu.Unlock()
+		})
+		close(done)
+	}()
+	defer close(release)
+	for range 2 {
+		select {
+		case <-started:
+		case <-time.After(5 * time.Second):
+			t.Fatal("two independent cleanup stages did not start concurrently")
+		}
+	}
+	for range len(stages) {
+		select {
+		case release <- struct{}{}:
+		case <-time.After(5 * time.Second):
+			t.Fatal("cleanup failed to process every stage")
+		}
+	}
+	select {
+	case <-done:
+	case <-time.After(5 * time.Second):
+		t.Fatal("cleanup stages did not finish")
+	}
+	assert.Equal(t, 2, peak)
+	assert.Equal(t, 0, active)
+	for _, stage := range stages {
+		assert.Equal(t, 1, seen[stage.Id])
+	}
+}
+
+func TestRunCleanupStagesHandlesEmptyAndSingleStage(t *testing.T) {
+	calls := 0
+	run := func(configschema.StageConfig) { calls++ }
+	runCleanupStages(nil, run)
+	assert.Zero(t, calls)
+	runCleanupStages([]configschema.StageConfig{{Id: "only"}}, run)
+	assert.Equal(t, 1, calls)
+}
+
+func TestCmdCleanPreservesDependenciesAfterStageFailure(t *testing.T) {
+	for _, parallel := range []bool{false, true} {
+		t.Run(fmt.Sprintf("parallel=%t", parallel), func(t *testing.T) {
+			p := defaultTestConfig(t)
+			p.assumeYes = true
+			p.keepBackend = true
+			p.Settings().Config.Stages = map[string]configschema.StageConfig{
+				"application": {
+					Id: "application", Order: 20,
+					Debug: configschema.StageDebugConfig{Break: true},
+				},
+				"host": {
+					Id: "host", Order: 10,
+					Debug: configschema.StageDebugConfig{Break: true},
+				},
+			}
+			failures := 1
+			if parallel {
+				p.Settings().Config.Stages["other-application"] = configschema.StageConfig{
+					Id: "other-application", Order: 20,
+					Debug: configschema.StageDebugConfig{Break: true},
+				}
+				failures++
+			}
+			var output bytes.Buffer
+			util.SetWriter(&output)
+			t.Cleanup(func() { util.SetWriter(os.Stdout) })
+
+			err := Clean(context.Background(), p)
+
+			assert.ErrorContains(t, err, fmt.Sprintf("%d stage(s) failed", failures))
+			assert.Contains(t, output.String(), "Stopping destruction before the next dependency wave")
+			assert.NotContains(t, output.String(), "Break point at stage host")
+			assert.Contains(t, output.String(), "Break point at stage application")
+			assert.DirExists(t, p.Settings().Config.Tmp)
+			assert.Contains(t, output.String(), "Preserving local working directory")
+		})
 	}
 }
 

@@ -28,6 +28,93 @@ Quartz is an open-source CLI tool designed to automate the full lifecycle of Kub
 
 Delivery teams and capture teams should start with the [quartzctl Capability Package](docs/capability/README.md). It includes the nine-document delivery set: capability summary, reference architecture, operating model, onboarding guide, runbook, troubleshooting guide, template package, value brief, and product page.
 
+### Native runtime checks
+
+The PR workflow builds and executes the CLI on native Linux, macOS, and Windows
+runners. Its isolated local-state test covers help/version, explicit missing-file
+errors, configuration rendering, actual OpenTofu download/execution, apply,
+idempotent reapply, destroy and repeated destroy with closed stdin and paths
+containing spaces. It uses only OpenTofu's built-in `terraform_data` resource;
+no cloud credentials, AWS resources, WSL, or container daemon are required.
+
+Run it locally after building the CLI by setting `QUARTZ_NATIVE_BINARY` to the
+absolute executable path and running
+`go test -v -count=1 ./cmd/quartz -run TestNativeExecutableLifecycle`.
+The test needs outbound access to download the configured OpenTofu runtime.
+This is native executable/local-state coverage, not proof of a complete AWS
+`quartz install`/`quartz clean` cycle or platform shell-script portability.
+
+Cleanup stops before the next dependency wave if any stage in the current wave
+fails. Independent stages already running in that wave finish, but lower-order
+infrastructure is preserved for recovery. A failed cleanup retains both its state
+backend and local working directory; fix the reported stage failure before
+rerunning `quartz clean`. `--keep-backend` also retains the backend on success.
+Initialization/refresh and independent stage destruction run at most two stages
+simultaneously to bound provider-process memory on operator hosts.
+Configured destroy exclusions are expanded against managed state addresses and
+passed as native OpenTofu exclusions. Merely leaving a protected resource out of
+the target list is insufficient: targeting another resource can otherwise pull
+its dependents into destruction.
+
+### Compact configuration and precedence
+
+Application keys default to repository names. GitHub organization/provider,
+repository URL, branch (`main`), deploy path (`deploy`), and the post-deploy
+policy are derived centrally; omit them unless overriding those defaults.
+Keep application types, endpoints, authentication relationships, permissions
+and data-retention choices explicit. Credentials belong in the existing secret
+sources, not in configuration examples.
+
+Precedence is built-in defaults, then the configuration file, then `QUARTZ_*`
+environment overrides. Dependent defaults (such as repository URLs and DNS)
+use the overridden values. An explicit `dns.domain` is preserved, including
+when `dns.zone` is also supplied. A domain without a zone must include a host
+and zone. Missing/malformed configuration and unusable output directories
+fail explicitly rather than continuing with defaults.
+
+Generate editor assistance from the configuration types in your CLI version:
+
+```sh
+quartz schema --out ./quartz.schema.json
+```
+
+Then put `# yaml-language-server: $schema=./quartz.schema.json` at the top of
+`quartz.yaml` when using a YAML-language-server-compatible editor. The schema
+provides field/type completion and unknown-field diagnostics within typed
+objects, including nested applications and stages. Top-level framework/OpenTofu
+extensions, application settings, and Keycloak maps remain open; the
+known `settings.post_deploy` policy accepts a boolean or typed mapping.
+Omitted values remain optional so centralized defaults and
+environment overrides still apply. The schema contains no resolved values or
+credentials and requires no provider connection. It does not replace runtime
+configuration/provider validation or prove install/clean readiness. Regenerate
+after upgrading the CLI; the output directory must already exist.
+
+Inspect normalized defaults and `QUARTZ_` overrides without loading the separate
+secrets file or credential environment variables:
+
+```sh
+quartz render --redacted --out ./out/quartz.redacted.yaml
+```
+
+This uses the same configuration loader as deployment. Known fields remain
+visible, while credential-bearing fields, literal stage values, unknown fields,
+opaque extension values, and headers are replaced with `[REDACTED]`. Repository/
+endpoint URL user information, query strings, and fragments are removed.
+Application settings are opaque except for the typed `post_deploy` policy.
+The output is diagnostic, not deployable input or a complete configuration
+equivalence check. It is not anonymized: names, domains, paths, email addresses,
+and mapping keys can still identify your environment. Review before sharing,
+and never put credentials in ordinary names/descriptions/URL paths.
+Normal `quartz render` remains unchanged and may contain sensitive inline values.
+Both modes initialize the configured local temporary directory; neither command
+proves provider access, deployment readiness, or live cluster equivalence.
+
+`applications.<app>.settings.post_deploy.require_report` is an optional boolean
+for the platform's archived-report gate. Enable it only after deploying a
+compatible app runner; it defaults off in the platform for legacy applications.
+The CLI validates its type without changing omitted defaults.
+
 ### Quartz Evaluator identity
 
 Fresh-install infrastructure defaults provision **Quartz Evaluator** as
@@ -102,13 +189,14 @@ quartz [command] [flags]
 ### Available Commands
 
 - `check`: Check environment, configuration and access for installer prerequisites. Use `quartz check --ai-telemetry` on a live Quartz cluster to verify Agent Gateway Prometheus scrape health, recent request volume, recent 2xx/5xx responses, and recent model-not-found/404 responses. Use `quartz check --install-readiness` after install when you want a lightweight read on Flux convergence, app-delivery bootstrap readiness, and Ollama warmer status without re-reading the full cluster report.
-- `clean`: Perform a full cleanup/teardown of the system. Pass `--yes`/`-y` to skip the confirmation prompt (useful for CI). Cleanup destroys stages in reverse dependency order, continues across stage failures, reports cumulative status, and preserves the state backend until all stages complete successfully.
+- `clean`: Perform a full cleanup/teardown of the system. Pass `--yes`/`-y` to skip the confirmation prompt (useful for CI). Cleanup destroys stages in reverse dependency order with at most two stages running simultaneously. A failed dependency wave stops lower waves and preserves the state backend and working directory for recovery.
 - `export`: Export configured Kubernetes resources to yaml.
 - `info`: Output configuration info for the current cluster.
 - `install`: Perform a full install/update of the system. Pass `--resume-from`/`-r` to resume from a stage, `--allow-deferral` to enable OpenTofu deferred actions, and `--yes`/`-y` to skip confirmation prompts. Bedrock is the default AI provider and does not wait for local models; an Ollama profile requires `--wait-for-models`.
 - `login`: Generate a kubeconfig for the current cluster (`kubeconfig` and `refresh-kubeconfig` aliases).
 - `refresh-secrets`: Trigger all external secrets to be refreshed immediately (`rs` alias).
-- `render`: Write fully rendered configuration to yaml (`--out`/`-o`, default `./out/quartz.generated.yaml`).
+- `render`: Write fully rendered configuration to yaml (`--out`/`-o`, default `./out/quartz.generated.yaml`). Use `--redacted` for a credential-masked diagnostic view without loading secrets.
+- `schema`: Generate editor JSON Schema from this CLI's configuration types (`--out`/`-o`, default `./quartz.schema.json`), without resolving providers.
 - `restart`: Restart target Kubernetes resources. Defaults to deployments, daemonsets, and statefulsets; narrow with `--kind`/`-k`, `--namespace`/`-n`, and `--name`.
 - `tofu` / `tf`: OpenTofu subcommands for configured stages.
   - `apply`: Apply a new stage plan, or apply an existing saved plan with `--plan-file <path>` (`--stage <name>` required).

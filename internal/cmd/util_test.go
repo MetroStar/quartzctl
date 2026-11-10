@@ -34,6 +34,7 @@ import (
 	"github.com/MetroStar/quartzctl/internal/util"
 	"github.com/knadh/koanf/v2"
 	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 	"github.com/urfave/cli/v3"
 	appsv1 "k8s.io/api/apps/v1"
 	corev1 "k8s.io/api/core/v1"
@@ -91,13 +92,85 @@ func TestNewRootRenderCommand(t *testing.T) {
 
 	assert.Equal(t, "render", cmd.Name)
 	assert.Equal(t, "Write fully rendered yaml config", cmd.Usage)
-	assert.Len(t, cmd.Flags, 1)
+	assert.Len(t, cmd.Flags, 2)
 
 	flag := cmd.Flags[0].(*cli.StringFlag)
 	assert.Equal(t, "out", flag.Name)
 
 	err := cmd.Run(context.Background(), []string{cmd.Name, "--out", filepath.Join(t.TempDir(), "render_test.yaml")})
 	assert.NoError(t, err)
+}
+
+func TestRenderRedactedWithoutSecrets(t *testing.T) {
+	workspace := t.TempDir()
+	input := filepath.Join(workspace, "quartz.yaml")
+	require.NoError(t, os.WriteFile(input, []byte(`
+name: inspection
+providers:
+  cloud: local
+dns:
+  zone: example.invalid
+github:
+  organization: example
+applications:
+  api:
+    settings:
+      post_deploy:
+        require_report: true
+auth:
+  users:
+    fixture:
+      password:
+        value: fixture-private-password
+`), 0600))
+	t.Setenv("QUARTZ_TMP", filepath.Join(workspace, "runtime"))
+	t.Setenv("GITHUB_TOKEN", "fixture-private-environment-token")
+	t.Setenv("QUARTZ_GITHUB_TOKEN", "fixture-private-quartz-token")
+	p := NewCommandParams(time.Now())
+	p.SetConfig(input)
+	secrets := filepath.Join(workspace, "malformed-secrets.yaml")
+	require.NoError(t, os.WriteFile(secrets, []byte("[unterminated"), 0600))
+	p.SetSecrets(secrets)
+	output := filepath.Join(workspace, "output", "redacted.yaml")
+	command := NewRootRenderCommand(p).Command
+	require.NoError(t, command.Run(context.Background(), []string{"render", "--redacted", "--out", output}))
+	content, err := os.ReadFile(output)
+	require.NoError(t, err)
+	require.Contains(t, string(content), "inspection.example.invalid")
+	require.Contains(t, string(content), "https://github.com/example/api")
+	require.Contains(t, string(content), "require_report: true")
+	require.NotContains(t, string(content), "fixture-private")
+	require.Nil(t, p.settings, "redacted rendering must not load settings/secrets")
+	require.Nil(t, p.provider, "redacted rendering must not resolve the provider factory")
+}
+
+func TestRenderRedactedReportsErrors(t *testing.T) {
+	p := NewCommandParams(time.Now())
+	p.SetConfig(filepath.Join(t.TempDir(), "missing.yaml"))
+	require.ErrorContains(t, RenderRedacted(context.Background(), filepath.Join(t.TempDir(), "out.yaml"), p), "load configuration")
+	p = defaultTestConfig(t)
+	p.SetConfig(filepath.Join(t.TempDir(), "quartz.yaml"))
+	require.NoError(t, os.WriteFile(p.configFile, []byte("providers:\n  cloud: local\ndns:\n  zone: example.invalid\n"), 0600))
+	t.Setenv("QUARTZ_TMP", t.TempDir())
+	require.ErrorContains(t, RenderRedacted(context.Background(), t.TempDir(), p), "write redacted configuration")
+	require.ErrorContains(t, RenderRedacted(context.Background(), filepath.Join(p.configFile, "out.yaml"), p), "create redacted configuration directory")
+}
+
+func TestNewRootSchemaCommandDoesNotLoadConfiguration(t *testing.T) {
+	cmd := NewRootSchemaCommand().Command
+	output := filepath.Join(t.TempDir(), "quartz.schema.json")
+	require.NoError(t, cmd.Run(context.Background(), []string{cmd.Name, "--out", output}))
+	actual, err := os.ReadFile(output)
+	require.NoError(t, err)
+	expected, err := schema.EditorSchema()
+	require.NoError(t, err)
+	require.Equal(t, append(expected, '\n'), actual)
+}
+
+func TestNewRootSchemaCommandReportsWriteErrors(t *testing.T) {
+	cmd := NewRootSchemaCommand().Command
+	err := cmd.Run(context.Background(), []string{cmd.Name, "--out", t.TempDir()})
+	require.ErrorContains(t, err, "write configuration schema")
 }
 
 func TestNewRootRefreshSecretsCommand(t *testing.T) {

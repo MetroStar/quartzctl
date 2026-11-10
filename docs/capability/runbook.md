@@ -196,7 +196,11 @@ quartz clean --yes
 quartz clean --yes --keep-backend
 ```
 
-`clean` destroys stages in reverse dependency order. If a stage fails, cleanup continues and reports the failures. The remote backend is kept until all stage destroys succeed so operators can re-run cleanup with recoverable state.
+`clean` destroys stages in reverse dependency order. Initialization/refresh and
+independent destroys run at most two stages simultaneously. If a stage fails,
+other stages in its current wave finish, but lower dependency waves do not start.
+The remote backend and working directory are preserved on failure so operators
+can re-run cleanup with recoverable state.
 
 Pass `--keep-backend` when the state bucket and lock table are owned outside
 Quartz (for example, by a separate bootstrap configuration). Stages are still
