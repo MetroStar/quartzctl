@@ -748,11 +748,27 @@ func TestInstallWaitForModels(t *testing.T) {
 	assert.False(t, installWaitForModels(p))
 
 	t.Setenv("QUARTZ_WAIT_FOR_MODELS", "true")
-	assert.True(t, installWaitForModels(p))
+	assert.False(t, installWaitForModels(p))
 
 	t.Setenv("QUARTZ_WAIT_FOR_MODELS", "false")
 	p.waitForModels = true
 	assert.True(t, installWaitForModels(p))
+}
+
+func TestValidateInstallAIProfile(t *testing.T) {
+	cfg := configschema.QuartzConfig{
+		Aws: configschema.AwsConfig{Region: "us-east-1"},
+		AI:  configschema.DefaultAIConfig(),
+	}
+	assert.NoError(t, validateInstallAIProfile(cfg, false))
+	assert.ErrorContains(t, validateInstallAIProfile(cfg, true), "--wait-for-models")
+
+	cfg.AI.Provider = "ollama"
+	assert.ErrorContains(t, validateInstallAIProfile(cfg, false), "requires quartz install --wait-for-models")
+	assert.NoError(t, validateInstallAIProfile(cfg, true))
+
+	cfg.AI.Provider = "unknown"
+	assert.ErrorContains(t, validateInstallAIProfile(cfg, false), "unsupported ai.provider")
 }
 
 func TestModelWarmerWaitTimeout(t *testing.T) {

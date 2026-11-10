@@ -191,6 +191,7 @@ func setDefaults(k *koanf.Koanf) {
 		Project:      "quartz",
 		Chart:        schema.ChartConfig{Path: filepath.Join(pwd, "chart")},
 		Providers:    providers,
+		AI:           schema.DefaultAIConfig(),
 		Tofu:         schema.NewTofuConfig(),
 		Auth:         schema.DefaultAuthConfig(),
 		Gitops:       schema.DefaultGitopsConfig(providers.SourceControl),

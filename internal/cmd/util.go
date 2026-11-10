@@ -665,7 +665,13 @@ func CheckInstallReadiness(ctx context.Context, p *CommandParams) error {
 
 	progress, progressErr := k8s.ClusterProgressSnapshot(ctx)
 	appDelivery, appDeliveryOK, appDeliveryErr := readAppDeliveryReadiness(ctx, k8s)
-	modelWarmer, modelWarmerOK, modelWarmerErr := readModelWarmerStatus(ctx, k8s)
+	aiProvider := strings.ToLower(strings.TrimSpace(p.Settings().Config.AI.Provider))
+	var modelWarmer modelWarmerStatus
+	var modelWarmerOK bool
+	var modelWarmerErr error
+	if aiProvider == "ollama" {
+		modelWarmer, modelWarmerOK, modelWarmerErr = readModelWarmerStatus(ctx, k8s)
+	}
 
 	rows := [][]string{}
 
@@ -696,24 +702,35 @@ func CheckInstallReadiness(ctx context.Context, p *CommandParams) error {
 		rows = append(rows, []string{"App delivery bootstrap", value, status, truncateDetail(detail, 80)})
 	}
 
-	switch {
-	case modelWarmerErr != nil:
-		rows = append(rows, []string{"Ollama model warming", "-", "Unavailable", truncateDetail(modelWarmerErr.Error(), 80)})
-	case !modelWarmerOK:
-		rows = append(rows, []string{"Ollama model warming", "-", "Pending", "Model warmer status not published yet"})
-	default:
-		status := "OK"
-		if strings.EqualFold(modelWarmer.Phase, "failed") {
-			status = "Errors"
-		} else if !strings.EqualFold(modelWarmer.Phase, "succeeded") && !modelWarmer.PersistentReady {
-			status = "Waiting"
+	if aiProvider == "ollama" {
+		switch {
+		case modelWarmerErr != nil:
+			rows = append(rows, []string{"Ollama model warming", "-", "Unavailable", truncateDetail(modelWarmerErr.Error(), 80)})
+		case !modelWarmerOK:
+			rows = append(rows, []string{"Ollama model warming", "-", "Pending", "Model warmer status not published yet"})
+		default:
+			status := "OK"
+			if strings.EqualFold(modelWarmer.Phase, "failed") {
+				status = "Errors"
+			} else if !strings.EqualFold(modelWarmer.Phase, "succeeded") && !modelWarmer.PersistentReady {
+				status = "Waiting"
+			}
+			rows = append(rows, []string{
+				"Ollama model warming",
+				modelWarmerReadinessSummary(modelWarmer),
+				status,
+				truncateDetail(modelWarmerProgress(modelWarmer), 80),
+			})
 		}
+	} else if aiProvider == "bedrock" {
 		rows = append(rows, []string{
-			"Ollama model warming",
-			modelWarmerReadinessSummary(modelWarmer),
-			status,
-			truncateDetail(modelWarmerProgress(modelWarmer), 80),
+			"AI model warming",
+			"not required",
+			"Not required",
+			"Bedrock profile; runtime inference is validated separately",
 		})
+	} else {
+		return fmt.Errorf("unsupported ai.provider %q", p.Settings().Config.AI.Provider)
 	}
 
 	util.PrintRowStatusTable(
@@ -722,6 +739,8 @@ func CheckInstallReadiness(ctx context.Context, p *CommandParams) error {
 		func(_ int, row []string) util.RowStatus {
 			switch row[2] {
 			case "OK":
+				return util.StatusOk
+			case "Not required":
 				return util.StatusOk
 			case "Waiting":
 				return util.StatusWarning

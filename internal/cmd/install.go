@@ -23,7 +23,6 @@ import (
 	"os"
 	"path/filepath"
 	"slices"
-	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -133,6 +132,10 @@ func NewRootCleanCommand(p *CommandParams) RootCommandResult {
 func Install(ctx context.Context, p *CommandParams, resumeFrom string) (err error) {
 	log.Debug("Entering", "command", "install")
 	defer log.Debug("Completed", "command", "install")
+
+	if err = validateInstallAIProfile(p.Settings().Config, p.waitForModels); err != nil {
+		return err
+	}
 
 	Banner()
 
@@ -335,7 +338,7 @@ func Install(ctx context.Context, p *CommandParams, resumeFrom string) (err erro
 		return err
 	}
 
-	if !installWaitForModels(p) {
+	if strings.EqualFold(p.Settings().Config.AI.Provider, "ollama") && !installWaitForModels(p) {
 		stepStart = time.Now()
 		if !p.Settings().Config.Internal.Installer.Summary.Enabled {
 			ReportModelWarmerStatus(ctx, p)
@@ -353,6 +356,28 @@ func validateInstallCredentials(cfg schema.QuartzConfig, secrets schema.QuartzSe
 	}
 	if strings.TrimSpace(secrets.Github.Username) == "" || strings.TrimSpace(secrets.Github.Token) == "" {
 		return fmt.Errorf("install preflight: GitHub username and token are required for GitOps and registry delivery; supply --secrets or GITHUB_USERNAME/GITHUB_TOKEN before provisioning")
+	}
+	return nil
+}
+
+func validateInstallAIProfile(cfg schema.QuartzConfig, waitForModels bool) error {
+	switch strings.ToLower(strings.TrimSpace(cfg.AI.Provider)) {
+	case "bedrock":
+		if waitForModels {
+			return fmt.Errorf("--wait-for-models is only supported with ai.provider: ollama")
+		}
+		if strings.TrimSpace(cfg.AI.Bedrock.InferenceProfile) == "" ||
+			strings.TrimSpace(cfg.AI.Bedrock.FoundationModel) == "" ||
+			(strings.TrimSpace(cfg.AI.Bedrock.Region) == "" && strings.TrimSpace(cfg.Aws.Region) == "") ||
+			len(cfg.AI.Bedrock.DestinationRegions) == 0 {
+			return fmt.Errorf("ai.provider: bedrock requires an inference profile, foundation model, source region, and destination regions")
+		}
+	case "ollama":
+		if !waitForModels {
+			return fmt.Errorf("ai.provider: ollama requires quartz install --wait-for-models")
+		}
+	default:
+		return fmt.Errorf("unsupported ai.provider %q; expected bedrock or ollama", cfg.AI.Provider)
 	}
 	return nil
 }
@@ -827,15 +852,7 @@ func waitForModelWarmerIfRequested(ctx context.Context, p *CommandParams) error 
 }
 
 func installWaitForModels(p *CommandParams) bool {
-	if p != nil && p.waitForModels {
-		return true
-	}
-	raw := strings.TrimSpace(os.Getenv("QUARTZ_WAIT_FOR_MODELS"))
-	if raw == "" {
-		return false
-	}
-	enabled, err := strconv.ParseBool(raw)
-	return err == nil && enabled
+	return p != nil && p.waitForModels
 }
 
 func modelWarmerWaitTimeout() time.Duration {
