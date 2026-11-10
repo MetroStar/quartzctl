@@ -87,7 +87,9 @@ func (c *TofuClient) Init(ctx context.Context, stage schema.StageConfig, opts To
 	if err != nil {
 		return err
 	}
-	c.setStageEnv(tf, stage)
+	if err := c.setStageEnv(tf, stage); err != nil {
+		return err
+	}
 	return tf.Init(ctx, args...)
 }
 
@@ -148,7 +150,9 @@ func (c *TofuClient) Plan(ctx context.Context, stage schema.StageConfig, opts ..
 	if len(opts) > 0 && opts[0].OutFile != "" {
 		vars = append(vars, tfexec.Out(opts[0].OutFile))
 	}
-	c.setStageEnv(tf, stage)
+	if err := c.setStageEnv(tf, stage); err != nil {
+		return false, err
+	}
 	return tf.Plan(ctx, vars...)
 }
 
@@ -183,7 +187,9 @@ func (c *TofuClient) Apply(ctx context.Context, stage schema.StageConfig, opts .
 		if opts[0].AllowDeferral || len(opts[0].Targets) > 0 {
 			return fmt.Errorf("saved plan apply cannot be combined with deferral or target options")
 		}
-		c.setStageEnv(tf, stage)
+		if err := c.setStageEnv(tf, stage); err != nil {
+			return err
+		}
 		return tf.Apply(ctx, tfexec.DirOrPlan(opts[0].PlanFile))
 	}
 
@@ -216,7 +222,9 @@ func (c *TofuClient) Apply(ctx context.Context, stage schema.StageConfig, opts .
 		}
 	}
 
-	c.setStageEnv(tf, stage)
+	if err := c.setStageEnv(tf, stage); err != nil {
+		return err
+	}
 
 	return tf.Apply(ctx, vars...)
 }
@@ -272,6 +280,9 @@ func (c *TofuClient) Destroy(ctx context.Context, stage schema.StageConfig) erro
 		vars = append(vars, tfexec.Target(t))
 	}
 
+	if err := c.setStageEnv(tf, stage); err != nil {
+		return err
+	}
 	if len(excludes) > 0 {
 		args := []string{"destroy", "-auto-approve", "-input=false", "-no-color", "-refresh=false", "-lock-timeout=10s"}
 		if !stage.OverrideVars {
@@ -299,7 +310,6 @@ func (c *TofuClient) Destroy(ctx context.Context, stage schema.StageConfig) erro
 		return nil
 	}
 
-	c.setStageEnv(tf, stage)
 	return tf.Destroy(ctx, vars...)
 }
 
@@ -320,7 +330,9 @@ func (c *TofuClient) Refresh(ctx context.Context, stage schema.StageConfig) erro
 	if err != nil {
 		return err
 	}
-	c.setStageEnv(tf, stage)
+	if err := c.setStageEnv(tf, stage); err != nil {
+		return err
+	}
 
 	stageVarFile, cleanup, err := c.stageVarFile(ctx, stage)
 	if err != nil {
@@ -377,14 +389,18 @@ func (c *TofuClient) Output(ctx context.Context, stage schema.StageConfig) (map[
 }
 
 // setStageEnv sets the environment variables for the OpenTofu process based on the stage configuration.
-func (c *TofuClient) setStageEnv(tf *tfexec.Terraform, stage schema.StageConfig) {
+func (c *TofuClient) setStageEnv(tf *tfexec.Terraform, stage schema.StageConfig) error {
 	if err := tf.SetEnv(c.stageEnv(stage)); err != nil {
-		log.Warn("Failed to set tofu environment", "stage", stage, "err", err)
+		return fmt.Errorf("configure OpenTofu environment for stage %s: %w", stage.Id, err)
 	}
+	return nil
 }
 
 func (c *TofuClient) stageEnv(stage schema.StageConfig) map[string]string {
 	env := util.OsEnvMap()
+	// terraform-exec supplies these itself and rejects them in SetEnv.
+	delete(env, "TF_INPUT")
+	delete(env, "TF_IN_AUTOMATION")
 
 	if stage.Providers.Kubernetes {
 		env = util.MergeMaps(env, map[string]string{
@@ -422,7 +438,9 @@ func (c *TofuClient) ForceUnlock(ctx context.Context, stage schema.StageConfig, 
 	if err != nil {
 		return err
 	}
-	c.setStageEnv(tf, stage)
+	if err := c.setStageEnv(tf, stage); err != nil {
+		return err
+	}
 	return tf.ForceUnlock(ctx, lockID)
 }
 
@@ -452,7 +470,9 @@ func (c *TofuClient) Import(ctx context.Context, stage schema.StageConfig, addre
 		opts = append(opts, tfexec.VarFile(stageVarFile))
 	}
 
-	c.setStageEnv(tf, stage)
+	if err := c.setStageEnv(tf, stage); err != nil {
+		return err
+	}
 	return tf.Import(ctx, address, id, opts...)
 }
 
@@ -525,7 +545,9 @@ func (c *TofuClient) StateRemoveOrphanedClusterResources(ctx context.Context, st
 	if err != nil {
 		return 0, err
 	}
-	c.setStageEnv(tf, stage)
+	if err := c.setStageEnv(tf, stage); err != nil {
+		return 0, err
+	}
 
 	removed := 0
 	for _, addr := range addresses {
@@ -645,7 +667,9 @@ func (c *TofuClient) StateRemove(ctx context.Context, stage schema.StageConfig, 
 	if err != nil {
 		return err
 	}
-	c.setStageEnv(tf, stage)
+	if err := c.setStageEnv(tf, stage); err != nil {
+		return err
+	}
 
 	var firstErr error
 	for _, addr := range addresses {
@@ -690,7 +714,9 @@ func (c *TofuClient) getTfQuiet(stage schema.StageConfig) (*tfexec.Terraform, er
 	if err != nil {
 		return nil, err
 	}
-	c.setStageEnv(tf, stage)
+	if err := c.setStageEnv(tf, stage); err != nil {
+		return nil, err
+	}
 	return tf, nil
 }
 

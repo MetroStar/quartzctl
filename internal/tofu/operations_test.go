@@ -15,12 +15,107 @@
 package tofu
 
 import (
+	"context"
 	"encoding/json"
+	"os"
+	"path/filepath"
 	"reflect"
+	"strings"
+	"sync"
 	"testing"
 
+	"github.com/MetroStar/quartzctl/internal/config"
+	"github.com/MetroStar/quartzctl/internal/config/schema"
+	"github.com/hashicorp/terraform-exec/tfexec"
 	tfjson "github.com/hashicorp/terraform-json"
 )
+
+func TestStageEnvPreservesKubeconfigWithManagedAutomationVariables(t *testing.T) {
+	dir := t.TempDir()
+	capture := filepath.Join(dir, "environment")
+	binary := filepath.Join(dir, "tofu")
+	script := `#!/bin/sh
+printf '%s\n' "$KUBE_CONFIG_PATH" "$TF_PLUGIN_CACHE_DIR" "$STAGE_PROBE" > "$ENV_CAPTURE"
+printf '{"terraform_version":"1.13.1","platform":"linux_amd64","provider_selections":{}}'
+`
+	if err := os.WriteFile(binary, []byte(script), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("TF_INPUT", "0")
+	t.Setenv("TF_IN_AUTOMATION", "1")
+	t.Setenv("STAGE_PROBE", "preserved")
+	t.Setenv("ENV_CAPTURE", capture)
+	client := TofuClient{cfg: config.Settings{Config: schema.QuartzConfig{Tmp: dir}}}
+	tf, err := tfexec.NewTerraform(dir, binary)
+	if err != nil {
+		t.Fatal(err)
+	}
+	stage := schema.StageConfig{Id: "prereqs", Providers: schema.StageProvidersConfig{Kubernetes: true}}
+	if err := client.setStageEnv(tf, stage); err != nil {
+		t.Fatal(err)
+	}
+	if _, _, err := tf.Version(context.Background(), true); err != nil {
+		t.Fatal(err)
+	}
+	got, err := os.ReadFile(capture)
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := strings.Join([]string{filepath.Join(dir, "kubeconfig"), filepath.Join(dir, "plugin-cache"), "preserved", ""}, "\n")
+	if string(got) != want {
+		t.Fatalf("provider environment = %q, want %q", got, want)
+	}
+}
+
+func TestStageEnvRejectsOtherManagedVariablesExplicitly(t *testing.T) {
+	t.Setenv("TF_WORKSPACE", "unexpected")
+	client := TofuClient{cfg: config.Settings{Config: schema.QuartzConfig{Tmp: t.TempDir()}}}
+	tf, err := tfexec.NewTerraform(t.TempDir(), "/bin/true")
+	if err != nil {
+		t.Fatal(err)
+	}
+	err = client.setStageEnv(tf, schema.StageConfig{Id: "prereqs"})
+	if err == nil || !strings.Contains(err.Error(), "prereqs") || !strings.Contains(err.Error(), "TF_WORKSPACE") {
+		t.Fatalf("expected actionable stage environment error, got %v", err)
+	}
+}
+
+func TestStageOperationsStopOnEnvironmentConfigurationError(t *testing.T) {
+	t.Setenv("TF_WORKSPACE", "unexpected")
+	ctx := context.Background()
+	dir := t.TempDir()
+	stage := schema.StageConfig{Id: "prereqs", Path: dir}
+	client := TofuClient{
+		cfg:      config.Settings{Config: schema.QuartzConfig{Tmp: dir}},
+		execPath: "/bin/false", cacheMu: &sync.Mutex{},
+		clientCache: make(map[string]*tfexec.Terraform),
+	}
+	operations := map[string]func() error{
+		"init":       func() error { return client.Init(ctx, stage, TofuInitOpts{}) },
+		"plan":       func() error { _, err := client.Plan(ctx, stage); return err },
+		"apply":      func() error { return client.Apply(ctx, stage) },
+		"saved plan": func() error { return client.Apply(ctx, stage, TofuApplyOpts{PlanFile: "saved.plan"}) },
+		"destroy":    func() error { return client.Destroy(ctx, stage) },
+		"refresh":    func() error { return client.Refresh(ctx, stage) },
+		"unlock":     func() error { return client.ForceUnlock(ctx, stage, "lock-id") },
+		"import":     func() error { return client.Import(ctx, stage, "resource.example", "id") },
+		"remove":     func() error { return client.StateRemove(ctx, stage, "resource.example") },
+		"output":     func() error { _, err := client.Output(ctx, stage); return err },
+		"state list": func() error { _, err := client.StateList(ctx, stage); return err },
+		"orphan cleanup": func() error {
+			_, err := client.StateRemoveOrphanedClusterResources(ctx, stage)
+			return err
+		},
+	}
+	for name, operation := range operations {
+		t.Run(name, func(t *testing.T) {
+			err := operation()
+			if err == nil || !strings.Contains(err.Error(), "TF_WORKSPACE") {
+				t.Fatalf("expected environment configuration failure before subprocess execution, got %v", err)
+			}
+		})
+	}
+}
 
 func TestExtractLockID(t *testing.T) {
 	tests := []struct {

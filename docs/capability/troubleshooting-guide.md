@@ -154,6 +154,14 @@ Fixes:
 - Confirm the `quartz` binary is on `PATH`; kubeconfig exec uses the CLI to mint EKS tokens.
 - Confirm AWS region and cluster name match the rendered config.
 
+If OpenTofu contacts `localhost:80` while `kubectl` works, check the stage's
+provider environment. Quartz removes inherited `TF_INPUT` and `TF_IN_AUTOMATION`
+before configuring terraform-exec, which manages those values itself. Previously
+either variable could reject the entire environment, dropping `KUBE_CONFIG_PATH`
+and the plugin cache. Other unsupported managed variables now produce an
+explicit stage configuration error rather than proceeding with default settings;
+use Quartz configuration and command options instead.
+
 ## 6 - State Lock, Missing State, Or Bad State Entry
 
 Symptoms:
