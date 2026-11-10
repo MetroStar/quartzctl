@@ -27,6 +27,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/MetroStar/quartzctl/internal/config"
 	"github.com/MetroStar/quartzctl/internal/config/schema"
 	"github.com/MetroStar/quartzctl/internal/log"
 	"github.com/MetroStar/quartzctl/internal/provider"
@@ -103,10 +104,36 @@ func NewRootRenderCommand(p *CommandParams) RootCommandResult {
 			Usage: "Write fully rendered yaml config",
 			Flags: []cli.Flag{
 				&cli.StringFlag{Name: "out", Aliases: []string{"o"}, Usage: "output path", Value: "./out/quartz.generated.yaml"},
+				&cli.BoolFlag{Name: "redacted", Usage: "mask credentials and opaque extensions without loading secrets"},
 			},
 			Action: func(ctx context.Context, ccmd *cli.Command) error {
 				path := ccmd.String("out")
+				if ccmd.Bool("redacted") {
+					return RenderRedacted(ctx, path, p)
+				}
 				return Render(ctx, path, p)
+			},
+		},
+	}
+}
+
+func NewRootSchemaCommand() RootCommandResult {
+	return RootCommandResult{
+		Command: &cli.Command{
+			Name:  "schema",
+			Usage: "Write editor JSON Schema for quartz.yaml without resolving providers",
+			Flags: []cli.Flag{
+				&cli.StringFlag{Name: "out", Aliases: []string{"o"}, Usage: "output file in an existing directory", Value: "./quartz.schema.json"},
+			},
+			Action: func(_ context.Context, ccmd *cli.Command) error {
+				data, err := schema.EditorSchema()
+				if err != nil {
+					return fmt.Errorf("generate configuration schema: %w", err)
+				}
+				if err := os.WriteFile(ccmd.String("out"), append(data, '\n'), 0600); err != nil {
+					return fmt.Errorf("write configuration schema: %w", err)
+				}
+				return nil
 			},
 		},
 	}
@@ -214,6 +241,27 @@ func Render(ctx context.Context, path string, p *CommandParams) error {
 
 	util.Msgf("Writing generated Quartz YAML to %s", f)
 	return p.Settings().WriteYamlConfig(f)
+}
+
+// RenderRedacted uses the deployment configuration defaults and overrides but
+// never loads the separate secrets file or resolves credential environment vars.
+func RenderRedacted(ctx context.Context, path string, p *CommandParams) error {
+	k, err := config.LoadRawConfig(ctx, p.configFile)
+	if err != nil {
+		return err
+	}
+	data, err := config.RedactedYAML(k)
+	if err != nil {
+		return fmt.Errorf("redact configuration: %w", err)
+	}
+	if err := os.MkdirAll(filepath.Dir(path), 0700); err != nil {
+		return fmt.Errorf("create redacted configuration directory: %w", err)
+	}
+	if err := os.WriteFile(path, data, 0600); err != nil {
+		return fmt.Errorf("write redacted configuration: %w", err)
+	}
+	util.Msgf("Wrote redacted configuration to %s", path)
+	return nil
 }
 
 // ClusterInfo retrieves and displays information about the Quartz cluster.
