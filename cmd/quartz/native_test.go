@@ -167,4 +167,39 @@ output "result" {
 		t.Fatalf("native destroy retained resources: %s", destroyed["resources"])
 	}
 	run(true, "--config", config, "tofu", "destroy", "--stage", "local")
+	write(filepath.Join(stage, "main.tf"), `resource "terraform_data" "fixture" {
+  input = "native-runtime-verified"
+}
+resource "terraform_data" "retained" {
+  count = 1
+  input = terraform_data.fixture.id
+  lifecycle { prevent_destroy = true }
+}
+resource "terraform_data" "independent" {
+  input = "disposable"
+}
+`)
+	write(filepath.Join(stage, "stage.yaml"), "destroy:\n  exclude: [terraform_data.retained]\n")
+	run(true, "--config", config, "tofu", "apply", "--stage", "local")
+	run(true, "--config", config, "tofu", "destroy", "--stage", "local")
+	retained := state()
+	if err := json.Unmarshal(retained["resources"], &resources); err != nil {
+		t.Fatal(err)
+	}
+	foundRetained := false
+	for _, resource := range resources {
+		var metadata struct {
+			Name string `json:"name"`
+		}
+		if err := json.Unmarshal(resource, &metadata); err != nil {
+			t.Fatal(err)
+		}
+		if metadata.Name == "independent" {
+			t.Fatal("native exclusion prevented destruction of an independent resource")
+		}
+		foundRetained = foundRetained || metadata.Name == "retained"
+	}
+	if !foundRetained {
+		t.Fatal("native exclusion destroyed the protected counted dependent")
+	}
 }
