@@ -786,6 +786,16 @@ func defaultTestConfig(t *testing.T) *CommandParams {
 	return &p
 }
 
+func TestCheckInstallReadinessForAIProviders(t *testing.T) {
+	for _, providerName := range []string{"bedrock", "ollama"} {
+		t.Run(providerName, func(t *testing.T) {
+			p := defaultTestConfig(t)
+			p.Settings().Config.AI.Provider = providerName
+			assert.NoError(t, CheckInstallReadiness(context.Background(), p))
+		})
+	}
+}
+
 func TestOnCheckStart(t *testing.T) {
 	cr := stages.CheckResult{
 		Id:    "test-check-id",

@@ -192,7 +192,7 @@ quartz [command] [flags]
 - `clean`: Perform a full cleanup/teardown of the system. Pass `--yes`/`-y` to skip the confirmation prompt (useful for CI). Cleanup destroys stages in reverse dependency order with at most two stages running simultaneously. A failed dependency wave stops lower waves and preserves the state backend and working directory for recovery.
 - `export`: Export configured Kubernetes resources to yaml.
 - `info`: Output configuration info for the current cluster.
-- `install`: Perform a full install/update of the system. Pass `--resume-from`/`-r` to resume from a stage, `--allow-deferral` to enable OpenTofu deferred actions, and `--yes`/`-y` to skip confirmation prompts.
+- `install`: Perform a full install/update of the system. Pass `--resume-from`/`-r` to resume from a stage, `--allow-deferral` to enable OpenTofu deferred actions, and `--yes`/`-y` to skip confirmation prompts. Bedrock is the default AI provider and does not wait for local models; an Ollama profile requires `--wait-for-models`.
 - `login`: Generate a kubeconfig for the current cluster (`kubeconfig` and `refresh-kubeconfig` aliases).
 - `refresh-secrets`: Trigger all external secrets to be refreshed immediately (`rs` alias).
 - `render`: Write fully rendered configuration to yaml (`--out`/`-o`, default `./out/quartz.generated.yaml`). Use `--redacted` for a credential-masked diagnostic view without loading secrets.

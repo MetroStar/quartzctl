@@ -35,6 +35,7 @@ type QuartzConfig struct {
 	Providers ProvidersConfig `koanf:"providers"`
 	Auth      AuthConfig      `koanf:"auth"`
 	Dns       DnsConfig       `koanf:"dns"`
+	AI        AIConfig        `koanf:"ai"`
 
 	Aws    AwsConfig    `koanf:"aws"`
 	Github GithubConfig `koanf:"github"`

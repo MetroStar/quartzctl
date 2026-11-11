@@ -60,6 +60,7 @@ tmp: %s
 
 		// defaults
 		"tofu.version": "1.12.0",
+		"ai.provider":  "bedrock",
 	}
 	for k, v := range expected {
 		a := actual.Get(k)
