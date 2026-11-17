@@ -133,6 +133,10 @@ func Install(ctx context.Context, p *CommandParams, resumeFrom string) (err erro
 	log.Debug("Entering", "command", "install")
 	defer log.Debug("Completed", "command", "install")
 
+	if err := validateLifecycleStages(p, "install"); err != nil {
+		return err
+	}
+
 	if err = validateInstallAIProfile(p.Settings().Config, p.waitForModels); err != nil {
 		return err
 	}
@@ -1383,6 +1387,10 @@ func Clean(ctx context.Context, p *CommandParams) error {
 	log.Debug("Entering", "command", "clean")
 	defer log.Debug("Completed", "command", "clean")
 
+	if err := validateLifecycleStages(p, "clean"); err != nil {
+		return err
+	}
+
 	Banner()
 
 	err := Confirm(ctx, "Are you sure? This action will destroy the Quartz cluster, including all managed resources and data.", p)
@@ -1559,6 +1567,13 @@ func Clean(ctx context.Context, p *CommandParams) error {
 		return fmt.Errorf("%d stage(s) failed to destroy cleanly", len(destroyErrors))
 	}
 
+	return nil
+}
+
+func validateLifecycleStages(p *CommandParams, operation string) error {
+	if len(p.Settings().Config.StagesOrdered()) == 0 {
+		return fmt.Errorf("no OpenTofu stages configured; refusing to %s", operation)
+	}
 	return nil
 }
 

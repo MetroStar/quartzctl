@@ -118,6 +118,15 @@ func TestCmdInstall(t *testing.T) {
 	}
 }
 
+func TestCmdInstallRejectsEmptyStageSet(t *testing.T) {
+	p := defaultTestConfig(t)
+	p.Settings().Config.Stages = map[string]configschema.StageConfig{}
+
+	err := Install(context.Background(), p, "")
+
+	assert.EqualError(t, err, "no OpenTofu stages configured; refusing to install")
+}
+
 func TestCmdClean(t *testing.T) {
 	p := defaultTestConfig(t)
 
@@ -125,6 +134,15 @@ func TestCmdClean(t *testing.T) {
 	if err != nil {
 		t.Errorf("unexpected error in cmd Clean, %v", err)
 	}
+}
+
+func TestCmdCleanRejectsEmptyStageSet(t *testing.T) {
+	p := defaultTestConfig(t)
+	p.Settings().Config.Stages = map[string]configschema.StageConfig{}
+
+	err := Clean(context.Background(), p)
+
+	assert.EqualError(t, err, "no OpenTofu stages configured; refusing to clean")
 }
 
 func TestRunCleanupStagesBoundsConcurrencyWithoutDroppingStages(t *testing.T) {
