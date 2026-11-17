@@ -72,12 +72,11 @@ func (c *TofuClient) Version(ctx context.Context) (string, error) {
 }
 
 // Init initializes the OpenTofu working directory for the specified stage.
-// It runs `tofu init -upgrade -reconfigure` with the provided backend configuration options.
+// It runs `tofu init -reconfigure` with the provided backend configuration options.
 func (c *TofuClient) Init(ctx context.Context, stage schema.StageConfig, opts TofuInitOpts) error {
 	log.Debug("tofu init", "stage", stage)
 
 	var args []tfexec.InitOption
-	args = append(args, tfexec.Upgrade(true))
 	args = append(args, tfexec.Reconfigure(true))
 	for _, bc := range opts.BackendConfig {
 		args = append(args, tfexec.BackendConfig(bc))
