@@ -23,11 +23,13 @@ import (
 	"path/filepath"
 	"runtime"
 	"strings"
+	"sync"
 	"testing"
 
 	"github.com/MetroStar/quartzctl/internal/config"
 	"github.com/MetroStar/quartzctl/internal/config/schema"
 	"github.com/MetroStar/quartzctl/internal/log"
+	"github.com/hashicorp/terraform-exec/tfexec"
 	"github.com/knadh/koanf/v2"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -114,6 +116,34 @@ func TestTofuInit(t *testing.T) {
 	if err != nil {
 		t.Errorf("unexpected error from tofu init, %v", err)
 	}
+}
+
+func TestTofuInitPreservesProviderSelection(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("fake tofu executable uses a POSIX shell")
+	}
+
+	tmp := t.TempDir()
+	argsPath := filepath.Join(tmp, "init-args.txt")
+	fakeTofu := filepath.Join(tmp, "tofu")
+	script := "#!/bin/sh\nprintf '%s\\n' \"$@\" > \"$TOFU_INIT_ARGS\"\n"
+	require.NoError(t, os.WriteFile(fakeTofu, []byte(script), 0o700))
+	t.Setenv("TOFU_INIT_ARGS", argsPath)
+
+	client := TofuClient{
+		execPath: fakeTofu,
+		cfg: config.Settings{
+			Config: schema.QuartzConfig{Tmp: tmp},
+		},
+		cacheMu:     &sync.Mutex{},
+		clientCache: make(map[string]*tfexec.Terraform),
+	}
+	require.NoError(t, client.Init(context.Background(), schema.StageConfig{Path: tmp}, TofuInitOpts{}))
+
+	args, err := os.ReadFile(argsPath)
+	require.NoError(t, err)
+	assert.Contains(t, strings.Fields(string(args)), "-reconfigure")
+	assert.NotContains(t, strings.Fields(string(args)), "-upgrade")
 }
 
 func TestTofuValidate(t *testing.T) {
