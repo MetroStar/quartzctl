@@ -24,9 +24,22 @@ jobs:
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
+      # semantic-release succeeds without tagging when no commit warrants a
+      # release, so only dispatch for a tag it created on this commit.
+      - name: Resolve release tag
+        id: release_tag
+        run: |
+          tag="$(git tag --points-at HEAD --list 'v*' | sort -V | tail -n 1)"
+          echo "tag=${tag}" >> "$GITHUB_OUTPUT"
+          if [ -z "$tag" ]; then
+            echo "No release tag on ${GITHUB_SHA}; skipping the Release workflow."
+          fi
+
       - name: Trigger Workflow
         uses: actions/github-script@v7
-        if: success()
+        if: steps.release_tag.outputs.tag != ''
+        env:
+          RELEASE_TAG: ${{ steps.release_tag.outputs.tag }}
         with:
           github-token: ${{ secrets.GITHUB_TOKEN }}
           script: |
@@ -34,5 +47,5 @@ jobs:
               owner: context.repo.owner,
               repo: context.repo.repo,
               workflow_id: 'release.yaml',
-              ref: 'main',
+              ref: process.env.RELEASE_TAG,
             })

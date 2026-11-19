@@ -5,6 +5,8 @@ on:
 
 jobs:
   release:
+    # GoReleaser publishes only a tagged commit; dispatch this from a v* tag.
+    if: github.ref_type == 'tag' && startsWith(github.ref_name, 'v')
     permissions:
       actions: read
       contents: write
