@@ -28,33 +28,45 @@ Please start by searching for existing [issues](https://github.com/MetroStar/qua
    cd quartzctl
    ```
 
-2. **Install dependencies**:
+2. **Install the declared toolchain** with [mise](https://mise.jdx.dev/):
    ```bash
-   go mod tidy
+   mise install
    ```
 
-3. Install [taskfile](https://taskfile.dev/installation):
+3. **Download dependencies** without rewriting the manifests:
 
    ```bash
-   sh -c "$(curl --location https://taskfile.dev/install.sh)" -- -d
+   mise exec -- go mod download
    ```
 
-4. **Build the CLI**:
+4. **Build the CLI without release-signing credentials**:
    ```bash
-   task build
+   mkdir -p bin
+   mise exec -- go build -o ./bin/quartz ./cmd/quartz
+   ./bin/quartz --version
    ```
+   On Windows, use `./bin/quartz.exe` for the output and executable.
+   Development builds report development metadata, not a release version.
 
 5. **Run tests**:
    ```bash
-   task test
+   mise run test
    ```
 
 6. **Run linter (required)**:
    ```bash
-   task lint
+   mise run lint
    ```
 
 ---
+
+The tasks are defined in [mise.toml](mise.toml); there is no Taskfile.
+`mise run build` wraps GoReleaser and attempts binary signing even in snapshot
+mode. It currently needs a configured private GPG key; use the direct Go build
+above for ordinary contribution. Never copy release signing keys to work around
+this local-build requirement.
+`mise run deploy` also replaces local installed executables and may use sudo;
+it is not needed for a normal build/test workflow.
 
 ## 🧪 Pull Request (PR) Process
 
@@ -103,6 +115,26 @@ We follow the [Conventional Commits](https://www.conventionalcommits.org/en/v1.0
 - `docs: update usage examples in README.md`
 
 PRs that do not follow this format may be asked to rebase before being merged.
+
+### Release workflow
+
+Merge reviewed changes to `main` through a PR. The
+[Tag Version workflow](.github/workflows/tag.yaml) runs semantic-release and
+dispatches [Release](.github/workflows/release.yaml) only when a `v*` tag points
+at that exact commit. Documentation-only commits may legitimately produce no
+new tag and no release. An older tag on an ancestor is not a release of HEAD.
+
+For an authorized release retry, verify the existing tag/revision and dispatch
+Release **from that tag**, never from `main`:
+
+```bash
+gh workflow run release.yaml --repo MetroStar/quartzctl --ref v1.8.0
+```
+
+Replace the example with the intended existing tag. Do not retag an existing
+release or rerun untagged historical failures. The release job rejects branch
+refs. Confirm the new workflow result and published assets; a successful tag
+workflow alone does not prove a release was published.
 
 ---
 

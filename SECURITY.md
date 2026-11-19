@@ -47,7 +47,9 @@ All contributors are expected to:
 - Follow secure coding practices (e.g., input validation, error handling).
 - Avoid introducing hardcoded secrets or credentials.
 - Ensure dependencies are up-to-date and do not introduce known vulnerabilities.
-- Use signed commits (`git commit -s`) and follow the [CONTRIBUTING.md](./CONTRIBUTING.md) guidelines.
+- Use DCO signoffs (`git commit -s`) and follow the [CONTRIBUTING.md](./CONTRIBUTING.md)
+  guidelines. A signoff is not a cryptographic signature; use `git commit -S`
+  when cryptographic commit signing is required.
 - Run and pass all static analysis, lint, and vulnerability scanning tools included in the CI pipeline.
 
 ---
@@ -66,7 +68,23 @@ We are working toward full [OpenSSF Scorecard](https://github.com/ossf/scorecard
 
 ## GPG Key & Signing
 
-Future releases may be cryptographically signed. Details will be published here when that process is in place.
+The [release workflow](.github/workflows/release.yaml) imports the maintainers'
+GPG key. [GoReleaser](.goreleaser.yaml) publishes platform archives, checksums,
+SBOMs and detached signatures. Download the archive for your OS/architecture,
+not a signature asset that happens to resemble a binary name.
+
+1. Select the reviewed release tag and its corresponding archive.
+2. Obtain and verify the maintainer signing-key fingerprint through a trusted
+   channel; do not trust an arbitrary key merely because it accompanies a download.
+3. Use `gpg --verify <signature> <artifact>` on the checksum file and archive,
+   using the actual asset names from that release.
+4. Compare the archive's SHA-256 with the authenticated checksum entry, then
+   extract the executable.
+
+A matching unsigned checksum only detects corruption, not authenticity.
+If the signing key cannot be authenticated, record that limitation rather than
+claiming a verified release signature. Checksums/signatures also do not replace
+review of the release revision or vulnerability findings.
 
 ---
 
