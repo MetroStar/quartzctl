@@ -125,11 +125,12 @@ Fixes:
   operator signal after a nominal install. It reports whether Flux is fully
   converged, whether app-delivery bootstrap is complete, and whether Ollama is
   still persisting or GPU-warming models.
-- On AI-enabled clusters, distinguish `quartz install` finishing from Ollama
-  model warming finishing. If the CLI says the model store is ready, the models
+- The default Bedrock profile has no local model-warming dependency. For an
+  explicitly selected Ollama profile, distinguish durable model storage from
+  best-effort GPU warm-up. If the CLI says the model store is ready, the models
   are already durable on the PVC even when GPU warm-up is still running in the
   background. Use `quartz install --wait-for-models` when you want the CLI to
-  block until the warmer completes.
+  block on the required model readiness contract.
 
 ## 5 - `kubectl` Unauthorized Or Kubeconfig Missing
 
