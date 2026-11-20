@@ -20,8 +20,78 @@ import (
 	"os"
 	"path"
 	"path/filepath"
+	"slices"
 	"testing"
+
+	"github.com/MetroStar/quartzctl/internal/config/schema"
 )
+
+func TestLoadedConfigFiltersOnlyExplicitlyDisabledOidcChecks(t *testing.T) {
+	for _, disabled := range []bool{true, false} {
+		t.Run(fmt.Sprintf("disabled=%t", disabled), func(t *testing.T) {
+			tmp := t.TempDir()
+			stageDir := filepath.Join(tmp, "stages", "41-keycloak")
+			if err := os.MkdirAll(stageDir, 0700); err != nil {
+				t.Fatal(err)
+			}
+			stage := `
+checks:
+  clients:
+    after: [apply]
+    oidc:
+    - app: kiali
+      secret_path: missing.json
+    - app: sonarqube
+    - app: custom-unconfigured-app
+`
+			if err := os.WriteFile(filepath.Join(stageDir, "stage.yaml"), []byte(stage), 0600); err != nil {
+				t.Fatal(err)
+			}
+			source := fmt.Sprintf(`
+name: test
+dns:
+  zone: example.invalid
+providers:
+  cloud: local
+tmp: %q
+stage_paths: [%q]
+core:
+  applications:
+    kiali:
+      disabled: %t
+`, filepath.ToSlash(tmp), filepath.ToSlash(filepath.Dir(stageDir)), disabled)
+			configPath := filepath.Join(tmp, "config.yaml")
+			if err := os.WriteFile(configPath, []byte(source), 0600); err != nil {
+				t.Fatal(err)
+			}
+			raw, err := LoadRawConfig(context.Background(), configPath)
+			if err != nil {
+				t.Fatal(err)
+			}
+			var cfg schema.QuartzConfig
+			if err := raw.Unmarshal("", &cfg); err != nil {
+				t.Fatal(err)
+			}
+			checks := cfg.Stages["keycloak"].Checks["clients"].Oidc
+			var apps []string
+			for _, check := range checks {
+				apps = append(apps, check.App)
+			}
+			if slices.Contains(apps, "kiali") == disabled {
+				t.Fatalf("loaded OIDC probes did not honor disablement: %v", apps)
+			}
+			for _, app := range []string{"sonarqube", "custom-unconfigured-app"} {
+				if !slices.Contains(apps, app) {
+					t.Fatalf("unspecified/unknown application's probe was dropped: %v", apps)
+				}
+			}
+			_, corePresent := cfg.Core.Applications["kiali"]
+			if corePresent == disabled {
+				t.Fatal("existing core application filtering changed")
+			}
+		})
+	}
+}
 
 func TestConfigLoadRawConfig(t *testing.T) {
 	tmp := t.TempDir()

@@ -79,14 +79,14 @@ func LoadRawConfig(ctx context.Context, configFile string) (*koanf.Koanf, error)
 	}
 
 	setGitopsDefaults(k)
-	setCoreDefaults(k)
+	disabledCoreApps := setCoreDefaults(k)
 	if err := setAppDefaults(k); err != nil {
 		return nil, err
 	}
 	setAuthDefaults(k)
 
 	// parse stages
-	loadStages(k)
+	loadStages(k, disabledCoreApps)
 
 	// Second pass of environment variables to ensure precedence
 	loadDefaultEnvironment(k)
@@ -281,9 +281,10 @@ func setGitopsDefaults(k *koanf.Koanf) {
 
 // setCoreDefaults sets default values for core infrastructure applications.
 // It disables Grafana-related applications if Grafana is not the selected monitoring provider.
-func setCoreDefaults(k *koanf.Koanf) {
+func setCoreDefaults(k *koanf.Koanf) []string {
 	apps := make(map[string]schema.InfrastructureApplicationConfig)
 	k.Unmarshal("core.applications", &apps)
+	var disabledApps []string
 
 	grafanaApps := []string{"grafana", "tempo", "loki", "alertmanager"}
 	grafanaEnabled := k.String("providers.monitoring") == "grafana"
@@ -294,6 +295,7 @@ func setCoreDefaults(k *koanf.Koanf) {
 
 		// if it's been manually disabled, remove it from the apps list
 		if app.Disabled {
+			disabledApps = append(disabledApps, key)
 			k.Delete(fullKey)
 			continue
 		}
@@ -307,6 +309,7 @@ func setCoreDefaults(k *koanf.Koanf) {
 		// monitoring stack, so remove it from the config
 		k.Delete(fullKey)
 	}
+	return disabledApps
 }
 
 // setAppDefaults sets default values for application configurations.
@@ -525,7 +528,7 @@ func setAuthDefaults(k *koanf.Koanf) {
 
 // loadStages parses stage configurations from directories and `stage.yaml` files.
 // It merges the parsed stages with the existing configuration.
-func loadStages(k *koanf.Koanf) {
+func loadStages(k *koanf.Koanf, disabledCoreApps []string) {
 	stg := make(map[string]schema.StageConfig)
 	err := k.Unmarshal("stages", &stg)
 	if err != nil {
@@ -539,6 +542,17 @@ func loadStages(k *koanf.Koanf) {
 			// TODO: this won't work if a dependent stage is disabled, need something more robust
 			k.Delete("stages." + key)
 			continue
+		}
+
+		for group, checks := range s.Checks {
+			checks.Oidc = slices.DeleteFunc(checks.Oidc, func(check schema.StageChecksOidcConfig) bool {
+				if !slices.Contains(disabledCoreApps, check.App) {
+					return false
+				}
+				log.Info("Skipping OIDC validation for explicitly disabled core application", "app", check.App, "stage", key)
+				return true
+			})
+			s.Checks[group] = checks
 		}
 
 		k2 := koanf.New(".")
