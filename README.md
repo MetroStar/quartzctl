@@ -398,6 +398,13 @@ destroy:
 
 See the included [samples](./docs/samples/) for more details.
 
+OIDC stage checks honor explicit `core.applications.<app>.disabled: true`:
+Quartz logs a skip without resolving that application's credentials or
+contacting its token endpoint. Re-enabling the application restores the check.
+This applies after directory-defined and inline-only check groups are merged.
+An absent application setting is not a disablement; enabled and unspecified
+applications still require valid credentials and a successful token exchange.
+
 ---
 
 ## 🧪 Development
