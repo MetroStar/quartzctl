@@ -17,6 +17,7 @@ package stages
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -99,6 +100,76 @@ func TestOidcStageCheckRunMissingCredentials(t *testing.T) {
 	sut := OidcStageCheck{App: "argocd"}
 	if err := sut.Run(context.TODO(), schema.QuartzConfig{}); err == nil {
 		t.Error("expected error for missing client_id/client_secret, got nil")
+	}
+}
+
+func TestOidcStageCheckExplicitlyDisabledCoreApp(t *testing.T) {
+	tests := []struct {
+		name string
+		apps map[string]schema.InfrastructureApplicationConfig
+		skip bool
+	}{
+		{name: "disabled", apps: map[string]schema.InfrastructureApplicationConfig{
+			"kiali": {Disabled: true},
+		}, skip: true},
+		{name: "enabled", apps: map[string]schema.InfrastructureApplicationConfig{
+			"kiali": {Disabled: false},
+		}},
+		{name: "unspecified"},
+		{name: "different disabled app", apps: map[string]schema.InfrastructureApplicationConfig{
+			"open-webui": {Disabled: true},
+		}},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			cfg := schema.QuartzConfig{
+				Core:      schema.InfrastructureEnvironmentConfig{Applications: tt.apps},
+				Providers: schema.ProvidersConfig{Secrets: "local"},
+			}
+			check := OidcStageCheck{App: "kiali", SecretPath: filepath.Join(t.TempDir(), "missing.json")}
+			err := check.Run(context.Background(), cfg)
+			if tt.skip && err != nil {
+				t.Fatalf("disabled app must not resolve absent credentials: %v", err)
+			}
+			if !tt.skip && err == nil {
+				t.Fatal("enabled or unspecified app must not skip missing credentials")
+			}
+		})
+	}
+}
+
+func TestOidcStageCheckCoreAppTokenExchange(t *testing.T) {
+	for _, disabled := range []bool{true, false} {
+		t.Run(fmt.Sprintf("disabled=%t", disabled), func(t *testing.T) {
+			called := make(chan struct{}, 1)
+			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				called <- struct{}{}
+				if err := r.ParseForm(); err != nil || r.Form.Get("grant_type") != "client_credentials" {
+					t.Error("expected a client credentials exchange")
+				}
+				_ = json.NewEncoder(w).Encode(map[string]string{"access_token": "test-token"})
+			}))
+			defer server.Close()
+			cfg := schema.QuartzConfig{
+				Core: schema.InfrastructureEnvironmentConfig{
+					Applications: map[string]schema.InfrastructureApplicationConfig{"kiali": {Disabled: disabled}},
+				},
+			}
+			check := OidcStageCheck{App: "kiali", ClientID: "test-client", ClientSecret: "test-secret", TokenURL: server.URL}
+			if err := check.Run(context.Background(), cfg); err != nil {
+				t.Fatalf("core app check failed: %v", err)
+			}
+			select {
+			case <-called:
+				if disabled {
+					t.Fatal("disabled app contacted its token endpoint")
+				}
+			default:
+				if !disabled {
+					t.Fatal("reenabled app did not contact its token endpoint")
+				}
+			}
+		})
 	}
 }
 

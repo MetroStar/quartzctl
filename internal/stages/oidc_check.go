@@ -52,6 +52,11 @@ type OidcStageCheck struct {
 
 // Run executes the OIDC check by performing a client_credentials token exchange.
 func (c OidcStageCheck) Run(ctx context.Context, cfg schema.QuartzConfig) error {
+	if app, ok := cfg.Core.Applications[c.App]; ok && app.Disabled {
+		log.Info("Skipping OIDC validation for explicitly disabled core application", "app", c.App)
+		return nil
+	}
+
 	clientID := c.ClientID
 	clientSecret := c.ClientSecret
 	tokenURL := c.TokenURL
