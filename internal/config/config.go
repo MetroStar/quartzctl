@@ -86,7 +86,9 @@ func LoadRawConfig(ctx context.Context, configFile string) (*koanf.Koanf, error)
 	setAuthDefaults(k)
 
 	// parse stages
-	loadStages(k, disabledCoreApps)
+	if err := loadStages(k, disabledCoreApps); err != nil {
+		return nil, err
+	}
 
 	// Second pass of environment variables to ensure precedence
 	loadDefaultEnvironment(k)
@@ -528,7 +530,7 @@ func setAuthDefaults(k *koanf.Koanf) {
 
 // loadStages parses stage configurations from directories and `stage.yaml` files.
 // It merges the parsed stages with the existing configuration.
-func loadStages(k *koanf.Koanf, disabledCoreApps []string) {
+func loadStages(k *koanf.Koanf, disabledCoreApps []string) error {
 	stg := make(map[string]schema.StageConfig)
 	err := k.Unmarshal("stages", &stg)
 	if err != nil {
@@ -544,6 +546,14 @@ func loadStages(k *koanf.Koanf, disabledCoreApps []string) {
 			continue
 		}
 
+		k2 := koanf.New(".")
+		k2.Load(structs.Provider(s, "koanf"), nil)
+		k.MergeAt(k2, "stages."+key)
+
+		// Directory definitions may leave additional inline-only check groups.
+		if err := k.Unmarshal("stages."+key+".checks", &s.Checks); err != nil {
+			return fmt.Errorf("decode merged checks for stage %q: %w", key, err)
+		}
 		for group, checks := range s.Checks {
 			checks.Oidc = slices.DeleteFunc(checks.Oidc, func(check schema.StageChecksOidcConfig) bool {
 				if !slices.Contains(disabledCoreApps, check.App) {
@@ -555,11 +565,10 @@ func loadStages(k *koanf.Koanf, disabledCoreApps []string) {
 			s.Checks[group] = checks
 		}
 
-		k2 := koanf.New(".")
 		k2.Load(structs.Provider(s, "koanf"), nil)
-
 		k.MergeAt(k2, "stages."+key)
 	}
+	return nil
 }
 
 // initTmpDir initializes the temporary directory for Quartz operations.

@@ -55,6 +55,16 @@ providers:
   cloud: local
 tmp: %q
 stage_paths: [%q]
+stages:
+  keycloak:
+    checks:
+      inline-only:
+        after: [apply]
+        oidc:
+        - app: kiali
+          secret_path: missing.json
+        - app: sonarqube
+        - app: custom-unconfigured-app
 core:
   applications:
     kiali:
@@ -72,17 +82,19 @@ core:
 			if err := raw.Unmarshal("", &cfg); err != nil {
 				t.Fatal(err)
 			}
-			checks := cfg.Stages["keycloak"].Checks["clients"].Oidc
-			var apps []string
-			for _, check := range checks {
-				apps = append(apps, check.App)
-			}
-			if slices.Contains(apps, "kiali") == disabled {
-				t.Fatalf("loaded OIDC probes did not honor disablement: %v", apps)
-			}
-			for _, app := range []string{"sonarqube", "custom-unconfigured-app"} {
-				if !slices.Contains(apps, app) {
-					t.Fatalf("unspecified/unknown application's probe was dropped: %v", apps)
+			for _, group := range []string{"clients", "inline-only"} {
+				checks := cfg.Stages["keycloak"].Checks[group].Oidc
+				var apps []string
+				for _, check := range checks {
+					apps = append(apps, check.App)
+				}
+				if slices.Contains(apps, "kiali") == disabled {
+					t.Fatalf("%s OIDC probes did not honor disablement: %v", group, apps)
+				}
+				for _, app := range []string{"sonarqube", "custom-unconfigured-app"} {
+					if !slices.Contains(apps, app) {
+						t.Fatalf("%s unspecified/unknown application's probe was dropped: %v", group, apps)
+					}
 				}
 			}
 			_, corePresent := cfg.Core.Applications["kiali"]
