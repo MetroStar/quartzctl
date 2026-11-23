@@ -489,6 +489,16 @@ func TestLocalInstallPreflightCompressesOldTofuLogs(t *testing.T) {
 	assert.Equal(t, "quartz-log\n", string(prefix))
 }
 
+func TestIsRetryableApplyErrorECRCreateTagReadRace(t *testing.T) {
+	race := "Error: listing tags for ECR (Elastic Container Registry) Repository " +
+		"(arn:aws:ecr:us-east-1:123456789012:repository/demo-ui): operation error ECR: " +
+		"ListTagsForResource, https response error StatusCode: 400, " +
+		"RepositoryNotFoundException: The repository with name 'demo-ui' does not exist"
+	assert.True(t, isRetryableApplyError(race))
+	assert.False(t, isRetryableApplyError(
+		"Error: reading ECR Repository (demo-ui): RepositoryNotFoundException: The repository does not exist"))
+}
+
 func TestIsRetryableDestroyError(t *testing.T) {
 	tests := []struct {
 		name     string
