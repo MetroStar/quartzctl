@@ -129,15 +129,15 @@ or persisted configuration. Application Jenkinsfiles must use the renamed
 
 ## 📖 Table of Contents
 
-- [Features](#features)
-- [Getting Started](#getting-started)
-- [Usage](#usage)
-- [Configuration](#configuration)
+- [Features](#-features)
+- [Getting Started](#%EF%B8%8F-getting-started)
+- [Usage](#-usage)
+- [Configuration](#%EF%B8%8F-configuration)
 - [Capability Documentation](#capability-documentation)
-- [Development](#development)
-- [Security](#security)
-- [Contributing](#contributing)
-- [License](#license)
+- [Development](#-development)
+- [Security](#-security)
+- [Contributing](#-contributing)
+- [License](#-license)
 
 ---
 
@@ -161,7 +161,9 @@ or persisted configuration. Application Jenkinsfiles must use the renamed
 
 ### Prerequisites
 
-- [Go](https://golang.org/doc/install) version 1.24 or higher
+- For source builds: [Go](https://go.dev/doc/install) as declared in
+  [go.mod](go.mod) (currently 1.26.2), or the [mise toolchain](mise.toml).
+  Release binaries do not require a separate Go installation.
 - [Docker](https://www.docker.com/get-started) (optional, for containerized deployments)
 
 ### Installation
@@ -171,12 +173,29 @@ You can install `quartz` using one of the following methods:
 #### Go Install
 
 ```bash
-go install github.com/MetroStar/quartzctl@latest
+go install github.com/MetroStar/quartzctl/cmd/quartz@latest
 ```
+
+For repeatable inputs, replace `latest` with a reviewed release tag. `go install`
+does not inject GoReleaser's version/build-time flags; use the release archive
+when you need the published version metadata and artifact checksum.
 
 #### Download Binary
 
-Download the latest release from the [Releases](https://github.com/MetroStar/quartzctl/releases) page and add it to your system's PATH.
+Choose an approved tag on the [Releases](https://github.com/MetroStar/quartzctl/releases)
+page (`v1.8.0` was verified for this handoff). Download the platform **archive**:
+Linux/macOS (`darwin`) amd64/arm64 use `.tar.gz`; Windows amd64 uses `.zip`.
+Verify its checksum and signature as described in [SECURITY.md](SECURITY.md),
+extract `quartz` (`quartz.exe` on Windows), and add its directory to `PATH`.
+Raw-looking signature assets are not executable binaries.
+
+```bash
+quartz --version
+```
+
+Version output goes to stderr; capture `2>&1` when recording it. The CLI
+repository is not a platform deployment: run lifecycle commands from a
+configured infrastructure checkout with its stage files and credentials.
 
 ---
 
@@ -233,12 +252,12 @@ quartz [command] [flags]
 quartz --config=quartz.yaml install
 ```
 
-`quartz install` reports cluster success once the HelmRelease convergence gate is
-green. On AI-enabled clusters, Ollama model pulling can continue in the
-background after that point; the CLI now distinguishes between the durable
-model store being ready and the later best-effort GPU warm-up pass. Use
-`quartz install --wait-for-models` when you want the CLI itself to block until
-the desired models are fully persisted.
+`quartz install` reports cluster success once its configured stage/HelmRelease
+gates pass. The default Bedrock profile neither deploys nor waits for local
+models. An explicitly selected Ollama profile requires `--wait-for-models`;
+the CLI distinguishes durable model persistence from best-effort GPU warm-up.
+Neither install success nor model readiness substitutes for application,
+authorization, backup/restore or performance acceptance.
 
 When you just want the short follow-up signal after install, run:
 
@@ -249,6 +268,40 @@ quartz check --install-readiness
 That check keeps the CLI thin while still surfacing the three things operators
 usually care about first: Flux HelmRelease convergence, app-delivery bootstrap,
 and AI model readiness.
+
+### Unattended lifecycle
+
+Use a unique deployment name, an isolated `tmp` directory/backend, explicit
+configuration and verified AWS identity. Resolve relative stage paths from the
+intended infrastructure checkout. On Linux/macOS:
+
+```bash
+CONFIG=/absolute/path/to/isolated-quartz.yaml
+quartz --version 2>&1
+aws sts get-caller-identity
+quartz check --config "$CONFIG"
+quartz render --config "$CONFIG" --redacted --out ./out/quartz.redacted.yaml
+quartz install --config "$CONFIG" --yes </dev/null
+quartz check --config "$CONFIG" --install-readiness
+```
+
+Redacted render output is diagnostic, not deployable input or a complete config
+digest. It can still identify your environment. Keep secrets/state out of Git.
+Only after recording the enabled-service acceptance results, and confirming
+the configured retention policy and ownership, tear down with the same config:
+
+```bash
+quartz clean --config "$CONFIG" --yes </dev/null
+```
+
+In PowerShell, use cmd's null-input redirection for the equivalent native command:
+`cmd /c 'quartz install --config "C:\work\isolated-quartz.yaml" --yes <NUL'`
+(replace `install` with `clean` only after acceptance).
+`login` generates kubeconfig; it does not sign a user into application SSO.
+Retain the backend and local working directory on failure. Independently
+inventory owned cloud resources after clean; never delete state to hide orphans.
+Native local-state CI covers all supported operating systems; full AWS lifecycle
+evidence from Linux does not establish equivalent macOS/Windows cloud coverage.
 
 ---
 
@@ -398,6 +451,13 @@ destroy:
 
 See the included [samples](./docs/samples/) for more details.
 
+OIDC stage checks honor explicit `core.applications.<app>.disabled: true`:
+Quartz logs a skip without resolving that application's credentials or
+contacting its token endpoint. Re-enabling the application restores the check.
+This applies after directory-defined and inline-only check groups are merged.
+An absent application setting is not a disablement; enabled and unspecified
+applications still require valid credentials and a successful token exchange.
+
 ---
 
 ## 🧪 Development
@@ -418,11 +478,20 @@ See the included [samples](./docs/samples/) for more details.
    mise install
    ```
 
-3. Build the application:
+3. Build locally without release-signing credentials:
 
    ```bash
-   mise run build
+   mkdir -p bin
+   mise exec -- go build -o ./bin/quartz ./cmd/quartz
+   ./bin/quartz --version
    ```
+
+   On Windows, use `./bin/quartz.exe` as the output/executable path.
+   This development build does not embed release version metadata.
+   `mise run build` uses GoReleaser, including binary signing, and currently
+   requires a configured private GPG key even for snapshots. It is not the
+   credential-free contributor build path. Do not copy release signing keys to
+   a development machine to work around that requirement.
 
 ### Running Tests
 

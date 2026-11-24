@@ -2669,6 +2669,13 @@ func isRetryableApplyError(errStr string) bool {
 			return true
 		}
 	}
+	// The AWS provider reads repository tags immediately after CreateRepository.
+	// ECR is eventually consistent and can briefly answer RepositoryNotFoundException
+	// for the repository it just created. OpenTofu records that repository as
+	// tainted, so a re-apply replaces the empty repository idempotently.
+	if strings.Contains(errStr, "listing tags for ECR") && strings.Contains(errStr, "RepositoryNotFoundException") {
+		return true
+	}
 	return false
 }
 

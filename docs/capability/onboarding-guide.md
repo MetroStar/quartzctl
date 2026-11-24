@@ -20,7 +20,8 @@ For CLI development:
 ```bash
 cd quartzctl
 mise install
-mise run build
+mkdir -p bin
+mise exec -- go build -o ./bin/quartz ./cmd/quartz
 ./bin/quartz --version
 ```
 
@@ -140,7 +141,7 @@ quartz install
 For CI or unattended use:
 
 ```bash
-quartz install --yes
+quartz install --config /absolute/path/to/isolated-quartz.yaml --yes </dev/null
 ```
 
 If a stage fails after a transient issue, re-run:
@@ -154,6 +155,13 @@ To resume from a known stage:
 ```bash
 quartz install --resume-from charts --yes
 ```
+
+Use the same explicit config, isolated `tmp`/backend and verified AWS identity
+for install, resume, readiness and clean. The example above uses POSIX null
+input; see the [native lifecycle examples](../../README.md#unattended-lifecycle)
+for Windows. Bedrock is the default and does not wait for local models.
+An approved Ollama profile requires `--wait-for-models`.
+`quartz check` is preflight, not proof of Bedrock entitlement or full acceptance.
 
 ## 7. Validate
 

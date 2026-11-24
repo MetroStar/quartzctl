@@ -8,10 +8,12 @@ Commands assume you are in the target project root with `quartz.yaml` present. U
 
 ```bash
 quartz check
-quartz render --out ./out/quartz.generated.yaml
+quartz render --redacted --out ./out/quartz.redacted.yaml
 ```
 
 Review the rendered file for expected `name`, `dns.domain`, provider settings, stage ids, and stage paths.
+Redacted output is diagnostic, not deployable configuration. It is not anonymized;
+review it before sharing. Use an explicit `--config` for isolated lifecycle runs.
 
 ## Procedure 2 - Run Or Resume A Full Install
 
